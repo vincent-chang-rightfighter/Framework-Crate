@@ -45,6 +45,8 @@ pub enum Message {
     FanDutyChanged(u32),
     FanCurvePointTempChanged(usize, u32),
     FanCurvePointDutyChanged(usize, u32),
+    FanCurvePointAdd,
+    FanCurvePointRemove(usize),
     FanCurvePollMsChanged(u64),
     FanCurveHysteresisChanged(u32),
     FanCurveRateLimitChanged(u32),
@@ -425,6 +427,43 @@ impl App {
                     if let Some(ref mut curve) = cfg.fan.curve {
                         if idx < curve.curve.points.len() {
                             curve.curve.points[idx][1] = duty;
+                        }
+                    }
+                });
+                self.pending_curve_update = true;
+                self.last_curve_edit_ts = Instant::now();
+                self.save_config();
+            }
+            Message::FanCurvePointAdd => {
+                with_write_lock(&self.state.config, |guard| {
+                    let cfg = Arc::make_mut(guard);
+                    if let Some(ref mut curve) = cfg.fan.curve {
+                        const MAX_POINTS: usize = 10;
+                        if curve.curve.points.len() < MAX_POINTS {
+                            let pts = &mut curve.curve.points;
+                            if pts.len() >= 2 {
+                                let last = pts.len() - 1;
+                                let mid_temp = (pts[last][0] + pts[last - 1][0]) / 2;
+                                let mid_duty = (pts[last][1] + pts[last - 1][1]) / 2;
+                                pts.push([mid_temp, mid_duty]);
+                                pts.sort_by_key(|p| p[0]);
+                            } else {
+                                pts.push([50, 50]);
+                            }
+                        }
+                    }
+                });
+                self.pending_curve_update = true;
+                self.last_curve_edit_ts = Instant::now();
+                self.save_config();
+            }
+            Message::FanCurvePointRemove(idx) => {
+                with_write_lock(&self.state.config, |guard| {
+                    let cfg = Arc::make_mut(guard);
+                    if let Some(ref mut curve) = cfg.fan.curve {
+                        const MIN_POINTS: usize = 2;
+                        if curve.curve.points.len() > MIN_POINTS && idx < curve.curve.points.len() {
+                            curve.curve.points.remove(idx);
                         }
                     }
                 });
