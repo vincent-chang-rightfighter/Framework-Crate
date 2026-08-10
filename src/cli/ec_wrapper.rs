@@ -4,6 +4,7 @@ use framework_lib::chromium_ec::CrosEc;
 use framework_lib::chromium_ec::CrosEcDriver;
 use framework_lib::power;
 use framework_lib::smbios;
+use framework_lib::smbios::Platform;
 
 #[derive(Debug, Clone)]
 pub struct ThermalData {
@@ -72,6 +73,74 @@ pub struct EcClient {
     ec: CrosEc,
 }
 
+fn sensor_name_for_index(platform: Option<Platform>, index: usize) -> String {
+    let name = match platform {
+        Some(Platform::IntelGen11) | Some(Platform::IntelGen12) | Some(Platform::IntelGen13) => {
+            match index {
+                0 => "F75303_Local",
+                1 => "F75303_CPU",
+                2 => "F75303_DDR",
+                3 => "Battery",
+                4 => "PECI",
+                5 if matches!(platform, Some(Platform::IntelGen12) | Some(Platform::IntelGen13)) => "F57397_VCCGT",
+                _ => return format!("Sensor {}", index),
+            }
+        }
+        Some(Platform::IntelCoreUltra1) | Some(Platform::IntelCoreUltra3) => {
+            match index {
+                0 => "F75303_Local",
+                1 => "F75303_CPU",
+                2 => "Battery",
+                3 => "F75303_DDR",
+                4 => "PECI",
+                _ => return format!("Sensor {}", index),
+            }
+        }
+        Some(Platform::Framework12IntelGen13) => {
+            match index {
+                0 => "F75303_CPU",
+                1 => "F75303_Skin",
+                2 => "F75303_Local",
+                3 => "Battery",
+                4 => "PECI",
+                5 => "Charger IC",
+                _ => return format!("Sensor {}", index),
+            }
+        }
+        Some(
+            Platform::Framework13Amd7080
+            | Platform::Framework13AmdAi300
+            | Platform::Framework16Amd7080
+            | Platform::Framework16AmdAi300,
+        ) => {
+            let is_16 = matches!(platform, Some(Platform::Framework16Amd7080) | Some(Platform::Framework16AmdAi300));
+            match index {
+                0 => "F75303_Local",
+                1 => "F75303_CPU",
+                2 => "F75303_DDR",
+                3 => "APU",
+                4 if is_16 => "dGPU VR",
+                5 if is_16 => "dGPU VRAM",
+                6 if is_16 => "dGPU AMB",
+                7 if is_16 => "dGPU temp",
+                _ => return format!("Sensor {}", index),
+            }
+        }
+        Some(Platform::FrameworkDesktopAmdAiMax300) => {
+            match index {
+                0 => "F75303_APU",
+                1 => "F75303_DDR",
+                2 => "F75303_AMB",
+                3 => "APU",
+                4 => "Virtual",
+                _ => return format!("Sensor {}", index),
+            }
+        }
+        _ => return format!("Sensor {}", index),
+    };
+    name.to_string()
+}
+
 impl EcClient {
     pub fn new() -> Result<Self, String> {
         let ec = CrosEc::new();
@@ -84,16 +153,15 @@ impl EcClient {
         let mut temps = BTreeMap::new();
         let mut fans = Vec::new();
 
+        let platform = smbios::get_platform();
+
         if let Some(data) = self.ec.read_memory(0x00, 0x0F) {
             for (i, &byte) in data.iter().enumerate() {
                 match byte {
-                    0xFF => continue,
-                    0xFE => continue,
-                    0xFD => continue,
-                    0xFC => continue,
+                    0xFC..=0xFF => continue,
                     _ => {
                         let temp = byte as i32 - 73;
-                        let name = format!("Sensor {}", i);
+                        let name = sensor_name_for_index(platform, i);
                         temps.insert(name, temp);
                     }
                 }
