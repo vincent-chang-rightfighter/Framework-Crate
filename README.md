@@ -1,6 +1,6 @@
 # Framework Control (Windows)
 
-A native desktop GUI for Framework laptop fan control, battery charge limits, and live hardware telemetry. Built with Rust and [Iced](https://iced.rs/) 0.13.
+A native desktop GUI for Framework laptop fan control, battery charge limits, and live hardware telemetry. Built with Rust and [Iced](https://iced.rs/) 0.14, using [`framework_lib`](https://crates.io/crates/framework_lib) for direct EC hardware access.
 
 Inspired by [framework-control](https://github.com/ozturkkl/framework-control) by [ozturkkl](https://github.com/ozturkkl).
 
@@ -11,39 +11,13 @@ Inspired by [framework-control](https://github.com/ozturkkl/framework-control) b
 - **Live Telemetry** — Real-time temperature chart (30s sliding window), per-sensor display with colored indicators, fan RPM in header
 - **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card and USB-C port detection
 - **About Page** — Hardware info (CPU, RAM, Display, BIOS) and software settings (poll rate, refresh interval)
-- **Auto-download** — Downloads `framework_tool` from [FrameworkComputer/framework-system](https://github.com/FrameworkComputer/framework-system) when not found locally, with SHA256 verification
-
-### Expansion Card Identification
-
-Detects expansion card type via USB-C PD port status (`--pdports`) with state history tracking to distinguish USB-A cards from USB devices plugged into USB-C cards.
-
-**Identification Logic:**
-
-| Current Port State | History Check | Identification |
-|-------------------|---------------|----------------|
-| DP Alt Mode = Yes | — | DP/HDMI Expansion Card |
-| Source + Dfp + no PD | Previously seen both Sink+Ufp and Source+Dfp for this port | USB-C Expansion Card (device plugged/unplugged) |
-| Source + Dfp + no PD | Stable for ≥2 consecutive polls (only Source+Dfp seen) | USB-A Expansion Card |
-| Source + Dfp + no PD | Unstable (<2 consecutive polls) | USB Device (newly connected) |
-| Sink + Ufp + no PD | — | USB-C Expansion Card (idle) |
-| Other states | — | USB-C Port |
-
-**State History Tracking:**
-
-The system maintains a history of the last 3 PD port states to improve detection accuracy:
-
-- **USB-A vs USB Device**: A real USB-A Expansion Card consistently shows `Source + Dfp`. A USB device plugged into a USB-C card initially shows `Source + Dfp` but the history reveals the port was previously `Sink + Ufp` (idle), identifying it as a USB-C card with a connected device.
-
-- **Stability threshold**: Requires 2+ consecutive identical states before classifying as USB-A Expansion Card, preventing false positives from transient connections.
-
-DP/HDMI and Audio expansion card firmware versions are displayed via `--dp-hdmi-info` / `--audio-card-info`.
+- **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit)
 
 ## Requirements
 
 - **Platform**: Intel Core Ultra Series 1 (Meteor Lake) — only tested and supported on this platform
 - Windows 10/11
-- Administrator privileges (required by `framework_tool` for EC access)
-- `framework_tool` — auto-downloaded on first run, or place `framework_tool.exe` next to the binary
+- Administrator privileges (required for EC access)
 
 ## Build
 
@@ -62,22 +36,51 @@ cargo run --release
 
 ```
 src/
-  main.rs          — Iced application, UI layout, message handling
-  types.rs         — Config structs, FanControlMode, CurveConfig, curve_full_points
-  config.rs        — TOML config load/save (atomic write via tmp+rename)
-  temp_chart.rs    — Canvas-based temperature line chart
-  curve_canvas.rs  — Canvas-based fan curve visualization
-  system_info.rs   — Windows API FFI (cpuid CPU, GlobalMemoryStatusEx RAM, RtlGetVersion OS, GetSystemMetrics display, Registry)
+  main.rs           — Iced 0.14 application entry point, boot function
+  app.rs            — AppState, App struct, Message handlers, tick_task
+  views.rs          — UI layout (sensors, fan control, battery, misc, settings)
+  types.rs          — Config structs, FanControlMode, CurveConfig, validation
+  style.rs          — Colors, fonts, layout constants
+  config.rs         — TOML config load/save (atomic write via tmp+rename)
+  config_save_task.rs — Debounced config save (100ms) with battery apply
+  background_task.rs — EC polling loop, fan control, expansion/PD scans
+  temp_chart.rs     — Canvas-based temperature line chart (30s history)
+  curve_canvas.rs   — Canvas-based fan curve visualization
+  fan_control.rs    — CurveStepper, rate limiting, duty calculation
+  system_info.rs    — Windows API FFI (CPU, RAM, OS, display, tray)
+  util.rs           — Time utilities
   cli/
+    ec_wrapper.rs   — EcClient wrapper around framework_lib's CrosEc
     mod.rs
-    framework_tool.rs        — CLI wrapper, download with SHA256 verification
-    framework_tool_parser.rs — Parse thermal/power/versions/pdports/expansion card output
+  tray/
+    mod.rs          — TrayManager (Windows tray icon)
+    event.rs        — TrayIcon events
+    message_pump.rs — Dedicated message pump thread for tray icon
 ```
 
-- **GUI ↔ Hardware**: Iced UI → `framework_tool` CLI subprocess → EC firmware
+### Data Flow
+
+```
+framework_lib (CrosEc) → background_task → Arc<RwLock> → UI (view reads)
+                                  ↕
+                           config_save_task → config.toml
+```
+
+- **Hardware access**: `framework_lib` crate calls EC directly via kernel driver (no subprocess)
 - **Config**: `dirs::config_dir() / framework-control/config.toml`
-- **Data flow**: Background tokio task polls CLI, writes to `Arc<RwLock>`, UI reads synchronously
-- **State tracking**: PD port history (`VecDeque<Vec<UsbCPort>>`) stores last 3 poll results for expansion card identification
+- **Background polling**: tokio task on LP-E core, 200ms–2s interval (idle slowdown)
+- **UI refresh**: self-rescheduling tick (50–1000ms), idle/hidden slows to 1s/5s
+- **Lock strategy**: `Arc<RwLock<Arc<T>>>` for shared state, narrow lock scope (<1µs)
+
+### Performance Optimizations
+
+- `EcClient` shared via `Arc` — no hardware re-init on clone
+- `ThermalData.temps` as `Arc<BTreeMap>` — history samples share data
+- `SensorCache.sorted/colors` as `Arc<Vec>` — zero-copy per UI tick
+- Config lock held <1µs (reads only needed fields, drops immediately)
+- `curve_full_points` debounced (100ms after last slider edit)
+- PD port history pushed only on data change
+- Fan curve keeps running during idle (temperature response)
 
 ## Configuration
 
@@ -115,11 +118,12 @@ selected_sensors = []
 ## Known Limitations
 
 - **Platform-specific**: Currently only supports Intel Core Ultra Series 1 (Meteor Lake) Framework laptops. CPU identification uses x86_64 CPUID intrinsics.
-- **Download verification**: When `PINNED_SHA256` is not set (default), SHA256 verification relies solely on the GitHub API-provided digest. For maximum security, set `PINNED_SHA256` in `src/cli/framework_tool.rs` to a known-good hash.
+- **EC driver**: Requires the Framework EC kernel driver to be installed for `framework_lib` to communicate with hardware.
 
 ## Third-Party Dependencies
 
-This application uses [`framework_tool`](https://github.com/FrameworkComputer/framework-system) by Framework Computer Inc. for all hardware interactions (EC access, fan control, battery management, sensor readings). `framework_tool` is licensed under the [BSD 3-Clause License](https://github.com/FrameworkComputer/framework-system/blob/main/LICENSE.md).
+- [`framework_lib`](https://crates.io/crates/framework_lib) — Framework EC hardware abstraction layer
+- [`iced`](https://crates.io/crates/iced) — Cross-platform GUI framework for Rust
 
 ## Icon Attribution
 
