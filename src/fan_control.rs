@@ -100,25 +100,25 @@ mod tests {
 
     #[test]
     fn calculate_duty_from_curve_below_min() {
-        let points = types::curve_full_points(&[[40, 0], [60, 40], [75, 80], [85, 100]]);
-        assert_eq!(calculate_duty_from_curve(30, &points), 0);
+        let points = types::curve_full_points(&[[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]]);
+        assert_eq!(calculate_duty_from_curve(20, &points), 0);
     }
 
     #[test]
     fn calculate_duty_from_curve_at_point() {
-        let points = types::curve_full_points(&[[40, 0], [60, 40], [75, 80], [85, 100]]);
+        let points = types::curve_full_points(&[[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]]);
         assert_eq!(calculate_duty_from_curve(60, &points), 40);
     }
 
     #[test]
     fn calculate_duty_from_curve_interpolated() {
-        let points = types::curve_full_points(&[[40, 0], [60, 40], [75, 80], [85, 100]]);
+        let points = types::curve_full_points(&[[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]]);
         assert_eq!(calculate_duty_from_curve(67, &points), 59);
     }
 
     #[test]
     fn calculate_duty_from_curve_above_max() {
-        let points = types::curve_full_points(&[[40, 0], [60, 40], [75, 80], [85, 100]]);
+        let points = types::curve_full_points(&[[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]]);
         assert_eq!(calculate_duty_from_curve(90, &points), 100);
     }
 
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn curve_stepper_first_return() {
         let mut stepper = CurveStepper::new();
-        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
         let full = types::curve_full_points(&points);
         let cfg = types::CurveConfig {
             sensors: vec![],
@@ -166,13 +166,13 @@ mod tests {
             rate_limit_down_pct_per_step: None,
         };
         let result = stepper.next(50, &cfg, &full);
-        assert_eq!(result, Some(20));
+        assert_eq!(result, Some(27));
     }
 
     #[test]
     fn curve_stepper_no_change_returns_none() {
         let mut stepper = CurveStepper::new();
-        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
         let full = types::curve_full_points(&points);
         let cfg = types::CurveConfig {
             sensors: vec![],
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn curve_stepper_rate_limited() {
         let mut stepper = CurveStepper::new();
-        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
         let full = types::curve_full_points(&points);
         let cfg = types::CurveConfig {
             sensors: vec![],
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn curve_stepper_hysteresis_suppresses_small_drop() {
         let mut stepper = CurveStepper::new();
-        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
         let full = types::curve_full_points(&points);
         let cfg = types::CurveConfig {
             sensors: vec![],
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn curve_stepper_hysteresis_allows_large_drop() {
         let mut stepper = CurveStepper::new();
-        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
         let full = types::curve_full_points(&points);
         let cfg = types::CurveConfig {
             sensors: vec![],
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn curve_stepper_hysteresis_zero_always_triggers() {
         let mut stepper = CurveStepper::new();
-        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
         let full = types::curve_full_points(&points);
         let cfg = types::CurveConfig {
             sensors: vec![],
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn curve_stepper_rise_always_triggers() {
         let mut stepper = CurveStepper::new();
-        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
         let full = types::curve_full_points(&points);
         let cfg = types::CurveConfig {
             sensors: vec![],
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn curve_stepper_with_last_duty_restores_state() {
         let mut stepper = CurveStepper::with_last_duty(50);
-        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
         let full = types::curve_full_points(&points);
         let cfg = types::CurveConfig {
             sensors: vec![],
@@ -302,7 +302,7 @@ mod tests {
     #[test]
     fn curve_stepper_reset_clears_state() {
         let mut stepper = CurveStepper::new();
-        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
         let full = types::curve_full_points(&points);
         let cfg = types::CurveConfig {
             sensors: vec![],
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn curve_stepper_separate_down_rate() {
         let mut stepper = CurveStepper::new();
-        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
         let full = types::curve_full_points(&points);
         let cfg = types::CurveConfig {
             sensors: vec![],

@@ -127,7 +127,7 @@ pub struct GlobalCurveConfig {
 }
 
 fn default_points() -> Vec<[u32; 2]> {
-    vec![[40, 0], [60, 40], [75, 80], [85, 100]]
+    vec![[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]]
 }
 fn default_poll_ms() -> u64 {
     500

@@ -438,7 +438,6 @@ fn view_fan_control(app: &App) -> Element<'_, Message> {
 
                 content = content.push(text("Curve Points (Temp C -> Duty %)").size(FONT_SECTION));
 
-                let pts_len = curve.curve.points.len();
                 for (idx, point) in curve.curve.points.iter().enumerate() {
                     let temp = point[0];
                     let duty = point[1];
@@ -449,15 +448,6 @@ fn view_fan_control(app: &App) -> Element<'_, Message> {
                                 text("Temp:").size(FONT_BODY),
                                 iced::widget::slider(1..=99, temp, move |v| Message::FanCurvePointTempChanged(idx, v)),
                                 text(format!("{}°C", temp)).size(FONT_BODY),
-                                space::horizontal(),
-                                if pts_len > 2 {
-                                    button(text("x").size(FONT_SMALL))
-                                        .on_press(Message::FanCurvePointRemove(idx))
-                                        .style(btn_style).padding(2)
-                                } else {
-                                    button(text("x").size(FONT_SMALL))
-                                        .style(btn_style).padding(2)
-                                },
                             ].spacing(4).align_y(iced::Alignment::Center),
                             row![
                                 space::horizontal().width(20),
@@ -466,14 +456,6 @@ fn view_fan_control(app: &App) -> Element<'_, Message> {
                                 text(format!("{}%", duty)).size(FONT_BODY),
                             ].spacing(4).align_y(iced::Alignment::Center),
                         ]
-                    );
-                }
-
-                if pts_len < 10 {
-                    content = content.push(
-                        button(text("+ Add Point").size(FONT_BODY))
-                            .on_press(Message::FanCurvePointAdd)
-                            .style(btn_style)
                     );
                 }
 
