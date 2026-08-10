@@ -1,6 +1,6 @@
 # Framework Control (Windows)
 
-A native desktop GUI for Framework laptop fan control, battery charge limits, and live hardware telemetry. Built with Rust and [Iced](https://iced.rs/) 0.14, using [`framework_lib`](https://crates.io/crates/framework_lib) for direct EC hardware access.
+A native desktop GUI for Framework laptop fan control, battery charge limits, and live hardware telemetry. Built with Rust and [Iced](https://iced.rs/) 0.14, using [`framework_lib`](https://github.com/FrameworkComputer/framework-system) for direct EC hardware access.
 
 Inspired by [framework-control](https://github.com/ozturkkl/framework-control) by [ozturkkl](https://github.com/ozturkkl).
 
@@ -122,7 +122,7 @@ selected_sensors = []
 
 ## Third-Party Dependencies
 
-- [`framework_lib`](https://crates.io/crates/framework_lib) — Framework EC hardware abstraction layer
+- [`framework_lib`](https://github.com/FrameworkComputer/framework-system) — Framework EC hardware abstraction layer (from [framework-system](https://github.com/FrameworkComputer/framework-system))
 - [`iced`](https://crates.io/crates/iced) — Cross-platform GUI framework for Rust
 
 ## Icon Attribution
