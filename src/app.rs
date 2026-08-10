@@ -213,7 +213,7 @@ impl App {
             closing_window_id: None,
             quit_duty_value: 45,
             system_info: SystemInfo {
-                header_device_name: "Framework Control".to_string(),
+                header_device_name: "Framework Crate".to_string(),
                 header_info_text: String::new(),
                 cpu, mem, os, screen, refresh_rate
             },
@@ -307,7 +307,7 @@ impl App {
                 };
 
                 if !self.tray_initialized {
-                    if let Some(hwnd) = system_info::find_window_by_title("Framework Control") {
+                    if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
                         self.tray.init(hwnd);
                         self.tray_initialized = true;
                         tracing::info!("Tray initialized with HWND: {}", hwnd);
@@ -322,7 +322,7 @@ impl App {
                         self.last_hwnd_check_ts = now_ms;
                         if !system_info::is_window(self.tray.hwnd()) {
                             tracing::warn!("HWND {} invalid, reinitializing tray", self.tray.hwnd());
-                            if let Some(hwnd) = system_info::find_window_by_title("Framework Control") {
+                            if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
                                 self.tray.reinit(hwnd);
                                 self.tray.show_icon_async();
                             } else {
@@ -650,7 +650,7 @@ impl App {
             Message::MinimizeToTray => {
                 tracing::info!("MinimizeToTray: tray_initialized={}", self.tray_initialized);
                 if !self.tray_initialized {
-                    if let Some(hwnd) = system_info::find_window_by_title("Framework Control") {
+                    if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
                         tracing::info!("Found window HWND: {}", hwnd);
                         self.tray.init(hwnd);
                         self.tray_initialized = true;
@@ -770,7 +770,7 @@ impl App {
         let versions = read_lock(&self.state.versions);
         self.system_info.header_device_name = versions.as_ref().as_ref()
             .and_then(|v| v.mainboard_type.as_deref())
-            .unwrap_or("Framework Control")
+            .unwrap_or("Framework Crate")
             .to_owned();
 
         let bios = versions.as_ref().as_ref()

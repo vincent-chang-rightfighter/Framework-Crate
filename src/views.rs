@@ -31,7 +31,7 @@ fn warning_banner(msg: String) -> Element<'static, Message> {
 pub fn view_main(app: &App) -> Element<'_, Message> {
     if let Some(ref err) = app.startup_error {
         let mut content = column![].spacing(8).padding(20);
-        content = content.push(text("Framework Control").size(20));
+        content = content.push(text("Framework Crate").size(20));
         content = content.push(rule::horizontal(1));
         content = content.push(text(err.as_str()).size(FONT_BODY));
         content = content.push(rule::horizontal(1));
@@ -44,7 +44,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
 
     if !app.init_complete {
         let content = column![
-            text("Framework Control").size(20),
+            text("Framework Crate").size(20),
             rule::horizontal(1),
             text("Connecting to hardware...").size(FONT_BODY),
         ].spacing(8).padding(20);
@@ -197,7 +197,7 @@ fn view_quit_warning(app: &App) -> Element<'_, Message> {
     let set_duty = app.quit_duty_value;
 
     let mut content = column![].spacing(12).padding(20);
-    content = content.push(text("Framework Control").size(20));
+    content = content.push(text("Framework Crate").size(20));
     content = content.push(rule::horizontal(1));
     content = content.push(text("Fan is in manual mode").size(FONT_BODY));
     content = content.push(text(format!("Current duty: {}%", current_duty)).size(FONT_BODY));

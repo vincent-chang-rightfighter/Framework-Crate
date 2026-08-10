@@ -62,7 +62,7 @@ pub fn save(config: &Config) -> Result<(), String> {
     let tmp_path = path.with_extension(unique_tmp_extension());
     let body = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
     let content = format!(
-        "# Framework Control configuration\n\
+        "# Framework Crate configuration\n\
          # Edit values below; the app validates on load.\n\
          #\n\
          # [fan]\n\
@@ -237,7 +237,7 @@ mod tests {
 
         // Serialize with header like save() does
         let body = toml::to_string_pretty(&cfg).unwrap();
-        let content = format!("# Framework Control configuration\n{}\n", body);
+        let content = format!("# Framework Crate configuration\n{}\n", body);
         std::fs::write(&path, &content).unwrap();
 
         // Load via toml parse (same logic as load(); TOML ignores # comments)

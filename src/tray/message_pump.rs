@@ -222,7 +222,7 @@ fn message_pump_loop(
                     if !tray_icon_loaded {
                         if let Some(icon) = hicon {
                             let ok = system_info::shell_notify_add(
-                                tray_hwnd as isize, icon, "Framework Control", WM_TRAYICON,
+                                tray_hwnd as isize, icon, "Framework Crate", WM_TRAYICON,
                             );
                             tray_icon_loaded = ok;
                             let _ = icon_ready_tx.send(ok);

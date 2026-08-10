@@ -40,7 +40,7 @@ fn main() {
     .expect("Failed to load window icon");
 
     fn app_title(_app: &App) -> String {
-        "Framework Control".to_string()
+        "Framework Crate".to_string()
     }
 
     fn app_theme(_app: &App) -> iced::Theme {

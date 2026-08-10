@@ -1,4 +1,4 @@
-# Framework Control (Windows)
+# Framework Crate (Windows)
 
 A native desktop GUI for Framework laptop fan control, battery charge limits, and live hardware telemetry. Built with Rust and [Iced](https://iced.rs/) 0.14, using [`framework_lib`](https://github.com/FrameworkComputer/framework-system) for direct EC hardware access.
 

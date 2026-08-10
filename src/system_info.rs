@@ -532,7 +532,7 @@ pub fn show_tray_menu(hwnd: isize, x: i32, y: i32) -> Option<u32> {
         return None;
     }
 
-    let show_text = to_wide("Show Framework Control");
+    let show_text = to_wide("Show Framework Crate");
     let quit_text = to_wide("Exit");
 
     // SAFETY: AppendMenuW adds items to the menu. Menu is valid from CreatePopupMenu.
