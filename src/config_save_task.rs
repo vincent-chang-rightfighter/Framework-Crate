@@ -6,20 +6,16 @@ use tracing::warn;
 
 use crate::app::{AppState, read_lock};
 use crate::background_task::pin_to_slowest_core;
-use crate::types::{Config, SettingU8, SettingF32};
+use crate::types::{Config, SettingU8};
 
 /// Debounce window: only save after this many ms of no further changes.
 /// Prevents redundant disk writes during rapid slider drags.
 const DEBOUNCE_MS: u64 = 100;
 
-type BatteryKey = (Option<SettingU8>, Option<SettingF32>, Option<u8>);
+type BatteryKey = Option<SettingU8>;
 
 fn battery_key(cfg: &Config) -> BatteryKey {
-    (
-        cfg.battery.charge_limit_max_pct,
-        cfg.battery.charge_rate_c,
-        cfg.battery.charge_rate_soc_threshold_pct,
-    )
+    cfg.battery.charge_limit_max_pct
 }
 
 async fn apply_battery_settings(cfg: &Config, state: &AppState) {
@@ -30,17 +26,6 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) {
         let ec_clone = ec.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.charge_limit_set(0, pct)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
             warn!("Failed to set charge limit: {}", e);
-        }
-    }
-    if let Some(ref rate) = cfg.battery.charge_rate_c {
-        let (r, soc) = if rate.enabled {
-            (rate.value, cfg.battery.charge_rate_soc_threshold_pct.map(|s| s as f32))
-        } else {
-            (1.0, None)
-        };
-        let ec_clone = ec.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.charge_rate_limit_set(r, soc)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
-            warn!("Failed to set charge rate: {}", e);
         }
     }
 }
@@ -151,7 +136,7 @@ mod tests {
     fn battery_key_default() {
         let cfg = default_config();
         let key = battery_key(&cfg);
-        assert_eq!(key, (None, None, None));
+        assert_eq!(key, None);
     }
 
     #[test]
@@ -159,34 +144,16 @@ mod tests {
         let mut cfg = default_config();
         cfg.battery.charge_limit_max_pct = Some(SettingU8 { enabled: true, value: 80 });
         let key = battery_key(&cfg);
-        assert_eq!(key.0, Some(SettingU8 { enabled: true, value: 80 }));
-        assert_eq!(key.1, None);
-        assert_eq!(key.2, None);
-    }
-
-    #[test]
-    fn battery_key_with_all_fields() {
-        let mut cfg = default_config();
-        cfg.battery.charge_limit_max_pct = Some(SettingU8 { enabled: false, value: 100 });
-        cfg.battery.charge_rate_c = Some(SettingF32 { enabled: true, value: 0.5 });
-        cfg.battery.charge_rate_soc_threshold_pct = Some(80);
-        let key = battery_key(&cfg);
-        assert_eq!(key.0, Some(SettingU8 { enabled: false, value: 100 }));
-        assert_eq!(key.1, Some(SettingF32 { enabled: true, value: 0.5 }));
-        assert_eq!(key.2, Some(80));
+        assert_eq!(key, Some(SettingU8 { enabled: true, value: 80 }));
     }
 
     #[test]
     fn battery_key_equal_for_same_config() {
         let mut cfg1 = default_config();
         cfg1.battery.charge_limit_max_pct = Some(SettingU8 { enabled: true, value: 75 });
-        cfg1.battery.charge_rate_c = Some(SettingF32 { enabled: true, value: 0.8 });
-        cfg1.battery.charge_rate_soc_threshold_pct = Some(50);
 
         let mut cfg2 = default_config();
         cfg2.battery.charge_limit_max_pct = Some(SettingU8 { enabled: true, value: 75 });
-        cfg2.battery.charge_rate_c = Some(SettingF32 { enabled: true, value: 0.8 });
-        cfg2.battery.charge_rate_soc_threshold_pct = Some(50);
 
         assert_eq!(battery_key(&cfg1), battery_key(&cfg2));
     }

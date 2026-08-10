@@ -16,8 +16,6 @@ const RATE_LIMIT_MIN: u32 = 1;
 const RATE_LIMIT_MAX: u32 = 100;
 const CHARGE_LIMIT_MIN: u8 = 25;
 const CHARGE_LIMIT_MAX: u8 = 100;
-pub const CHARGE_RATE_MIN: f32 = 0.05;
-pub const CHARGE_RATE_MAX: f32 = 1.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Config {
@@ -55,9 +53,6 @@ impl Config {
         // Battery settings
         if let Some(ref mut limit) = self.battery.charge_limit_max_pct {
             limit.value = limit.value.clamp(CHARGE_LIMIT_MIN, CHARGE_LIMIT_MAX);
-        }
-        if let Some(ref mut rate) = self.battery.charge_rate_c {
-            rate.value = rate.value.clamp(CHARGE_RATE_MIN, CHARGE_RATE_MAX);
         }
     }
 }
@@ -181,20 +176,10 @@ pub struct SettingU8 {
     pub value: u8,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
-pub struct SettingF32 {
-    pub enabled: bool,
-    pub value: f32,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct BatteryConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub charge_limit_max_pct: Option<SettingU8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub charge_rate_c: Option<SettingF32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub charge_rate_soc_threshold_pct: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

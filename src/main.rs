@@ -29,7 +29,7 @@ fn main() {
                 tracing_subscriber::EnvFilter::try_from_default_env()
                     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
             )
-            .with_writer(std::io::sink)
+            .with_writer(std::io::stderr)
             .init();
     }
 
@@ -152,8 +152,6 @@ mod tests {
             },
             battery: types::BatteryConfig {
                 charge_limit_max_pct: Some(types::SettingU8 { enabled: true, value: 80 }),
-                charge_rate_c: Some(types::SettingF32 { enabled: true, value: 0.5 }),
-                charge_rate_soc_threshold_pct: Some(80),
             },
             telemetry: types::TelemetryConfig {
                 poll_ms: 1000,
@@ -282,18 +280,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn charge_rate_soc_threshold_changes_value() {
-        let _guard = app_config_lock();
-        let (mut app, _) = App::new();
-        let _ = app.update(Message::ChargeRateSocThresholdChanged(80));
-        let cfg = read_lock(&app.state.config);
-        assert_eq!(cfg.battery.charge_rate_soc_threshold_pct, Some(80));
-        let _ = app.update(Message::ChargeRateSocThresholdChanged(0));
-        let cfg = read_lock(&app.state.config);
-        assert_eq!(cfg.battery.charge_rate_soc_threshold_pct, None);
-    }
-
-    #[tokio::test]
     async fn poll_rate_changes_config_and_atomic() {
         let _guard = app_config_lock();
         let (mut app, _) = App::new();
@@ -329,22 +315,6 @@ mod tests {
         cfg.battery.charge_limit_max_pct = Some(types::SettingU8 { enabled: true, value: 10 });
         cfg.validate();
         assert_eq!(cfg.battery.charge_limit_max_pct.unwrap().value, 25);
-    }
-
-    #[test]
-    fn validate_battery_charge_rate_clamps_high() {
-        let mut cfg = types::Config::default();
-        cfg.battery.charge_rate_c = Some(types::SettingF32 { enabled: true, value: 5.0 });
-        cfg.validate();
-        assert!((cfg.battery.charge_rate_c.unwrap().value - 1.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn validate_battery_charge_rate_clamps_low() {
-        let mut cfg = types::Config::default();
-        cfg.battery.charge_rate_c = Some(types::SettingF32 { enabled: true, value: 0.01 });
-        cfg.validate();
-        assert!((cfg.battery.charge_rate_c.unwrap().value - 0.05).abs() < f32::EPSILON);
     }
 
     // --- Integration tests: Quit flow ---

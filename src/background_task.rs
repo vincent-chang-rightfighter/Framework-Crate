@@ -305,12 +305,10 @@ pub fn spawn(state: AppState) {
                         }
                     }
 
-                    // Expansion / PD scans and version refresh run on fixed
-                    // wall-clock intervals, so hotplug stays detectable
-                    // even while the user is idle. Skip expansion scans
-                    // entirely when idle to save subprocess spawns.
+                    // Expansion / PD scans run on fixed wall-clock intervals
+                    // so hotplug is always detectable.
                     now_ms = crate::util::current_time_ms();
-                    if !is_idle && now_ms.saturating_sub(last_expansion_scan) >= EXPANSION_SCAN_MS {
+                    if now_ms.saturating_sub(last_expansion_scan) >= EXPANSION_SCAN_MS {
                         last_expansion_scan = now_ms;
                         let ec_clone = Arc::clone(&ec);
                         if let Ok(ports) = tokio::task::spawn_blocking(move || ec_clone.pd_ports()).await {
@@ -322,8 +320,8 @@ pub fn spawn(state: AppState) {
                                 with_write_lock(&bg_state2.pd_ports, |guard| {
                                     *guard = Arc::new(ports);
                                 });
-                                push_pd_ports_history(&bg_state2.pd_ports, &bg_state2.pd_ports_history);
                             }
+                            push_pd_ports_history(&bg_state2.pd_ports, &bg_state2.pd_ports_history);
                         }
                         let ec_clone = Arc::clone(&ec);
                         if let Ok(cards) = tokio::task::spawn_blocking(move || ec_clone.expansion_cards()).await {

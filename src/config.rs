@@ -26,7 +26,7 @@ fn default_config_dir() -> PathBuf {
     #[cfg(test)]
     {
         // Tests must never touch the real user config.
-        return std::env::temp_dir().join("framework-crate-tests");
+        std::env::temp_dir().join("framework-crate-tests")
     }
     #[cfg(not(test))]
     {
@@ -82,13 +82,9 @@ pub fn save(config: &Config) -> Result<(), String> {
          # selected_sensors = [\"Sensor Name\", ...]\n\
          #\n\
          # [battery]\n\
-         # charge_rate_soc_threshold_pct = 0..100  (optional; 0/absent = no threshold)\n\
          # [battery.charge_limit_max_pct]\n\
          # enabled = true/false\n\
          # value = 25..100\n\
-         # [battery.charge_rate_c]\n\
-         # enabled = true/false\n\
-         # value = 0.05..1.0\n\
          #\n\
          {}\n",
         body
@@ -233,7 +229,6 @@ mod tests {
         cfg.fan.manual = Some(ManualConfig { duty_pct: 75 });
         cfg.telemetry.poll_ms = 1000;
         cfg.battery.charge_limit_max_pct = Some(SettingU8 { enabled: true, value: 80 });
-        cfg.battery.charge_rate_c = Some(SettingF32 { enabled: true, value: 1.5 });
 
         // Serialize with header like save() does
         let body = toml::to_string_pretty(&cfg).unwrap();
@@ -249,9 +244,6 @@ mod tests {
         let blim = loaded.battery.charge_limit_max_pct.unwrap();
         assert!(blim.enabled);
         assert_eq!(blim.value, 80);
-        let brate = loaded.battery.charge_rate_c.unwrap();
-        assert!(brate.enabled);
-        assert!((brate.value - 1.5).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -69,6 +69,107 @@ pub struct UsbCPort {
     pub dp_alt_mode: bool,
 }
 
+// ============================================================================
+// PD port classification helpers (ported from framework-control-windows-Iced)
+// ============================================================================
+
+const DISPLAY_CARD_WATTS_THRESHOLD: f32 = 3.0;
+
+fn role_is(port: &UsbCPort, role: &str) -> bool {
+    port.power_role.as_deref() == Some(role)
+}
+
+fn is_pd_power_input(port: &UsbCPort) -> bool {
+    port.pd_contract && role_is(port, "Sink")
+}
+
+fn is_source_no_pd(port: &UsbCPort) -> bool {
+    !port.dp_alt_mode && role_is(port, "Source") && !port.pd_contract
+}
+
+fn is_sink_no_pd(port: &UsbCPort) -> bool {
+    !port.dp_alt_mode && role_is(port, "Sink") && !port.pd_contract
+}
+
+fn history_has_role(history: &[&Vec<UsbCPort>], port_id: u32, power_role: &str, pd_contract: bool) -> bool {
+    history.iter().any(|h| h.iter().any(|p| p.port == port_id
+        && p.power_role.as_deref() == Some(power_role)
+        && p.pd_contract == pd_contract))
+}
+
+fn same_port_identity(a: &UsbCPort, b: &UsbCPort) -> bool {
+    a.port == b.port
+        && a.pd_contract == b.pd_contract
+        && a.power_role == b.power_role
+        && a.dp_alt_mode == b.dp_alt_mode
+}
+
+pub fn classify_pd_port<'a>(
+    port: &UsbCPort,
+    history: impl IntoIterator<Item = &'a Vec<UsbCPort>>,
+    stable_threshold: usize,
+    display_card_installed: bool,
+) -> &'static str {
+    const MAX_HIST: usize = 3;
+    let empty = Vec::new();
+    let mut hist_buf: [&Vec<UsbCPort>; MAX_HIST] = [&empty; MAX_HIST];
+    let mut hist_len: usize = 0;
+    for h in history {
+        if hist_len < MAX_HIST {
+            hist_buf[hist_len] = h;
+            hist_len += 1;
+        }
+    }
+    let history = &hist_buf[..hist_len];
+
+    tracing::debug!(
+        "[classify] Port {}: role={:?}, pd_contract={}, dp_alt={}, watts={:?}, hist_len={}, display_card={}",
+        port.port, port.power_role, port.pd_contract, port.dp_alt_mode, port.negotiated_watts, hist_len, display_card_installed
+    );
+
+    if is_pd_power_input(port) {
+        tracing::debug!("[classify] Port {} → USB-C Expansion Card (Sink+PD)", port.port);
+        return "USB-C Expansion Card";
+    }
+    if port.dp_alt_mode {
+        tracing::debug!("[classify] Port {} → DP/HDMI Expansion Card (dp_alt)", port.port);
+        return "DP/HDMI Expansion Card";
+    }
+    if port.pd_contract && role_is(port, "Source") {
+        let result = match port.negotiated_watts {
+            Some(w) if w <= DISPLAY_CARD_WATTS_THRESHOLD => "DisplayPort Expansion Card",
+            Some(_) => "HDMI Expansion Card",
+            None => "DP/HDMI Expansion Card",
+        };
+        tracing::debug!("[classify] Port {} → {} (Source+PD, watts={:?})", port.port, result, port.negotiated_watts);
+        return result;
+    }
+    if is_source_no_pd(port) {
+        let has_seen_sink = history_has_role(history, port.port, "Sink", false)
+            || history_has_role(history, port.port, "Sink", true);
+        if has_seen_sink {
+            tracing::debug!("[classify] Port {} → USB-C Expansion Card (Source+noPD, seen Sink)", port.port);
+            return "USB-C Expansion Card";
+        }
+        let stable_count = history.iter()
+            .filter(|h| h.iter().any(|p| same_port_identity(p, port)))
+            .count();
+        tracing::debug!("[classify] Port {} Source+noPD: stable_count={}, threshold={}", port.port, stable_count, stable_threshold);
+        if stable_count >= stable_threshold {
+            tracing::debug!("[classify] Port {} → USB-A Expansion Card (stable Source)", port.port);
+            return "USB-A Expansion Card";
+        }
+        tracing::debug!("[classify] Port {} → USB-C Expansion Card (Source+noPD, pending USB-A check)", port.port);
+        return "USB-C Expansion Card";
+    }
+    if is_sink_no_pd(port) {
+        tracing::debug!("[classify] Port {} → USB-C Expansion Card (Sink+noPD)", port.port);
+        return "USB-C Expansion Card";
+    }
+    tracing::debug!("[classify] Port {} → USB-C Port (fallback)", port.port);
+    "USB-C Port"
+}
+
 pub struct EcClient {
     ec: CrosEc,
 }
@@ -316,43 +417,60 @@ impl EcClient {
             .map_err(|e| format!("Failed to get charge limit: {:?}", e))
     }
 
-    pub fn charge_rate_limit_set(
-        &self,
-        rate_c: f32,
-        soc_threshold_pct: Option<f32>,
-    ) -> Result<(), String> {
-        self.ec
-            .set_charge_rate_limit(rate_c, soc_threshold_pct)
-            .map_err(|e| format!("Failed to set charge rate limit: {:?}", e))
-    }
-
     pub fn pd_ports(&self) -> Vec<UsbCPort> {
+        use framework_lib::chromium_ec::commands::EcRequestGetPdPortState;
+        use framework_lib::chromium_ec::EcRequestRaw;
+
         let mut ports = Vec::new();
-        let pd_infos = power::get_pd_info(&self.ec, 4);
-        for (i, info) in pd_infos.into_iter().enumerate() {
-            if let Ok(info) = info {
-                let role = format!("{:?}", info.role);
-                let data_role = if info.dualrole {
-                    "Dual".to_string()
-                } else {
-                    "Source".to_string()
-                };
-                let negotiated_watts = if info.meas.voltage_max > 0 && info.meas.current_max > 0 {
-                    Some(info.meas.voltage_max as f32 * info.meas.current_max as f32 / 1_000_000.0)
-                } else {
-                    None
-                };
-                let negotiated_text = negotiated_watts.map(|w| format!("{:.1}W", w));
-                ports.push(UsbCPort {
-                    port: i as u32,
-                    pd_contract: info.charging_type != framework_lib::power::UsbChargingType::None,
-                    power_role: Some(role),
-                    negotiated_text,
-                    negotiated_watts,
-                    data_role: Some(data_role),
-                    dp_alt_mode: false,
-                });
-            }
+        for i in 0u8..4 {
+            let info = match (EcRequestGetPdPortState { port: i }).send_command(&self.ec) {
+                Ok(info) => info,
+                Err(_) => continue,
+            };
+            let c_state = info.c_state;
+            let pd_state = info.pd_state;
+            let raw_role = info.power_role;
+            let raw_data = info.data_role;
+            let voltage = info.voltage;
+            let current = info.current;
+            let dp_alt_raw = info.pd_alt_mode_status;
+
+            let power_role = match raw_role {
+                0 => "Sink",
+                1 => "Source",
+                _ => "Unknown",
+            };
+            let data_role = match raw_data {
+                0 => "Ufp",
+                1 => "Dfp",
+                _ => "Disconnected",
+            };
+            let watts_mw = voltage as u32 * current as u32 / 1000;
+            let negotiated_watts = if watts_mw > 0 {
+                Some(watts_mw as f32 / 1000.0)
+            } else {
+                None
+            };
+            let negotiated_text = if voltage > 0 && current > 0 {
+                Some(format!("PD {:.0}W, {:.0}V, {:.2}A", watts_mw as f32 / 1000.0, voltage as f32 / 1000.0, current as f32 / 1000.0))
+            } else {
+                None
+            };
+
+            tracing::debug!(
+                "[pd_ports] Port {}: c_state={}, pd_state={}, role={}, data={}, v={}mV i={}mA dp_alt=0x{:02X}",
+                i, c_state, pd_state, power_role, data_role, voltage, current, dp_alt_raw
+            );
+
+            ports.push(UsbCPort {
+                port: i as u32,
+                pd_contract: pd_state != 0,
+                power_role: Some(power_role.to_string()),
+                negotiated_text,
+                negotiated_watts,
+                data_role: Some(data_role.to_string()),
+                dp_alt_mode: (dp_alt_raw & 0x03) != 0,
+            });
         }
         ports
     }

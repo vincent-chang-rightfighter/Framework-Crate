@@ -50,9 +50,6 @@ pub enum Message {
     FanCurveRateLimitChanged(u32),
     ChargeLimitToggled(bool),
     ChargeLimitChanged(u32),
-    ChargeRateToggled(bool),
-    ChargeRateChanged(f32),
-    ChargeRateSocThresholdChanged(u8),
     ToggleSensorSettings,
     SensorToggled(String, bool),
     PollRateChanged(u64),
@@ -477,32 +474,6 @@ impl App {
                     let cfg = Arc::make_mut(guard);
                     let limit = cfg.battery.charge_limit_max_pct.get_or_insert(crate::types::SettingU8 { enabled: false, value: CHARGE_LIMIT_MIN as u8 });
                     limit.value = value.min(CHARGE_LIMIT_MAX) as u8;
-                });
-                self.save_config();
-            }
-            Message::ChargeRateToggled(enabled) => {
-                with_write_lock(&self.state.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
-                    let rate = cfg.battery.charge_rate_c.get_or_insert(crate::types::SettingF32 { enabled: false, value: CHARGE_RATE_MIN_C });
-                    rate.enabled = enabled;
-                    if rate.value < CHARGE_RATE_MIN_C {
-                        rate.value = CHARGE_RATE_MIN_C;
-                    }
-                });
-                self.save_config();
-            }
-            Message::ChargeRateChanged(value) => {
-                with_write_lock(&self.state.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
-                    let rate = cfg.battery.charge_rate_c.get_or_insert(crate::types::SettingF32 { enabled: false, value: CHARGE_RATE_MIN_C });
-                    rate.value = value.clamp(CHARGE_RATE_MIN_C, CHARGE_RATE_MAX_C);
-                });
-                self.save_config();
-            }
-            Message::ChargeRateSocThresholdChanged(value) => {
-                with_write_lock(&self.state.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
-                    cfg.battery.charge_rate_soc_threshold_pct = if value == 0 { None } else { Some(value) };
                 });
                 self.save_config();
             }

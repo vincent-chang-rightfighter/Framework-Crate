@@ -14,15 +14,6 @@ pub const POLL_RATE_MIN_MS: u32 = 200;
 pub const CHARGE_LIMIT_MIN: u32 = 25;
 /// Maximum battery charge limit (%). Above 100% is invalid per EC spec.
 pub const CHARGE_LIMIT_MAX: u32 = 100;
-/// Minimum charge rate limit slider value (centi-C). Maps to 0.05C.
-pub const CHARGE_RATE_SLIDER_MIN: u32 = 5;
-/// Maximum charge rate limit slider value (centi-C). Maps to 1.00C.
-pub const CHARGE_RATE_SLIDER_MAX: u32 = 100;
-/// Minimum charge rate limit (C). Below 0.05C the EC ignores the value.
-pub const CHARGE_RATE_MIN_C: f32 = crate::types::CHARGE_RATE_MIN;
-/// Maximum charge rate limit (C). 1.0C is a safe upper bound for Framework
-/// batteries; higher values may trigger EC protection.
-pub const CHARGE_RATE_MAX_C: f32 = crate::types::CHARGE_RATE_MAX;
 
 pub const FONT_SECTION: f32 = 14.0;
 pub const FONT_BODY: f32 = 12.0;

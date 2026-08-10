@@ -437,6 +437,7 @@ fn view_fan_control(app: &App) -> Element<'_, Message> {
                 content = content.push(iced::widget::slider(1..=100, rate, Message::FanCurveRateLimitChanged));
 
                 content = content.push(text("Curve Points (Temp C -> Duty %)").size(FONT_SECTION));
+                // TODO: fan curve 控制點佈局需要調整 — 目前垂直堆疊過長，需重新設計 UI 排列
 
                 for (idx, point) in curve.curve.points.iter().enumerate() {
                     let temp = point[0];
@@ -485,26 +486,6 @@ fn view_charge_limit_section(enabled: bool, value: u32) -> Element<'static, Mess
             text(format!("{}%", value)).size(FONT_BODY),
         ].spacing(4),
         iced::widget::slider(CHARGE_LIMIT_MIN..=CHARGE_LIMIT_MAX, value, Message::ChargeLimitChanged),
-    ].spacing(4).into()
-}
-
-fn view_charge_rate_section(rate_enabled: bool, rate_value: f32, soc_threshold: u8) -> Element<'static, Message> {
-    let soc_text = if soc_threshold == 0 { "off".to_string() } else { format!("{}%", soc_threshold) };
-
-    column![
-        row![
-            iced::widget::checkbox(rate_enabled).on_toggle(Message::ChargeRateToggled),
-            text("Rate Limit (C):").size(FONT_BODY),
-            space::horizontal(),
-            text(format!("{:.2}C", rate_value)).size(FONT_BODY),
-        ].spacing(4),
-        iced::widget::slider(CHARGE_RATE_SLIDER_MIN..=CHARGE_RATE_SLIDER_MAX, (rate_value * 100.0) as u32, |v| Message::ChargeRateChanged(v as f32 / 100.0)),
-        row![
-            text("Rate SOC Threshold:").size(FONT_BODY),
-            space::horizontal(),
-            text(soc_text).size(FONT_BODY),
-        ].spacing(4),
-        iced::widget::slider(0..=100, soc_threshold as u32, |v| Message::ChargeRateSocThresholdChanged(v as u8)),
     ].spacing(4).into()
 }
 
@@ -626,13 +607,9 @@ fn view_battery(app: &App) -> Element<'static, Message> {
         ].align_y(iced::Alignment::Center);
 
         let charge_limit = config.battery.charge_limit_max_pct.unwrap_or_default();
-        let rate_limit = config.battery.charge_rate_c.unwrap_or_default();
-        let rate_value = rate_limit.value.clamp(CHARGE_RATE_MIN_C, CHARGE_RATE_MAX_C);
-        let soc_threshold = config.battery.charge_rate_soc_threshold_pct.unwrap_or(0);
 
         let mut content = column![title_row].spacing(6);
         content = content.push(view_charge_limit_section(charge_limit.enabled, charge_limit.value as u32));
-        content = content.push(view_charge_rate_section(rate_limit.enabled, rate_value, soc_threshold));
         content = content.push(view_battery_info(&battery.power_info, charging));
 
         if let Some(verbose) = view_battery_verbose(&battery.power_info, app.show_battery_details) {
@@ -748,30 +725,38 @@ fn kblight_section(app: &App) -> Element<'_, Message> {
 fn ports_section(app: &App) -> Element<'_, Message> {
     let cards = read_lock(&app.state.expansion_cards);
     let ports = read_lock(&app.state.pd_ports);
+    let history = read_lock(&app.state.pd_ports_history);
     let mut content = column![text("Ports & Expansion Cards").size(FONT_SECTION)].spacing(2);
 
     if ports.is_empty() && cards.is_empty() {
         content = content.push(text("None detected").size(FONT_BODY).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
     } else {
+        let dp_card = cards.iter().find(|c| c.name.contains("DisplayPort") || c.name.contains("HDMI"));
         for port in ports.iter() {
-            let display_type = if port.dp_alt_mode {
-                "DP/HDMI"
-            } else if port.pd_contract && port.power_role.as_deref() == Some("Sink") {
-                "USB-C (Charging)"
-            } else if port.pd_contract && port.power_role.as_deref() == Some("Source") {
-                "USB-C (Source)"
+            let card_type = crate::cli::ec_wrapper::classify_pd_port(port, history.iter().map(|a| a.as_ref()), STABLE_THRESHOLD, dp_card.is_some());
+            let is_display_card = card_type == "DisplayPort Expansion Card"
+                || card_type == "HDMI Expansion Card"
+                || card_type == "DP/HDMI Expansion Card";
+            let display_type = if card_type == "DP/HDMI Expansion Card" {
+                dp_card.map(|c| c.name.as_str()).unwrap_or(card_type)
             } else {
-                "USB-C"
+                card_type
             };
 
             let mut row_content = row![
                 text(format!("Port {} ({})", port.port, display_type)).size(FONT_BODY),
             ].align_y(iced::Alignment::Center).spacing(6);
-            if port.dp_alt_mode {
-                row_content = row_content.push(text("DP").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(SENSOR_COLORS[0]) }));
+            if port.dp_alt_mode || is_display_card {
+                if let Some(card) = dp_card {
+                    if let Some(ref fw) = card.active_firmware {
+                        row_content = row_content.push(text(format!("v{}", fw)).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
+                    }
+                } else if port.dp_alt_mode {
+                    row_content = row_content.push(text("DP").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(SENSOR_COLORS[0]) }));
+                }
             }
             content = content.push(row_content);
-            if port.pd_contract {
+            if port.pd_contract && !is_display_card {
                 if let Some(ref level) = port.negotiated_text {
                     let color = if port.power_role.as_deref() == Some("Source") { COLOR_GRAY } else { COLOR_GREEN };
                     content = content.push(
@@ -781,7 +766,7 @@ fn ports_section(app: &App) -> Element<'_, Message> {
             }
         }
 
-        for card in cards.iter() {
+        for card in cards.iter().filter(|c| c.name.contains("Audio")) {
             let mut row_content = row![
                 colored_dot(COLOR_GREEN, 8.0),
                 text(card.name.clone()).size(FONT_BODY),
@@ -808,16 +793,6 @@ mod tests {
     #[test]
     fn view_charge_limit_section_returns_element() {
         let _el = view_charge_limit_section(true, 80);
-    }
-
-    #[test]
-    fn view_charge_rate_section_returns_element() {
-        let _el = view_charge_rate_section(true, 0.5, 80);
-    }
-
-    #[test]
-    fn view_charge_rate_section_soc_zero_shows_off() {
-        let _el = view_charge_rate_section(false, 1.0, 0);
     }
 
     #[test]
