@@ -26,14 +26,14 @@ fn default_config_dir() -> PathBuf {
     #[cfg(test)]
     {
         // Tests must never touch the real user config.
-        return std::env::temp_dir().join("framework-control-tests");
+        return std::env::temp_dir().join("framework-crate-tests");
     }
     #[cfg(not(test))]
     {
         let base = dirs::config_dir()
             .or_else(dirs::data_local_dir)
             .unwrap_or_else(|| PathBuf::from("."));
-        base.join("framework-control")
+        base.join("framework-crate")
     }
 }
 
