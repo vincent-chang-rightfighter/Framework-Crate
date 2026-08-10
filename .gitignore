@@ -1,0 +1,11 @@
+/target
+/target2
+/tools/icon_gen/target
+*.exe
+*.dll
+*.pdb
+*.msi
+.env
+*.log
+../framework-control/
+PLAN_TRAY.md

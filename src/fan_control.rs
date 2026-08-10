@@ -1,0 +1,340 @@
+use crate::types;
+
+pub struct CurveStepper {
+    last_duty: Option<u32>,
+    active_target: Option<u32>,
+    transition_start_temp: i32,
+    anchored: bool,
+}
+
+impl Default for CurveStepper {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CurveStepper {
+    pub fn new() -> Self {
+        Self { last_duty: None, active_target: None, transition_start_temp: 0, anchored: false }
+    }
+    pub fn with_last_duty(duty: u32) -> Self {
+        Self { last_duty: Some(duty), active_target: None, transition_start_temp: 0, anchored: false }
+    }
+    pub fn reset(&mut self) {
+        self.last_duty = None;
+        self.active_target = None;
+        self.anchored = false;
+    }
+    pub fn note_applied(&mut self, duty: u32) {
+        self.last_duty = Some(duty);
+    }
+    pub fn next(&mut self, temp: i32, curve: &types::CurveConfig, full_points: &[[u32; 2]]) -> Option<u32> {
+        if !self.anchored {
+            self.transition_start_temp = temp;
+            self.active_target = None;
+            self.anchored = true;
+        }
+        let curve_target = calculate_duty_from_curve(temp, full_points);
+        match self.active_target {
+            None => {
+                self.active_target = Some(curve_target);
+                self.transition_start_temp = temp;
+            }
+            Some(current) if curve_target != current => {
+                let should_apply = curve_target > current
+                    || curve.hysteresis_c == 0
+                    || temp >= self.transition_start_temp
+                    || temp <= self.transition_start_temp - curve.hysteresis_c as i32;
+                if should_apply {
+                    self.active_target = Some(curve_target);
+                    self.transition_start_temp = temp;
+                }
+            }
+            _ => {}
+        }
+        let tgt = self.active_target?;
+        let next = match self.last_duty {
+            Some(prev) => {
+                let rate = if tgt >= prev {
+                    curve.rate_limit_pct_per_step
+                } else {
+                    curve.rate_limit_down_pct_per_step.unwrap_or(curve.rate_limit_pct_per_step)
+                };
+                apply_rate_limit(prev, tgt, rate)
+            }
+            None => tgt,
+        };
+        if self.last_duty != Some(next) { Some(next) } else { None }
+    }
+}
+
+pub fn calculate_duty_from_curve(temp: i32, full_points: &[[u32; 2]]) -> u32 {
+    debug_assert!(full_points.len() >= 2, "full_points must have at least 2 elements (curve_full_points ensures this)");
+    let temp = temp as f64;
+    for w in full_points.windows(2) {
+        let [p1, p2] = *w else { unreachable!("windows(2) always yields 2-element slices") };
+        let (x1, y1) = (p1[0] as f64, p1[1] as f64);
+        let (x2, y2) = (p2[0] as f64, p2[1] as f64);
+        if temp <= x1 { return y1 as u32; }
+        if temp <= x2 {
+            if x2 == x1 { return y2 as u32; }
+            let ratio = (temp - x1) / (x2 - x1);
+            return (y1 + ratio * (y2 - y1)).round() as u32;
+        }
+    }
+    // Safe default: max fan when no curve defined to prevent overheat
+    100
+}
+
+pub fn apply_rate_limit(current: u32, target: u32, max_change: u32) -> u32 {
+    if target > current {
+        current.saturating_add(max_change).min(target)
+    } else {
+        current.saturating_sub(max_change).max(target)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calculate_duty_from_curve_below_min() {
+        let points = types::curve_full_points(&[[40, 0], [60, 40], [75, 80], [85, 100]]);
+        assert_eq!(calculate_duty_from_curve(30, &points), 0);
+    }
+
+    #[test]
+    fn calculate_duty_from_curve_at_point() {
+        let points = types::curve_full_points(&[[40, 0], [60, 40], [75, 80], [85, 100]]);
+        assert_eq!(calculate_duty_from_curve(60, &points), 40);
+    }
+
+    #[test]
+    fn calculate_duty_from_curve_interpolated() {
+        let points = types::curve_full_points(&[[40, 0], [60, 40], [75, 80], [85, 100]]);
+        assert_eq!(calculate_duty_from_curve(67, &points), 59);
+    }
+
+    #[test]
+    fn calculate_duty_from_curve_above_max() {
+        let points = types::curve_full_points(&[[40, 0], [60, 40], [75, 80], [85, 100]]);
+        assert_eq!(calculate_duty_from_curve(90, &points), 100);
+    }
+
+    #[test]
+    fn calculate_duty_from_curve_empty_uses_full() {
+        let points = types::curve_full_points(&[]);
+        assert_eq!(calculate_duty_from_curve(50, &points), 50);
+    }
+
+    #[test]
+    fn apply_rate_limit_up() {
+        assert_eq!(apply_rate_limit(40, 60, 10), 50);
+    }
+
+    #[test]
+    fn apply_rate_limit_down() {
+        assert_eq!(apply_rate_limit(60, 40, 10), 50);
+    }
+
+    #[test]
+    fn apply_rate_limit_already_at_target() {
+        assert_eq!(apply_rate_limit(50, 50, 10), 50);
+    }
+
+    #[test]
+    fn apply_rate_limit_clamps_to_target() {
+        assert_eq!(apply_rate_limit(40, 100, 50), 90);
+    }
+
+    #[test]
+    fn apply_rate_limit_saturate_sub() {
+        assert_eq!(apply_rate_limit(5, 0, 10), 0);
+    }
+
+    #[test]
+    fn curve_stepper_first_return() {
+        let mut stepper = CurveStepper::new();
+        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let full = types::curve_full_points(&points);
+        let cfg = types::CurveConfig {
+            sensors: vec![],
+            points: points.to_vec(),
+            hysteresis_c: 2,
+            rate_limit_pct_per_step: 10,
+            rate_limit_down_pct_per_step: None,
+        };
+        let result = stepper.next(50, &cfg, &full);
+        assert_eq!(result, Some(20));
+    }
+
+    #[test]
+    fn curve_stepper_no_change_returns_none() {
+        let mut stepper = CurveStepper::new();
+        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let full = types::curve_full_points(&points);
+        let cfg = types::CurveConfig {
+            sensors: vec![],
+            points: points.to_vec(),
+            hysteresis_c: 2,
+            rate_limit_pct_per_step: 100,
+            rate_limit_down_pct_per_step: None,
+        };
+        let first = stepper.next(60, &cfg, &full);
+        assert_eq!(first, Some(40));
+        stepper.note_applied(40);
+        let result = stepper.next(60, &cfg, &full);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn curve_stepper_rate_limited() {
+        let mut stepper = CurveStepper::new();
+        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let full = types::curve_full_points(&points);
+        let cfg = types::CurveConfig {
+            sensors: vec![],
+            points: points.to_vec(),
+            hysteresis_c: 2,
+            rate_limit_pct_per_step: 5,
+            rate_limit_down_pct_per_step: None,
+        };
+        let first = stepper.next(85, &cfg, &full);
+        assert_eq!(first, Some(100));
+        stepper.note_applied(100);
+        let result = stepper.next(30, &cfg, &full);
+        assert_eq!(result, Some(95));
+    }
+
+    #[test]
+    fn curve_stepper_hysteresis_suppresses_small_drop() {
+        let mut stepper = CurveStepper::new();
+        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let full = types::curve_full_points(&points);
+        let cfg = types::CurveConfig {
+            sensors: vec![],
+            points: points.to_vec(),
+            hysteresis_c: 5,
+            rate_limit_pct_per_step: 100,
+            rate_limit_down_pct_per_step: None,
+        };
+        let first = stepper.next(70, &cfg, &full);
+        assert_eq!(first, Some(67));
+        stepper.note_applied(67);
+        let result = stepper.next(68, &cfg, &full);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn curve_stepper_hysteresis_allows_large_drop() {
+        let mut stepper = CurveStepper::new();
+        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let full = types::curve_full_points(&points);
+        let cfg = types::CurveConfig {
+            sensors: vec![],
+            points: points.to_vec(),
+            hysteresis_c: 5,
+            rate_limit_pct_per_step: 100,
+            rate_limit_down_pct_per_step: None,
+        };
+        let first = stepper.next(70, &cfg, &full);
+        assert_eq!(first, Some(67));
+        stepper.note_applied(67);
+        let result = stepper.next(60, &cfg, &full);
+        assert_eq!(result, Some(40));
+    }
+
+    #[test]
+    fn curve_stepper_hysteresis_zero_always_triggers() {
+        let mut stepper = CurveStepper::new();
+        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let full = types::curve_full_points(&points);
+        let cfg = types::CurveConfig {
+            sensors: vec![],
+            points: points.to_vec(),
+            hysteresis_c: 0,
+            rate_limit_pct_per_step: 100,
+            rate_limit_down_pct_per_step: None,
+        };
+        let first = stepper.next(70, &cfg, &full);
+        assert_eq!(first, Some(67));
+        stepper.note_applied(67);
+        let result = stepper.next(69, &cfg, &full);
+        assert_eq!(result, Some(64));
+    }
+
+    #[test]
+    fn curve_stepper_rise_always_triggers() {
+        let mut stepper = CurveStepper::new();
+        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let full = types::curve_full_points(&points);
+        let cfg = types::CurveConfig {
+            sensors: vec![],
+            points: points.to_vec(),
+            hysteresis_c: 5,
+            rate_limit_pct_per_step: 100,
+            rate_limit_down_pct_per_step: None,
+        };
+        let first = stepper.next(60, &cfg, &full);
+        assert_eq!(first, Some(40));
+        stepper.note_applied(40);
+        let result = stepper.next(62, &cfg, &full);
+        assert_eq!(result, Some(45));
+    }
+
+    #[test]
+    fn curve_stepper_with_last_duty_restores_state() {
+        let mut stepper = CurveStepper::with_last_duty(50);
+        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let full = types::curve_full_points(&points);
+        let cfg = types::CurveConfig {
+            sensors: vec![],
+            points: points.to_vec(),
+            hysteresis_c: 2,
+            rate_limit_pct_per_step: 10,
+            rate_limit_down_pct_per_step: None,
+        };
+        let result = stepper.next(60, &cfg, &full);
+        assert_eq!(result, Some(40));
+    }
+
+    #[test]
+    fn curve_stepper_reset_clears_state() {
+        let mut stepper = CurveStepper::new();
+        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let full = types::curve_full_points(&points);
+        let cfg = types::CurveConfig {
+            sensors: vec![],
+            points: points.to_vec(),
+            hysteresis_c: 2,
+            rate_limit_pct_per_step: 100,
+            rate_limit_down_pct_per_step: None,
+        };
+        let first = stepper.next(85, &cfg, &full);
+        assert_eq!(first, Some(100));
+        stepper.note_applied(100);
+        stepper.reset();
+        let result = stepper.next(85, &cfg, &full);
+        assert_eq!(result, Some(100));
+    }
+
+    #[test]
+    fn curve_stepper_separate_down_rate() {
+        let mut stepper = CurveStepper::new();
+        let points = [[40, 0], [60, 40], [75, 80], [85, 100]];
+        let full = types::curve_full_points(&points);
+        let cfg = types::CurveConfig {
+            sensors: vec![],
+            points: points.to_vec(),
+            hysteresis_c: 0,
+            rate_limit_pct_per_step: 100,
+            rate_limit_down_pct_per_step: Some(3),
+        };
+        let first = stepper.next(85, &cfg, &full);
+        assert_eq!(first, Some(100));
+        stepper.note_applied(100);
+        let result = stepper.next(30, &cfg, &full);
+        assert_eq!(result, Some(97));
+    }
+}
