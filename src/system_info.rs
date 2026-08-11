@@ -160,7 +160,7 @@ const WS_EX_TOOLWINDOW: isize = 0x00000080;
 /// It forces a taskbar button even when WS_EX_TOOLWINDOW is set, so it must
 /// be cleared while parked and restored afterwards.
 const WS_EX_APPWINDOW: isize = 0x0004_0000;
-const SW_SHOWNOACTIVATE: u32 = 4;
+const SW_SHOWMAXIMIZED: u32 = 3;
 const SW_RESTORE: u32 = 9;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOMOVE: u32 = 0x0002;
@@ -191,34 +191,18 @@ pub fn hide_window_to_tray(hwnd: isize) {
         if GetWindowPlacement(h, &mut placement) != 0 {
             *SAVED_PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()) = Some(placement);
         }
-        let width = (placement.rcNormalPosition.right - placement.rcNormalPosition.left).max(100);
-        let height = (placement.rcNormalPosition.bottom - placement.rcNormalPosition.top).max(100);
-        let parked = WINDOWPLACEMENT {
-            length: placement.length,
-            flags: 0,
-            showCmd: SW_SHOWNOACTIVATE,
-            ptMinPosition: placement.ptMinPosition,
-            ptMaxPosition: placement.ptMaxPosition,
-            rcNormalPosition: RECT {
-                left: OFFSCREEN,
-                top: OFFSCREEN,
-                right: OFFSCREEN + width,
-                bottom: OFFSCREEN + height,
-            },
-            rcDevice: RECT {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            },
-        };
-        // Un-minimize/un-maximize at the parked position without activating.
-        if SetWindowPlacement(h, &parked) == 0 {
-            tracing::error!(
-                "SetWindowPlacement (park) failed: {}",
-                std::io::Error::last_os_error()
-            );
-        }
+        // Park off-screen. NOTE: SetWindowPlacement clamps negative coordinates
+        // back to the virtual screen origin (0,0), leaving the window visible;
+        // SetWindowPos does not, so it must be used for parking.
+        SetWindowPos(
+            h,
+            std::ptr::null_mut(),
+            OFFSCREEN,
+            OFFSCREEN,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
         // Remove taskbar / alt-tab presence while parked. WS_EX_TOOLWINDOW
         // alone is not enough: winit's default WS_EX_APPWINDOW forces a
         // taskbar button even alongside it, so clear that too. SWP_FRAMECHANGED
@@ -245,12 +229,30 @@ pub fn restore_window_from_tray(hwnd: isize) {
         if let Some(mut placement) =
             SAVED_PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()).take()
         {
-            placement.showCmd = SW_RESTORE;
             placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+            // Preserve maximized state if the window was maximized before
+            // parking; otherwise restore to normal. Never SW_SHOWMINIMIZED,
+            // which would re-trigger the auto-minimize-to-tray path.
+            placement.showCmd = if placement.showCmd == SW_SHOWMAXIMIZED {
+                SW_SHOWMAXIMIZED
+            } else {
+                SW_RESTORE
+            };
             if SetWindowPlacement(h, &placement) == 0 {
                 tracing::error!(
                     "SetWindowPlacement (restore) failed: {}",
                     std::io::Error::last_os_error()
+                );
+                // Fallback: move back with SetWindowPos using the saved rect.
+                let r = placement.rcNormalPosition;
+                SetWindowPos(
+                    h,
+                    std::ptr::null_mut(),
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
         } else {
@@ -704,5 +706,90 @@ pub fn show_tray_menu(hwnd: isize, x: i32, y: i32) -> Option<u32> {
     post_message(hwnd, WM_NULL, 0, 0);
 
     if cmd > 0 { Some(cmd as u32) } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WS_OVERLAPPED: u32 = 0x0000_0000;
+    const SW_SHOW: i32 = 5;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn CreateWindowExW(
+            dwExStyle: u32,
+            lpClassName: LPCWSTR,
+            lpWindowName: LPCWSTR,
+            dwStyle: u32,
+            x: i32,
+            y: i32,
+            nWidth: i32,
+            nHeight: i32,
+            hWndParent: *mut core::ffi::c_void,
+            hMenu: *mut core::ffi::c_void,
+            hInstance: *mut core::ffi::c_void,
+            lpParam: *mut core::ffi::c_void,
+        ) -> *mut core::ffi::c_void;
+        fn DestroyWindow(hWnd: *mut core::ffi::c_void) -> i32;
+    }
+
+    fn placement_of(hwnd: *mut core::ffi::c_void) -> WINDOWPLACEMENT {
+        let mut p = unsafe { std::mem::zeroed::<WINDOWPLACEMENT>() };
+        p.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+        let rc = unsafe { GetWindowPlacement(hwnd, &mut p) };
+        assert_ne!(rc, 0, "GetWindowPlacement failed: {}", std::io::Error::last_os_error());
+        p
+    }
+
+    #[test]
+    fn parking_moves_window_offscreen_and_restores() {
+        unsafe {
+            let class = to_wide("STATIC");
+            let hwnd = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                std::ptr::null(),
+                WS_OVERLAPPED,
+                100,
+                100,
+                320,
+                240,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            assert!(!hwnd.is_null(), "CreateWindowExW failed");
+            ShowWindow(hwnd, SW_SHOW);
+
+            let before = placement_of(hwnd);
+            assert_eq!(
+                before.rcNormalPosition.left,
+                100,
+                "expected window at x=100 before parking"
+            );
+
+            hide_window_to_tray(hwnd as isize);
+
+            let parked = placement_of(hwnd);
+            assert_eq!(
+                parked.rcNormalPosition.left,
+                OFFSCREEN,
+                "window should have been parked off-screen"
+            );
+
+            restore_window_from_tray(hwnd as isize);
+
+            let restored = placement_of(hwnd);
+            assert_eq!(
+                restored.rcNormalPosition.left,
+                100,
+                "window should be restored to x=100"
+            );
+
+            DestroyWindow(hwnd);
+        }
+    }
 }
 
