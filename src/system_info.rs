@@ -152,6 +152,10 @@ struct WINDOWPLACEMENT {
 
 const GWL_EXSTYLE: i32 = -20;
 const WS_EX_TOOLWINDOW: isize = 0x00000080;
+/// winit sets WS_EX_APPWINDOW by default (window_state.rs ON_TASKBAR).
+/// It forces a taskbar button even when WS_EX_TOOLWINDOW is set, so it must
+/// be cleared while parked and restored afterwards.
+const WS_EX_APPWINDOW: isize = 0x0004_0000;
 const SW_SHOWNOACTIVATE: u32 = 4;
 const SW_RESTORE: u32 = 9;
 const SWP_NOSIZE: u32 = 0x0001;
@@ -195,10 +199,12 @@ pub fn hide_window_to_tray(hwnd: isize) {
         };
         // Un-minimize/un-maximize at the parked position without activating.
         SetWindowPlacement(h, &parked);
-        // Remove taskbar / alt-tab presence while parked. SWP_FRAMECHANGED
+        // Remove taskbar / alt-tab presence while parked. WS_EX_TOOLWINDOW
+        // alone is not enough: winit's default WS_EX_APPWINDOW forces a
+        // taskbar button even alongside it, so clear that too. SWP_FRAMECHANGED
         // makes the taskbar re-evaluate the extended style.
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-        SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW);
+        SetWindowLongPtrW(h, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW);
         SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         // Drop keyboard focus so keystrokes don't reach the invisible window.
         SetFocus(std::ptr::null_mut());
@@ -210,10 +216,11 @@ pub fn restore_window_from_tray(hwnd: isize) {
     let h = hwnd as *mut core::ffi::c_void;
     // SAFETY: hwnd is a valid window handle from FindWindowW/CreateWindowExW.
     unsafe {
-        // Re-add taskbar / alt-tab presence. SWP_FRAMECHANGED makes the
-        // taskbar re-evaluate the extended style.
+        // Re-add taskbar / alt-tab presence (restore WS_EX_APPWINDOW that
+        // winit set at creation). SWP_FRAMECHANGED makes the taskbar
+        // re-evaluate the extended style.
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-        SetWindowLongPtrW(h, GWL_EXSTYLE, ex & !WS_EX_TOOLWINDOW);
+        SetWindowLongPtrW(h, GWL_EXSTYLE, (ex & !WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW);
         SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         if let Some(mut placement) =
             SAVED_PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()).take()
