@@ -6,6 +6,7 @@ mod config;
 mod types;
 mod curve_canvas;
 mod temp_chart;
+mod probe;
 mod system_info;
 mod fan_control;
 mod style;
@@ -51,8 +52,11 @@ fn main() {
         .title(app_title)
         .subscription(App::subscription)
         .theme(app_theme)
-        .window_size((900.0, 700.0))
         .window(iced::window::Settings {
+            // NOTE: `.window(...)` overrides any earlier `.window_size()`
+            // / `.resizable()` calls, so the size must be set here.
+            size: iced::Size::new(900.0, 613.0),
+            resizable: false,
             icon: Some(window_icon),
             exit_on_close_request: false,
             ..iced::window::Settings::default()

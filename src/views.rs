@@ -142,7 +142,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
                 card(view_misc(snap)),
             ].width(Length::FillPortion(1)).spacing(8),
         ].spacing(12)
-    ).padding(12).width(Length::Fill).height(Length::Fill);
+    ).padding(12).width(Length::Fill);
 
     let mut root = column![header].spacing(8);
     // Always reserve the banner slots (same Container widget type) so the
@@ -150,7 +150,10 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     // when a warning appears/disappears mid-session.
     root = root.push(config_warning.unwrap_or_else(|| container(space()).into()));
     root = root.push(cli_warning.unwrap_or_else(|| container(space())));
-    root.push(content).into()
+    let root = root.push(content);
+    // The window height follows the content: the probe reports the laid-out
+    // height of this column to App, which resizes the window to match.
+    crate::probe::HeightProbe::wrap(root.into(), Arc::clone(&app.content_height))
 }
 
 fn view_settings(app: &App) -> Element<'_, Message> {
@@ -316,11 +319,19 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
                 let mut settings_content = column![].spacing(4).padding(4);
                 settings_content = settings_content.push(text("Sensors").size(FONT_BODY));
 
+                // Build a lookup set once instead of a linear scan per row
+                // (selected_sensors is small, but the panel rebuilds every frame).
+                let selected_set: std::collections::HashSet<&str> = if all_empty {
+                    std::collections::HashSet::new()
+                } else {
+                    config.telemetry.selected_sensors.iter().map(|s| s.as_str()).collect()
+                };
+
                 for (idx, name) in cache.keys.iter().enumerate() {
                     // The loop index is the position in `cache.keys`, so use
                     // it directly instead of a per-row linear scan.
                     let color = SENSOR_COLORS[idx % SENSOR_COLORS.len()];
-                    let is_on = all_empty || config.telemetry.selected_sensors.contains(name);
+                    let is_on = all_empty || selected_set.contains(name.as_str());
                     let on_off = if is_on { "On" } else { "Off" };
                     let on_color = if is_on { COLOR_GREEN } else { COLOR_GRAY };
                     let bg_color = if is_on { color } else { COLOR_DARK };
@@ -624,6 +635,11 @@ fn view_battery_verbose(battery: &crate::cli::ec_wrapper::BatteryData, show_deta
     Some(content.into())
 }
 
+/// Cap for the Battery & Power card. The outer row stretches the left column
+/// to match the right column's height, so a plain `Length::Fill` would make
+/// the card fill all leftover space even when its content is short.
+const BATTERY_SECTION_MAX_HEIGHT: f32 = 300.0;
+
 fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message> {
     let battery = &snap.battery;
     let config = &snap.config;
@@ -668,7 +684,14 @@ fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
         }
 
         let right_pad = iced::Padding::ZERO.right(14.0);
-        scrollable(container(content).padding(right_pad)).height(Length::Fill).into()
+        // Shrink to content with a height cap: compact when the details are
+        // collapsed, internally scrollable when the verbose rows are open.
+        container(
+            scrollable(container(content).padding(right_pad)).height(Length::Shrink)
+        )
+        .width(Length::Fill)
+        .max_height(BATTERY_SECTION_MAX_HEIGHT)
+        .into()
     } else {
         text(if app.cli_present { "Waiting for battery data..." } else { "EC not available" }).into()
     }

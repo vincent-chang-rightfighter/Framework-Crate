@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::time::Instant;
 use iced::{Element, Subscription, Task};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tracing::{debug, warn};
 
 use crate::background_task;
@@ -13,6 +13,13 @@ use crate::system_info;
 use crate::temp_chart;
 use crate::style::*;
 use crate::views;
+
+/// Window width (logical px) used for auto-resizing. The width is fixed by
+/// the user's preferred layout; only the height follows the content.
+const AUTO_WIDTH: f32 = 900.0;
+/// Ceiling for the auto-resized window height (logical px), so the window
+/// never outgrows the screen work area (fan curve mode can be very tall).
+const AUTO_MAX_HEIGHT: f32 = 760.0;
 
 pub fn read_lock<T>(lock: &Arc<RwLock<Arc<T>>>) -> Arc<T> {
     Arc::clone(&lock.read())
@@ -61,6 +68,7 @@ pub enum Message {
     FpLedLevelChanged(&'static str),
     ToggleBatteryDetails,
     CloseRequested(iced::window::Id),
+    WindowResized(iced::window::Id, iced::Size),
     MinimizeToTray,
     RestoreFromTray,
     TrayQuit,
@@ -99,6 +107,17 @@ pub struct App {
     pub last_curve_points: Vec<[u32; 2]>,
     pub icon_create_in_flight: bool,
     pub(crate) cached_snapshot: Option<crate::views::ViewSnapshot>,
+    /// Laid-out height (logical px) of the main view, reported by the
+    /// HeightProbe widget every layout pass. The window is resized to match.
+    pub content_height: Arc<Mutex<Option<f32>>>,
+    /// Id of the (single) window, learned from the first Resized event.
+    pub window_id: Option<iced::window::Id>,
+    /// Current window height (logical px), tracked via Resized events.
+    pub window_height: Option<f32>,
+    /// Whether the window height has been fitted to content. Once set, the
+    /// window stays at that height even when the content grows (e.g. battery
+    /// details expanded, fan curve mode) — those sections scroll instead.
+    pub height_set: bool,
 }
 
 pub struct SystemInfo {
@@ -232,6 +251,10 @@ impl App {
             last_curve_points: Vec::new(),
             icon_create_in_flight: false,
             cached_snapshot: None,
+            content_height: Arc::new(Mutex::new(None)),
+            window_id: None,
+            window_height: None,
+            height_set: false,
         };
 
         let init_task = Task::perform(async move {
@@ -274,12 +297,54 @@ impl App {
     }
 
     pub(crate) fn subscription(&self) -> Subscription<Message> {
-        iced::window::close_requests().map(Message::CloseRequested)
+        Subscription::batch([
+            iced::window::close_requests().map(Message::CloseRequested),
+            iced::window::resize_events()
+                .map(|(id, size)| Message::WindowResized(id, size)),
+        ])
+    }
+
+    /// Keeps the window height in sync with the measured content height.
+    /// Only active once the main view is up (init complete, not on the
+    /// settings / quit-warning screens), and only when the difference is
+    /// larger than sub-pixel rounding, so it converges and stays quiet.
+    fn autosize_task(&self) -> Option<Task<Message>> {
+        if !self.init_complete || self.show_settings || self.show_quit_warning || self.height_set {
+            return None;
+        }
+        let id = match self.window_id {
+            Some(id) => id,
+            None => return None,
+        };
+        let current = match self.window_height {
+            Some(h) => h,
+            None => return None,
+        };
+        let target = *self.content_height.lock();
+        let target = match target {
+            Some(h) => h,
+            None => return None,
+        };
+        let target = target.min(AUTO_MAX_HEIGHT) + 25.0;
+        if (target - current).abs() > 0.5 {
+            Some(iced::window::resize(id, iced::Size::new(AUTO_WIDTH, target)))
+        } else {
+            None
+        }
     }
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
+        let mut task = self.update_inner(message);
+        if let Some(resize) = self.autosize_task() {
+            self.height_set = true;
+            task = Task::batch([task, resize]);
+        }
+        task
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         match &message {
-            Message::Tick | Message::InitComplete | Message::StartupError(_) => {}
+            Message::Tick | Message::InitComplete | Message::StartupError(_) | Message::WindowResized(..) => {}
             _ => {
                 let now_ms = crate::util::current_time_ms();
                 self.state.last_interaction_ts.store(now_ms, Ordering::Release);
@@ -595,6 +660,10 @@ impl App {
             Message::CloseRequested(id) => {
                 self.closing_window_id = Some(id);
                 return Task::perform(async {}, |_| Message::MinimizeToTray);
+            }
+            Message::WindowResized(id, size) => {
+                self.window_id = Some(id);
+                self.window_height = Some(size.height);
             }
             Message::QuitWithRestore => {
                 self.show_quit_warning = false;
