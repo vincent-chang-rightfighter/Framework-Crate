@@ -676,6 +676,10 @@ impl App {
                 self.tray.mark_restored();
                 self.tray.restore_window();
                 self.state.visible.store(true, Ordering::Release);
+                // The swapchain may hold a stale/blank frame after a long hide
+                // (surface invalidated while hidden). Force a fresh snapshot so
+                // the first visible frame renders current data.
+                self.state.view_dirty.store(true, Ordering::Release);
                 self.icon_create_in_flight = false;
             }
             Message::TrayQuit => {
