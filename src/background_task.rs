@@ -72,11 +72,12 @@ fn push_pd_ports_history(
 ) {
     let snapshot = Arc::clone(&read_lock(pd_ports));
     with_write_lock(history, |hist| {
-        let h = Arc::make_mut(hist);
+        let mut h = (**hist).clone();
         h.push_back(snapshot);
         if h.len() > MAX_PD_HISTORY {
             h.pop_front();
         }
+        *hist = Arc::new(h);
     });
 }
 
@@ -96,7 +97,7 @@ fn estimate_duty_from_thermal(state: &AppState) -> Option<u32> {
     }
 }
 
-fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) {
+fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> bool {
     // Periodically reset fan_max_rpm to avoid stale readings from hardware changes.
     // Reset every 60 seconds so the max adapts to the actual current fan capability.
     const FAN_MAX_RPM_RESET_INTERVAL_MS: u64 = 60_000;
@@ -122,7 +123,7 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) {
             None => true,
         }
     };
-    if !changed { return; }
+    if !changed { return false; }
 
     // Wrap temps in Arc for history samples — avoids deep clone on every history read
     let temps_for_history = std::sync::Arc::clone(&t.temps);
@@ -151,58 +152,71 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) {
     });
 
     with_write_lock(&state.temp_history, |hist| {
-        let h = Arc::make_mut(hist);
+        let mut h = (**hist).clone();
         let sample = temp_chart::TempSample {
             ts_ms: now,
             temps: temps_for_history,
         };
-        h.push(sample);
+        h.push_back(sample);
         let cutoff = now - crate::temp_chart::HISTORY_MS;
-        h.retain(|s| s.ts_ms > cutoff);
+        while let Some(front) = h.front() {
+            if front.ts_ms <= cutoff {
+                h.pop_front();
+            } else {
+                break;
+            }
+        }
+        *hist = Arc::new(h);
     });
+    true
 }
 
 pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<cli::EcClient>) {
-    let state_clone = state.clone();
     let ec_clone = Arc::clone(ec);
-    let thermal_result = tokio::task::spawn_blocking(move || ec_clone.thermal()).await;
-    let state_clone2 = state.clone();
+    let thermal_fut = tokio::task::spawn_blocking(move || ec_clone.thermal());
+    let battery_ref = Arc::clone(&state.battery);
     let ec_clone2 = Arc::clone(ec);
-    let power_result = tokio::task::spawn_blocking(move || ec_clone2.power()).await;
-    let state_clone3 = state.clone();
+    let power_fut = tokio::task::spawn_blocking(move || ec_clone2.power());
+    let kblight_ref = Arc::clone(&state.kblight);
     let ec_clone3 = Arc::clone(ec);
-    let kb_result = tokio::task::spawn_blocking(move || ec_clone3.kblight_get()).await;
-    let state_clone4 = state.clone();
+    let kb_fut = tokio::task::spawn_blocking(move || ec_clone3.kblight_get());
+    let pd_ports_ref = Arc::clone(&state.pd_ports);
+    let pd_history_ref = Arc::clone(&state.pd_ports_history);
     let ec_clone4 = Arc::clone(ec);
-    let pd_result = tokio::task::spawn_blocking(move || ec_clone4.pd_ports()).await;
-    let state_clone5 = state.clone();
+    let pd_fut = tokio::task::spawn_blocking(move || ec_clone4.pd_ports());
+    let exp_ref = Arc::clone(&state.expansion_cards);
     let ec_clone5 = Arc::clone(ec);
-    let exp_result = tokio::task::spawn_blocking(move || ec_clone5.expansion_cards()).await;
+    let exp_fut = tokio::task::spawn_blocking(move || ec_clone5.expansion_cards());
+
+    let (thermal_result, power_result, kb_result, pd_result, exp_result) = tokio::join!(
+        thermal_fut, power_fut, kb_fut, pd_fut, exp_fut
+    );
 
     if let Ok(Ok(t)) = thermal_result {
-        record_thermal_sample(&state_clone, t);
+        record_thermal_sample(state, t);
     }
     if let Ok(Ok(bat)) = power_result {
-        with_write_lock(&state_clone2.battery, |guard| {
+        with_write_lock(&battery_ref, |guard| {
             *guard = Arc::new(Some(crate::types::BatteryInfo { power_info: bat }));
         });
     }
     if let Ok(Ok(kb)) = kb_result {
-        with_write_lock(&state_clone3.kblight, |guard| {
+        with_write_lock(&kblight_ref, |guard| {
             *guard = Arc::new(Some(kb));
         });
     }
     if let Ok(ports) = pd_result {
-        with_write_lock(&state_clone4.pd_ports, |guard| {
+        with_write_lock(&pd_ports_ref, |guard| {
             *guard = Arc::new(ports);
         });
-        push_pd_ports_history(&state_clone4.pd_ports, &state_clone4.pd_ports_history);
+        push_pd_ports_history(&pd_ports_ref, &pd_history_ref);
     }
     if let Ok(cards) = exp_result {
-        with_write_lock(&state_clone5.expansion_cards, |guard| {
+        with_write_lock(&exp_ref, |guard| {
             *guard = Arc::new(cards);
         });
     }
+    state.view_dirty.store(true, Ordering::Release);
 }
 
 pub fn spawn(state: AppState) {
@@ -255,7 +269,6 @@ pub fn spawn(state: AppState) {
                     };
                     tokio::time::sleep(std::time::Duration::from_millis(effective_interval)).await;
                     if bg_state2.shutdown.load(Ordering::Acquire) { return; }
-                    if !bg_state2.cli_available.load(Ordering::Acquire) { continue; }
 
                     let ec_opt = { read_lock(&bg_state2.ec_client) };
                     let ec: Arc<cli::EcClient> = match ec_opt.as_ref().as_ref() {
@@ -289,7 +302,9 @@ pub fn spawn(state: AppState) {
 
                     let ec_clone = Arc::clone(&ec);
                     if let Ok(Ok(t)) = tokio::task::spawn_blocking(move || ec_clone.thermal()).await {
-                        record_thermal_sample(&bg_state2, t);
+                        if record_thermal_sample(&bg_state2, t) {
+                            bg_state2.view_dirty.store(true, Ordering::Release);
+                        }
                     }
                     // While the user is idle, skip the per-cycle UI-only reads (battery) to
                     // save subprocess spawns; thermal still feeds the fan curve.
@@ -302,6 +317,7 @@ pub fn spawn(state: AppState) {
                                     *guard = Arc::new(Some(new_info));
                                 }
                             });
+                            bg_state2.view_dirty.store(true, Ordering::Release);
                         }
                     }
 
@@ -320,6 +336,7 @@ pub fn spawn(state: AppState) {
                                 with_write_lock(&bg_state2.pd_ports, |guard| {
                                     *guard = Arc::new(ports);
                                 });
+                                bg_state2.view_dirty.store(true, Ordering::Release);
                             }
                             push_pd_ports_history(&bg_state2.pd_ports, &bg_state2.pd_ports_history);
                         }
@@ -328,6 +345,7 @@ pub fn spawn(state: AppState) {
                             with_write_lock(&bg_state2.expansion_cards, |guard| {
                                 if **guard != cards {
                                     *guard = Arc::new(cards);
+                                    bg_state2.view_dirty.store(true, Ordering::Release);
                                 }
                             });
                         }
@@ -339,6 +357,7 @@ pub fn spawn(state: AppState) {
                             with_write_lock(&bg_state2.versions, |guard| {
                                 if guard.as_ref().as_ref() != Some(&v) {
                                     *guard = Arc::new(Some(v));
+                                    bg_state2.view_dirty.store(true, Ordering::Release);
                                 }
                             });
                         }
@@ -351,14 +370,12 @@ pub fn spawn(state: AppState) {
 
                     // Read only the fields we need, then drop the lock immediately.
                     // This avoids holding the config lock across ~100ms EC I/O.
-                    let (manual_duty, curve_poll, curve_hysteresis, curve_rate_limit, curve_points_ref, curve_rate_limit_down) = {
+                    let (manual_duty, curve_hysteresis, curve_rate_limit, curve_rate_limit_down) = {
                         let config = read_lock(&bg_state2.config);
                         (
                             config.fan.manual.as_ref().map(|m| m.duty_pct),
-                            config.fan.curve.as_ref().map(|c| c.poll_ms),
                             config.fan.curve.as_ref().map(|c| c.curve.hysteresis_c),
                             config.fan.curve.as_ref().map(|c| c.curve.rate_limit_pct_per_step),
-                            config.fan.curve.as_ref().map(|c| c.curve.points.clone()),
                             config.fan.curve.as_ref().and_then(|c| c.curve.rate_limit_down_pct_per_step),
                         )
                     }; // config lock released here
@@ -430,20 +447,13 @@ pub fn spawn(state: AppState) {
                         crate::types::FanControlMode::Curve => {
                             let thermal_clone = read_lock(&bg_state2.thermal);
                             if let Some(ref thermal) = *thermal_clone {
-                                if let (Some(_poll), Some(hyst), Some(rate), Some(ref pts)) =
-                                    (curve_poll, curve_hysteresis, curve_rate_limit, curve_points_ref)
-                                {
+                            if let (Some(hyst), Some(rate)) =
+                                (curve_hysteresis, curve_rate_limit)
+                            {
                                     let max_temp = thermal.temps.values().copied().max().unwrap_or(0);
                                     let full_pts_arc = read_lock(&bg_state2.curve_full_points);
                                     let full_pts: &[[u32; 2]] = &full_pts_arc;
-                                    let curve_cfg = crate::types::CurveConfig {
-                                        sensors: vec![],
-                                        points: pts.clone(),
-                                        hysteresis_c: hyst,
-                                        rate_limit_pct_per_step: rate,
-                                        rate_limit_down_pct_per_step: curve_rate_limit_down,
-                                    };
-                                    if let Some(next) = curve_stepper.next(max_temp, &curve_cfg, full_pts) {
+                                    if let Some(next) = curve_stepper.next(max_temp, hyst, rate, curve_rate_limit_down, full_pts) {
                                         let ec_clone = Arc::clone(&ec);
                                         match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, None)).await {
                                             Ok(result) => match result {

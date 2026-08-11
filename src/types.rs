@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::debug;
 
 // Validation constants for config values
@@ -189,16 +190,16 @@ pub struct BatteryInfo {
 
 pub fn sorted_sensor_list(selected: &[String], sensor_keys: &[String]) -> Vec<String> {
     let fallback = sensor_keys.len();
+    let pos_map: HashMap<&str, usize> = sensor_keys.iter()
+        .enumerate()
+        .map(|(i, k)| (k.as_str(), i))
+        .collect();
     let mut list: Vec<String> = if selected.is_empty() {
         sensor_keys.to_vec()
     } else {
         selected.iter().filter(|s| sensor_keys.contains(s)).cloned().collect()
     };
-    list.sort_by(|a, b| {
-        let ka = sensor_keys.iter().position(|k| k == a).unwrap_or(fallback);
-        let kb = sensor_keys.iter().position(|k| k == b).unwrap_or(fallback);
-        ka.cmp(&kb)
-    });
+    list.sort_by_key(|a| *pos_map.get(a.as_str()).unwrap_or(&fallback));
     list
 }
 

@@ -51,14 +51,14 @@ pub enum Message {
     ChargeLimitToggled(bool),
     ChargeLimitChanged(u32),
     ToggleSensorSettings,
-    SensorToggled(String, bool),
+    SensorToggled(usize, bool),
     PollRateChanged(u64),
     UiRefreshRateChanged(u64),
     SettingsToggled,
     InitComplete,
     DismissConfigWarning,
     KblightChanged(u32),
-    FpLedLevelChanged(String),
+    FpLedLevelChanged(&'static str),
     ToggleBatteryDetails,
     CloseRequested(iced::window::Id),
     MinimizeToTray,
@@ -96,6 +96,9 @@ pub struct App {
     pub last_hwnd_check_ts: u64,
     pub pending_curve_update: bool,
     pub last_curve_edit_ts: Instant,
+    pub last_curve_points: Vec<[u32; 2]>,
+    pub icon_create_in_flight: bool,
+    pub(crate) cached_snapshot: std::cell::RefCell<Option<crate::views::ViewSnapshot>>,
 }
 
 pub struct SystemInfo {
@@ -128,7 +131,7 @@ pub struct AppState {
     pub versions: Arc<RwLock<Arc<Option<cli::ec_wrapper::VersionsData>>>>,
     pub battery: Arc<RwLock<Arc<Option<BatteryInfo>>>>,
     pub poll_ms: Arc<AtomicU64>,
-    pub temp_history: Arc<RwLock<Arc<Vec<temp_chart::TempSample>>>>,
+    pub temp_history: Arc<RwLock<Arc<VecDeque<temp_chart::TempSample>>>>,
     pub kblight: Arc<RwLock<Arc<Option<u32>>>>,
     pub expansion_cards: Arc<RwLock<Arc<Vec<cli::ec_wrapper::ExpansionCard>>>>,
     pub pd_ports: Arc<RwLock<Arc<Vec<cli::ec_wrapper::UsbCPort>>>>,
@@ -143,6 +146,7 @@ pub struct AppState {
     pub fan_mode: Arc<AtomicU64>,
     pub sensor_cache: Arc<RwLock<Arc<SensorCache>>>,
     pub last_fan_rpm_reset: Arc<AtomicU64>,
+    pub view_dirty: Arc<AtomicBool>,
 }
 
 impl App {
@@ -166,7 +170,7 @@ impl App {
             versions: Arc::new(RwLock::new(Arc::new(None))),
             battery: Arc::new(RwLock::new(Arc::new(None))),
             poll_ms: Arc::new(AtomicU64::new(poll_ms)),
-            temp_history: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            temp_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
             kblight: Arc::new(RwLock::new(Arc::new(None))),
             expansion_cards: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             pd_ports: Arc::new(RwLock::new(Arc::new(Vec::new()))),
@@ -185,6 +189,7 @@ impl App {
             fan_mode: Arc::new(AtomicU64::new(loaded_config.fan.mode.to_u8() as u64)),
             sensor_cache: Arc::new(RwLock::new(Arc::new(SensorCache::default()))),
             last_fan_rpm_reset: Arc::new(AtomicU64::new(crate::util::current_time_ms())),
+            view_dirty: Arc::new(AtomicBool::new(true)),
         };
 
         let cpu = system_info::cpu_name();
@@ -224,6 +229,9 @@ impl App {
             last_hwnd_check_ts: 0,
             pending_curve_update: false,
             last_curve_edit_ts: Instant::now(),
+            last_curve_points: Vec::new(),
+            icon_create_in_flight: false,
+            cached_snapshot: std::cell::RefCell::new(None),
         };
 
         let init_task = Task::perform(async move {
@@ -234,11 +242,11 @@ impl App {
                     with_write_lock(&state.ec_client, |guard| {
                         *guard = Arc::new(Some(Arc::clone(&arc_ec)));
                     });
-                    let state_cl = state.clone();
+                    let versions = Arc::clone(&state.versions);
                     let ec_cl = Arc::clone(&arc_ec);
                     match tokio::task::spawn_blocking(move || ec_cl.versions()).await {
                         Ok(Ok(v)) => {
-                            with_write_lock(&state_cl.versions, |guard| {
+                            with_write_lock(&versions, |guard| {
                                 *guard = Arc::new(Some(v));
                             });
                         }
@@ -327,6 +335,19 @@ impl App {
                                 tracing::error!("Cannot find window after HWND invalidation");
                             }
                         }
+                        // Auto-minimize check throttled to the same 5s cadence
+                        // (is_iconic is a syscall). Skip for 800ms after restore
+                        // to avoid an infinite minimize/restore loop.
+                        if !self.tray.is_recently_restored()
+                            && system_info::is_iconic(self.tray.hwnd())
+                            && self.state.visible.load(Ordering::Acquire)
+                        {
+                            tracing::info!("Window minimized, auto-minimizing to tray");
+                            return Task::batch([
+                                Task::perform(async {}, |_| Message::MinimizeToTray),
+                                tick_task(next_ms),
+                            ]);
+                        }
                     }
                     if let Some(event) = self.tray.receive_event() {
                         match &event {
@@ -349,15 +370,8 @@ impl App {
                         self.tray.hide_window();
                         self.state.visible.store(false, Ordering::Release);
                         self.pending_minimize_to_tray = false;
+                        self.icon_create_in_flight = false;
                         tracing::info!("Tray icon ready, window hidden");
-                    }
-                    // Skip is_iconic check for 800ms after restore to avoid infinite loop
-                    if !self.tray.is_recently_restored()
-                        && system_info::is_iconic(self.tray.hwnd())
-                        && self.state.visible.load(Ordering::Acquire)
-                    {
-                        tracing::info!("Window minimized, auto-minimizing to tray");
-                        return Task::perform(async {}, |_| Message::MinimizeToTray);
                     }
                 }
 
@@ -480,7 +494,14 @@ impl App {
             Message::ToggleSensorSettings => {
                 self.show_sensor_settings = !self.show_sensor_settings;
             }
-            Message::SensorToggled(name, enabled) => {
+            Message::SensorToggled(idx, enabled) => {
+                let name = {
+                    let cache = read_lock(&self.state.sensor_cache);
+                    cache.keys.get(idx).cloned()
+                };
+                let Some(name) = name else {
+                    return Task::none();
+                };
                 with_write_lock(&self.state.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     if cfg.telemetry.selected_sensors.is_empty() {
@@ -521,9 +542,10 @@ impl App {
                 self.show_settings = !self.show_settings;
             }
             Message::KblightChanged(percent) => {
-                let state = self.state.clone();
+                let ec_client = Arc::clone(&self.state.ec_client);
+                let kblight = Arc::clone(&self.state.kblight);
                 return Task::perform(async move {
-                    let ec_opt = { read_lock(&state.ec_client) };
+                    let ec_opt = { read_lock(&ec_client) };
                     if let Some(ref ec) = *ec_opt {
                         let ec_clone = ec.clone();
                         if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.kblight_set(percent)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
@@ -531,7 +553,7 @@ impl App {
                         }
                         let ec_clone = ec.clone();
                         if let Ok(Ok(kb)) = tokio::task::spawn_blocking(move || ec_clone.kblight_get()).await {
-                            with_write_lock(&state.kblight, |guard| {
+                            with_write_lock(&kblight, |guard| {
                                 *guard = Arc::new(Some(kb));
                             });
                         }
@@ -540,13 +562,12 @@ impl App {
                 }, |msg| msg);
             }
             Message::FpLedLevelChanged(level) => {
-                let state = self.state.clone();
+                let ec_client = Arc::clone(&self.state.ec_client);
                 return Task::perform(async move {
-                    let ec_opt = { read_lock(&state.ec_client) };
+                    let ec_opt = { read_lock(&ec_client) };
                     if let Some(ref ec) = *ec_opt {
                         let ec_clone = ec.clone();
-                        let level_clone = level.clone();
-                        if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.fp_led_level_set(&level_clone)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
+                        if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.fp_led_level_set(level)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
                             warn!("Failed to set fingerprint LED: {}", e);
                         }
                     }
@@ -567,10 +588,10 @@ impl App {
             Message::QuitWithRestore => {
                 self.show_quit_warning = false;
                 self.state.shutdown.store(true, Ordering::Release);
-                let state = self.state.clone();
+                let ec_client = Arc::clone(&self.state.ec_client);
                 return Task::perform(
                     async move {
-                        let ec = { read_lock(&state.ec_client) };
+                        let ec = { read_lock(&ec_client) };
                         if let Some(ref ec) = *ec {
                             let ec_clone = ec.clone();
                             if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.autofanctrl()).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
@@ -588,10 +609,10 @@ impl App {
                 self.show_quit_warning = false;
                 self.state.shutdown.store(true, Ordering::Release);
                 let duty = self.quit_duty_value;
-                let state = self.state.clone();
+                let ec_client = Arc::clone(&self.state.ec_client);
                 return Task::perform(
                     async move {
-                        let ec = { read_lock(&state.ec_client) };
+                        let ec = { read_lock(&ec_client) };
                         if let Some(ref ec) = *ec {
                             let ec_clone = ec.clone();
                             if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(duty, None)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
@@ -633,10 +654,13 @@ impl App {
                     // Use async to avoid blocking the UI thread.
                     // The icon will be created on the message pump thread;
                     // we check icon_ready on the next tick to hide the window.
-                    if !self.tray.check_icon_ready() {
+                    let icon_ready = self.tray.check_icon_ready();
+                    if !icon_ready && !self.icon_create_in_flight {
                         self.tray.show_icon_async();
+                        self.icon_create_in_flight = true;
                     }
-                    if self.tray.check_icon_ready() {
+                    if icon_ready {
+                        self.icon_create_in_flight = false;
                         self.tray.hide_window();
                         self.state.visible.store(false, Ordering::Release);
                         tracing::info!("Window hidden, tray icon visible");
@@ -652,6 +676,7 @@ impl App {
                 self.tray.mark_restored();
                 self.tray.restore_window();
                 self.state.visible.store(true, Ordering::Release);
+                self.icon_create_in_flight = false;
             }
             Message::TrayQuit => {
                 self.tray.mark_restored();
@@ -686,6 +711,7 @@ impl App {
     }
 
     fn save_config(&mut self) {
+        self.state.view_dirty.store(true, Ordering::Release);
         let cfg = read_lock(&self.state.config);
         if self.config_tx.send(Arc::clone(&cfg)).is_ok() {
             self.config_save_failed = false;
@@ -730,7 +756,11 @@ impl App {
 
     fn update_curve_full_points(&mut self) {
         let cfg = read_lock(&self.state.config);
-        let pts = cfg.fan.curve.as_ref().map(|c| c.curve.points.as_slice()).unwrap_or(&[]);
+        let pts: &[[u32; 2]] = cfg.fan.curve.as_ref().map(|c| c.curve.points.as_slice()).unwrap_or(&[]);
+        if self.last_curve_points.as_slice() == pts {
+            return;
+        }
+        self.last_curve_points = pts.to_vec();
         let new_full = Arc::new(crate::types::curve_full_points(pts));
         with_write_lock(&self.state.curve_full_points, |guard| {
             *guard = new_full;

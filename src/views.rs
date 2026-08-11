@@ -1,5 +1,6 @@
 use crate::App;
 use crate::Message;
+use crate::cli;
 use crate::read_lock;
 use crate::style::*;
 use crate::types::FanControlMode;
@@ -8,6 +9,37 @@ use iced::widget::rule;
 use iced::widget::space;
 use iced::{Element, Length};
 use std::sync::Arc;
+
+#[derive(Clone)]
+pub(crate) struct ViewSnapshot {
+    pub thermal: Arc<Option<cli::ec_wrapper::ThermalData>>,
+    pub config: Arc<crate::types::Config>,
+    pub sensor_cache: Arc<crate::app::SensorCache>,
+    pub temp_history: std::sync::Arc<std::collections::VecDeque<crate::temp_chart::TempSample>>,
+    pub battery: Arc<Option<crate::types::BatteryInfo>>,
+    pub kblight: Arc<Option<u32>>,
+    pub expansion_cards: Arc<Vec<cli::ec_wrapper::ExpansionCard>>,
+    pub pd_ports: Arc<Vec<cli::ec_wrapper::UsbCPort>>,
+    pub pd_ports_history: Arc<crate::app::PdPortsHistory>,
+    pub curve_full_points: Arc<Vec<[u32; 2]>>,
+}
+
+impl ViewSnapshot {
+    pub fn from_app(app: &App) -> Self {
+        Self {
+            thermal: Arc::clone(&read_lock(&app.state.thermal)),
+            config: Arc::clone(&read_lock(&app.state.config)),
+            sensor_cache: Arc::clone(&read_lock(&app.state.sensor_cache)),
+            temp_history: Arc::clone(&read_lock(&app.state.temp_history)),
+            battery: Arc::clone(&read_lock(&app.state.battery)),
+            kblight: Arc::clone(&read_lock(&app.state.kblight)),
+            expansion_cards: Arc::clone(&read_lock(&app.state.expansion_cards)),
+            pd_ports: Arc::clone(&read_lock(&app.state.pd_ports)),
+            pd_ports_history: Arc::clone(&read_lock(&app.state.pd_ports_history)),
+            curve_full_points: Arc::clone(&read_lock(&app.state.curve_full_points)),
+        }
+    }
+}
 
 fn warning_banner(msg: String) -> Element<'static, Message> {
     container(
@@ -62,6 +94,20 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
         return view_quit_warning(app);
     }
 
+    let dirty = app.state.view_dirty.load(std::sync::atomic::Ordering::Acquire);
+    if dirty {
+        let s = ViewSnapshot::from_app(app);
+        app.state.view_dirty.store(false, std::sync::atomic::Ordering::Release);
+        *app.cached_snapshot.borrow_mut() = Some(s);
+    }
+    if app.cached_snapshot.borrow().is_none() {
+        // Defensive: only reachable on the first frame if the dirty flag was
+        // cleared before a snapshot was cached.
+        *app.cached_snapshot.borrow_mut() = Some(ViewSnapshot::from_app(app));
+    }
+    let snap_guard = app.cached_snapshot.borrow();
+    let snap = snap_guard.as_ref().unwrap();
+
     let header = view_header(app);
     let config_warning = if app.config_save_failed {
         Some(warning_banner("Config save failed - changes may not persist after restart".to_string()))
@@ -88,23 +134,22 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     let content = container(
         row![
             column![
-                card(view_sensors(app)),
-                card(view_battery(app)),
+                card(view_sensors(app, snap)),
+                card(view_battery(app, snap)),
             ].width(Length::FillPortion(1)).spacing(8),
             column![
-                card(view_fan_control(app)),
-                card(view_misc(app)),
+                card(view_fan_control(snap)),
+                card(view_misc(snap)),
             ].width(Length::FillPortion(1)).spacing(8),
         ].spacing(12)
     ).padding(12).width(Length::Fill).height(Length::Fill);
 
     let mut root = column![header].spacing(8);
-    if let Some(warning) = config_warning {
-        root = root.push(warning);
-    }
-    if let Some(warning) = cli_warning {
-        root = root.push(warning);
-    }
+    // Always reserve the banner slots (same Container widget type) so the
+    // content subtree keeps its Tree state (canvas cache, scroll offsets)
+    // when a warning appears/disappears mid-session.
+    root = root.push(config_warning.unwrap_or_else(|| container(space()).into()));
+    root = root.push(cli_warning.unwrap_or_else(|| container(space())));
     root.push(content).into()
 }
 
@@ -246,14 +291,14 @@ fn view_header(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-fn view_sensors(app: &App) -> Element<'_, Message> {
-    let thermal = read_lock(&app.state.thermal);
+fn view_sensors(app: &App, snap: &ViewSnapshot) -> Element<'static, Message> {
+    let thermal = Arc::clone(&snap.thermal);
     match thermal.as_ref().as_ref() {
         Some(thermal) => {
             let mut content = column![].spacing(6);
 
-            let cache = read_lock(&app.state.sensor_cache);
-            let config = read_lock(&app.state.config);
+            let cache = Arc::clone(&snap.sensor_cache);
+            let config = Arc::clone(&snap.config);
             let all_empty = config.telemetry.selected_sensors.is_empty();
 
             let settings_label = if app.show_sensor_settings { "[-] Settings" } else { "[+] Settings" };
@@ -267,11 +312,11 @@ fn view_sensors(app: &App) -> Element<'_, Message> {
                 ]
             );
 
-            if app.show_sensor_settings {
+            let settings_panel: Element<'static, Message> = if app.show_sensor_settings {
                 let mut settings_content = column![].spacing(4).padding(4);
                 settings_content = settings_content.push(text("Sensors").size(FONT_BODY));
 
-                for name in cache.keys.iter() {
+                for (idx, name) in cache.keys.iter().enumerate() {
                     let color = sensor_color(name, &cache.keys);
                     let is_on = all_empty || config.telemetry.selected_sensors.contains(name);
                     let on_off = if is_on { "On" } else { "Off" };
@@ -287,7 +332,7 @@ fn view_sensors(app: &App) -> Element<'_, Message> {
                                         border: iced::Border::default().rounded(8),
                                         ..Default::default()
                                     })
-                             ).on_press(Message::SensorToggled(name.clone(), !is_on))
+                             ).on_press(Message::SensorToggled(idx, !is_on))
                               .style(btn_style).padding(0),
                             text(name.clone()).size(FONT_BODY),
                             space::horizontal(),
@@ -295,18 +340,22 @@ fn view_sensors(app: &App) -> Element<'_, Message> {
                         ].align_y(iced::Alignment::Center).spacing(6)
                     );
                 }
-                content = content.push(
-                    container(settings_content)
-                        .padding(8)
-                        .style(|_theme| iced::widget::container::Style {
-                            background: Some(COLOR_SETTINGS_BG.into()),
-                            border: iced::Border::default().rounded(4).color(COLOR_DARK).width(1),
-                            ..Default::default()
-                        })
-                );
-            }
+                container(settings_content)
+                    .padding(8)
+                    .style(|_theme| iced::widget::container::Style {
+                        background: Some(COLOR_SETTINGS_BG.into()),
+                        border: iced::Border::default().rounded(4).color(COLOR_DARK).width(1),
+                        ..Default::default()
+                    })
+                    .into()
+            } else {
+                // Always reserve the slot (same Container widget type) so the
+                // subtree below keeps its Tree state when the panel toggles.
+                container(column![]).into()
+            };
+            content = content.push(settings_panel);
 
-            let history = read_lock(&app.state.temp_history);
+            let history = Arc::clone(&snap.temp_history);
             let sorted_sensors = Arc::clone(&cache.sorted);
             let chart_colors = Arc::clone(&cache.colors);
 
@@ -315,7 +364,7 @@ fn view_sensors(app: &App) -> Element<'_, Message> {
 
             for (idx, name) in sorted_sensors.iter().enumerate() {
                 if let Some(temp) = thermal.temps.get(name) {
-                    let color = chart_colors[idx];
+                    let color = chart_colors.get(idx).copied().unwrap_or(iced::Color::WHITE);
                     temp_buf.clear();
                     use std::fmt::Write;
                     let _ = write!(temp_buf, "{}°C", temp);
@@ -330,7 +379,7 @@ fn view_sensors(app: &App) -> Element<'_, Message> {
 
             content = content.push(
                 container(crate::temp_chart::view_temp_chart(crate::temp_chart::TempHistory {
-                    samples: std::sync::Arc::clone(&history),
+                    samples: history,
                     colors: chart_colors,
                     sensor_names: sorted_sensors,
                 }))
@@ -348,9 +397,9 @@ fn view_sensors(app: &App) -> Element<'_, Message> {
     }
 }
 
-fn view_fan_control(app: &App) -> Element<'_, Message> {
-    let thermal = read_lock(&app.state.thermal);
-    let config = read_lock(&app.state.config);
+fn view_fan_control(snap: &ViewSnapshot) -> Element<'static, Message> {
+    let thermal = Arc::clone(&snap.thermal);
+    let config = Arc::clone(&snap.config);
     let current_mode = config.fan.mode;
 
     let fan_rpm_text = thermal.as_ref().as_ref().and_then(|t| {
@@ -461,7 +510,7 @@ fn view_fan_control(app: &App) -> Element<'_, Message> {
                 }
 
                 let pts = &curve.curve.points;
-                let all_pts = read_lock(&app.state.curve_full_points);
+                let all_pts = Arc::clone(&snap.curve_full_points);
                 let canvas = crate::curve_canvas::view_curve(pts, &all_pts);
 
                 let mut curve_area = column![].spacing(2);
@@ -573,9 +622,9 @@ fn view_battery_verbose(battery: &crate::cli::ec_wrapper::BatteryData, show_deta
     Some(content.into())
 }
 
-fn view_battery(app: &App) -> Element<'static, Message> {
-    let battery = read_lock(&app.state.battery);
-    let config = read_lock(&app.state.config);
+fn view_battery(app: &App, snap: &ViewSnapshot) -> Element<'static, Message> {
+    let battery = Arc::clone(&snap.battery);
+    let config = Arc::clone(&snap.config);
     if let Some(battery) = battery.as_ref().as_ref() {
         let charging = battery.power_info.ac_present == Some(true)
             && battery.power_info.discharging != Some(true);
@@ -681,30 +730,30 @@ fn battery_detail_rows(battery_info: &crate::cli::ec_wrapper::BatteryData) -> Op
     }
 }
 
-fn view_misc(app: &App) -> Element<'_, Message> {
+fn view_misc(snap: &ViewSnapshot) -> Element<'static, Message> {
     let mut content = column![text("Misc").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) })].spacing(6);
 
-    content = content.push(kblight_section(app));
+    content = content.push(kblight_section(snap));
 
     content = content.push(space::vertical().height(8));
 
     content = content.push(text("Fingerprint LED").size(FONT_SECTION));
     let button_row = row![
-        button(text("Low").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("low".to_string())).style(btn_style),
-        button(text("Medium").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("medium".to_string())).style(btn_style),
-        button(text("High").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("high".to_string())).style(btn_style),
+        button(text("Low").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("low")).style(btn_style),
+        button(text("Medium").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("medium")).style(btn_style),
+        button(text("High").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("high")).style(btn_style),
     ].spacing(6);
     content = content.push(button_row);
 
     content = content.push(space::vertical().height(8));
 
-    content = content.push(ports_section(app));
+    content = content.push(ports_section(snap));
 
     content.into()
 }
 
-fn kblight_section(app: &App) -> Element<'_, Message> {
-    let kblight = read_lock(&app.state.kblight);
+fn kblight_section(snap: &ViewSnapshot) -> Element<'static, Message> {
+    let kblight = Arc::clone(&snap.kblight);
     let mut content = column![].spacing(2);
     if let Some(kb) = *kblight {
         content = content.push(row![
@@ -722,10 +771,10 @@ fn kblight_section(app: &App) -> Element<'_, Message> {
     content.into()
 }
 
-fn ports_section(app: &App) -> Element<'_, Message> {
-    let cards = read_lock(&app.state.expansion_cards);
-    let ports = read_lock(&app.state.pd_ports);
-    let history = read_lock(&app.state.pd_ports_history);
+fn ports_section(snap: &ViewSnapshot) -> Element<'static, Message> {
+    let cards = Arc::clone(&snap.expansion_cards);
+    let ports = Arc::clone(&snap.pd_ports);
+    let history = Arc::clone(&snap.pd_ports_history);
     let mut content = column![text("Ports & Expansion Cards").size(FONT_SECTION)].spacing(2);
 
     if ports.is_empty() && cards.is_empty() {
@@ -758,7 +807,7 @@ fn ports_section(app: &App) -> Element<'_, Message> {
             content = content.push(row_content);
             if port.pd_contract && !is_display_card {
                 if let Some(ref level) = port.negotiated_text {
-                    let color = if port.power_role.as_deref() == Some("Source") { COLOR_GRAY } else { COLOR_GREEN };
+                    let color = if port.power_role == Some("Source") { COLOR_GRAY } else { COLOR_GREEN };
                     content = content.push(
                         text(format!("  {}", level)).size(FONT_SMALL).style(move |_theme| iced::widget::text::Style { color: Some(color) })
                     );

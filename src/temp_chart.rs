@@ -1,5 +1,5 @@
 use iced::{Color, Element, Length, Point, Size};
-use std::cell::RefCell;
+use std::cell::{Cell, OnceCell};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ pub struct TempSample {
 }
 
 pub struct TempHistory {
-    pub samples: Arc<Vec<TempSample>>,
+    pub samples: Arc<std::collections::VecDeque<TempSample>>,
     pub colors: Arc<Vec<Color>>,
     pub sensor_names: Arc<Vec<String>>,
 }
@@ -27,7 +27,6 @@ pub fn view_temp_chart(history: TempHistory) -> Element<'static, crate::Message>
         samples: history.samples,
         colors: history.colors,
         sensor_names: history.sensor_names,
-        points_buf: RefCell::new(Vec::new()),
     })
     .width(Length::Fill)
     .height(140)
@@ -35,14 +34,32 @@ pub fn view_temp_chart(history: TempHistory) -> Element<'static, crate::Message>
 }
 
 struct TempChartRenderer {
-    samples: Arc<Vec<TempSample>>,
+    samples: Arc<std::collections::VecDeque<TempSample>>,
     colors: Arc<Vec<Color>>,
     sensor_names: Arc<Vec<String>>,
-    points_buf: RefCell<Vec<(f32, f32)>>,
+}
+
+/// Persistent state living in the widget `Tree` — survives `view()` rebuilds.
+struct TempChartState {
+    cache: OnceCell<iced::widget::canvas::Cache<iced::Renderer>>,
+    cached_key: Cell<(*const (), usize, *const ())>,
+    /// Reused line-point buffer, kept in the tree so it is not re-allocated
+    /// on every `view()` rebuild.
+    points_buf: std::cell::RefCell<Vec<(f32, f32)>>,
+}
+
+impl Default for TempChartState {
+    fn default() -> Self {
+        Self {
+            cache: OnceCell::new(),
+            cached_key: Cell::new((std::ptr::null::<()>(), 0, std::ptr::null::<()>())),
+            points_buf: std::cell::RefCell::new(Vec::new()),
+        }
+    }
 }
 
 impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
-    type State = ();
+    type State = TempChartState;
 
     fn update(
         &self,
@@ -56,15 +73,49 @@ impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
 
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         renderer: &iced::Renderer,
         _theme: &iced::Theme,
         bounds: iced::Rectangle,
         _cursor: iced::mouse::Cursor,
     ) -> Vec<iced::widget::canvas::Geometry> {
         let size = bounds.size();
-        let mut frame = iced::widget::canvas::Frame::new(renderer, size);
+        let key = (
+            Arc::as_ptr(&self.samples) as *const (),
+            self.samples.len(),
+            Arc::as_ptr(&self.sensor_names) as *const (),
+        );
+        if state.cached_key.get() != key {
+            state.cached_key.set(key);
+            if let Some(cache) = state.cache.get() {
+                cache.clear();
+            }
+        }
 
+        let cache = state.cache.get_or_init(iced::widget::canvas::Cache::new);
+        let geo = cache.draw(renderer, size, |frame| {
+            let mut points_buf = state.points_buf.borrow_mut();
+            draw_temp_chart_contents(
+                frame,
+                &self.samples,
+                &self.sensor_names,
+                &self.colors,
+                &mut points_buf,
+                size,
+            );
+        });
+        vec![geo]
+    }
+}
+
+fn draw_temp_chart_contents(
+    frame: &mut iced::widget::canvas::Frame<iced::Renderer>,
+    samples: &Arc<std::collections::VecDeque<TempSample>>,
+    sensor_names: &Arc<Vec<String>>,
+    colors: &Arc<Vec<Color>>,
+    points_buf: &mut Vec<(f32, f32)>,
+    size: Size,
+) {
         let margin_left = 30.0f32;
         let margin_right = 8.0f32;
         let margin_top = 4.0f32;
@@ -139,7 +190,7 @@ impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
             });
         }
 
-        if self.samples.is_empty() || self.sensor_names.is_empty() {
+        if samples.is_empty() || sensor_names.is_empty() {
             frame.fill_text(iced::widget::canvas::Text {
                 content: "Waiting for data...".to_string(),
                 position: Point::new(origin.x + plot_w / 2.0, origin.y + plot_h / 2.0),
@@ -152,23 +203,22 @@ impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
                 shaping: iced::widget::text::Shaping::Basic,
                 max_width: f32::INFINITY,
             });
-            return vec![frame.into_geometry()];
+            return;
         }
 
-        let now_ms = self.samples.last().map(|s| s.ts_ms).unwrap_or(0);
+        let now_ms = samples.back().map(|s| s.ts_ms).unwrap_or(0);
         let start_ms = now_ms - HISTORY_MS;
 
         // Draw lines per sensor
-        let mut points_buf = self.points_buf.borrow_mut();
-        for (sensor_idx, sensor_name) in self.sensor_names.iter().enumerate() {
-            let color = if self.colors.is_empty() {
+        for (sensor_idx, sensor_name) in sensor_names.iter().enumerate() {
+            let color = if colors.is_empty() {
                 Color::WHITE
             } else {
-                self.colors[sensor_idx % self.colors.len()]
+                colors[sensor_idx % colors.len()]
             };
 
             points_buf.clear();
-            points_buf.extend(self.samples.iter()
+            points_buf.extend(samples.iter()
                 .filter(|s| s.ts_ms >= start_ms)
                 .filter_map(|s| {
                     let temp = *s.temps.get(sensor_name)? as f32;
@@ -199,7 +249,4 @@ impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
                 );
             }
         }
-
-        vec![frame.into_geometry()]
-    }
 }

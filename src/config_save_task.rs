@@ -35,34 +35,14 @@ pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
         pin_to_slowest_core();
         let mut last_battery: Option<BatteryKey>;
 
-        // Process initial value
+        // Process initial value — apply EC settings without re-writing the
+        // config file (it was just loaded from disk at startup, so the first
+        // save only happens after the first actual change).
         {
-            let cfg = config_rx.borrow().clone();
-            let cfg_arc = Arc::clone(&cfg);
-            let state_clone = state.clone();
-            let save_failed = Arc::clone(&state_clone.bg_config_save_failed);
-            let save_ok = match tokio::task::spawn_blocking(move || {
-                if let Err(e) = crate::config::save(&cfg_arc) {
-                    warn!("Failed to save config: {}", e);
-                    save_failed.store(true, Ordering::Relaxed);
-                    false
-                } else {
-                    save_failed.store(false, Ordering::Relaxed);
-                    true
-                }
-            }).await {
-                Ok(ok) => ok,
-                Err(e) => {
-                    warn!("config save task panicked: {}", e);
-                    false
-                }
-            };
-
+            let cfg = Arc::clone(&config_rx.borrow());
             let key = battery_key(&cfg);
             last_battery = Some(key);
-            if save_ok {
-                apply_battery_settings(&cfg, &state_clone).await;
-            }
+            apply_battery_settings(&cfg, &state).await;
         }
 
         // Watch for changes — debounce: wait for the value to stabilise before saving.
@@ -73,22 +53,21 @@ pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
 
             // Drain rapid successive changes within the debounce window.
             // The timeout returns Err on timeout (normal), Ok(Err(_)) on channel close.
-            let mut latest = config_rx.borrow().clone();
+            let mut latest = Arc::clone(&config_rx.borrow());
             loop {
                 match tokio::time::timeout(
                     Duration::from_millis(DEBOUNCE_MS),
                     config_rx.changed(),
                 ).await {
                     Ok(Ok(())) => {
-                        latest = config_rx.borrow().clone();
+                        latest = Arc::clone(&config_rx.borrow());
                     }
                     Ok(Err(_)) => {
                         // Channel closed — save latest config and exit
                         let cfg_arc = Arc::clone(&latest);
-                        let state_clone = state.clone();
-                        let save_failed = Arc::clone(&state_clone.bg_config_save_failed);
+                        let save_failed = Arc::clone(&state.bg_config_save_failed);
                         tokio::task::spawn_blocking(move || {
-                            if let Err(e) = crate::config::save(&cfg_arc) {
+                            if let Err(e) = crate::config::save_fast(&cfg_arc) {
                                 warn!("Failed to save config on channel close: {}", e);
                                 save_failed.store(true, Ordering::Relaxed);
                             }
@@ -103,10 +82,9 @@ pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
             }
 
             let cfg_arc = Arc::clone(&latest);
-            let state_clone = state.clone();
-            let save_failed = Arc::clone(&state_clone.bg_config_save_failed);
+            let save_failed = Arc::clone(&state.bg_config_save_failed);
             tokio::task::spawn_blocking(move || {
-                if let Err(e) = crate::config::save(&cfg_arc) {
+                if let Err(e) = crate::config::save_fast(&cfg_arc) {
                     warn!("Failed to save config: {}", e);
                     save_failed.store(true, Ordering::Relaxed);
                 } else {
@@ -117,7 +95,7 @@ pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
             let key = battery_key(&latest);
             if last_battery.as_ref() != Some(&key) {
                 last_battery = Some(key);
-                apply_battery_settings(&latest, &state_clone).await;
+                apply_battery_settings(&latest, &state).await;
             }
         }
     });

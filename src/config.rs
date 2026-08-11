@@ -51,6 +51,17 @@ pub fn load() -> Result<Config, String> {
 }
 
 pub fn save(config: &Config) -> Result<(), String> {
+    save_impl(config, true)
+}
+
+/// Like `save`, but skips `sync_all` (fsync). Used on the debounced hot path
+/// where writes are frequent and a crash losing the latest tweak is
+/// acceptable; shutdown paths use `save` for full durability.
+pub fn save_fast(config: &Config) -> Result<(), String> {
+    save_impl(config, false)
+}
+
+fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
     // Clone is required because validate() and sort_by_key() mutate in-place;
     // we must not alter the caller's Config.
     let mut config = config.clone();
@@ -93,7 +104,9 @@ pub fn save(config: &Config) -> Result<(), String> {
     let result = (|| {
         let mut f = std::fs::File::create(&tmp_path).map_err(|e| format!("create tmp failed: {}", e))?;
         f.write_all(content.as_bytes()).map_err(|e| format!("write tmp failed: {}", e))?;
-        f.sync_all().map_err(|e| format!("sync tmp failed: {}", e))?;
+        if sync {
+            f.sync_all().map_err(|e| format!("sync tmp failed: {}", e))?;
+        }
         drop(f);
         atomic_replace(&tmp_path, &path)
     })();

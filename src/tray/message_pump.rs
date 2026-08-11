@@ -126,6 +126,8 @@ pub fn spawn_message_pump(
 }
 
 fn cleanup_and_exit(tray_icon_loaded: bool, tray_hwnd: *mut core::ffi::c_void) {
+    // Clear the thread id so notify_tray_thread() stops posting to a dead thread.
+    TRAY_THREAD_ID.store(0, Ordering::Release);
     if tray_icon_loaded {
         system_info::shell_notify_delete(tray_hwnd as isize);
     }

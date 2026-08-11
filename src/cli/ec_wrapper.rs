@@ -62,10 +62,10 @@ pub struct ExpansionCard {
 pub struct UsbCPort {
     pub port: u32,
     pub pd_contract: bool,
-    pub power_role: Option<String>,
+    pub power_role: Option<&'static str>,
     pub negotiated_text: Option<String>,
     pub negotiated_watts: Option<f32>,
-    pub data_role: Option<String>,
+    pub data_role: Option<&'static str>,
     pub dp_alt_mode: bool,
 }
 
@@ -76,7 +76,7 @@ pub struct UsbCPort {
 const DISPLAY_CARD_WATTS_THRESHOLD: f32 = 3.0;
 
 fn role_is(port: &UsbCPort, role: &str) -> bool {
-    port.power_role.as_deref() == Some(role)
+    port.power_role == Some(role)
 }
 
 fn is_pd_power_input(port: &UsbCPort) -> bool {
@@ -93,7 +93,7 @@ fn is_sink_no_pd(port: &UsbCPort) -> bool {
 
 fn history_has_role(history: &[&Vec<UsbCPort>], port_id: u32, power_role: &str, pd_contract: bool) -> bool {
     history.iter().any(|h| h.iter().any(|p| p.port == port_id
-        && p.power_role.as_deref() == Some(power_role)
+        && p.power_role == Some(power_role)
         && p.pd_contract == pd_contract))
 }
 
@@ -242,6 +242,31 @@ fn sensor_name_for_index(platform: Option<Platform>, index: usize) -> String {
     name.to_string()
 }
 
+/// Per-platform sensor name tables are immutable once resolved. `thermal()`
+/// polls every cycle, so cache the names (keyed by platform) and only clone
+/// the one String needed per sensor instead of re-matching + re-allocating.
+/// Cache of per-platform sensor name tables (platform, names).
+type SensorNamesCache = std::sync::Mutex<Option<(Option<Platform>, Vec<String>)>>;
+
+static SENSOR_NAMES: std::sync::OnceLock<SensorNamesCache> = std::sync::OnceLock::new();
+
+fn sensor_name(platform: Option<Platform>, index: usize) -> String {
+    let cache = SENSOR_NAMES.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cache.lock().unwrap_or_else(|p| p.into_inner());
+    let (cached_platform, names) = guard.get_or_insert_with(|| (platform, Vec::new()));
+    if *cached_platform != platform {
+        *cached_platform = platform;
+        names.clear();
+    }
+    if index >= names.len() {
+        names.resize(index + 1, String::new());
+    }
+    if names[index].is_empty() {
+        names[index] = sensor_name_for_index(platform, index);
+    }
+    names[index].clone()
+}
+
 impl EcClient {
     pub fn new() -> Result<Self, String> {
         let ec = CrosEc::new();
@@ -262,7 +287,7 @@ impl EcClient {
                     0xFC..=0xFF => continue,
                     _ => {
                         let temp = byte as i32 - 73;
-                        let name = sensor_name_for_index(platform, i);
+                        let name = sensor_name(platform, i);
                         temps.insert(name, temp);
                     }
                 }
@@ -465,10 +490,10 @@ impl EcClient {
             ports.push(UsbCPort {
                 port: i as u32,
                 pd_contract: pd_state != 0,
-                power_role: Some(power_role.to_string()),
+                power_role: Some(power_role),
                 negotiated_text,
                 negotiated_watts,
-                data_role: Some(data_role.to_string()),
+                data_role: Some(data_role),
                 dp_alt_mode: (dp_alt_raw & 0x03) != 0,
             });
         }
