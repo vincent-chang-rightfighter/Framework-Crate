@@ -640,6 +640,9 @@ fn view_battery_verbose(battery: &crate::cli::ec_wrapper::BatteryData, show_deta
 /// the card fill all leftover space even when its content is short.
 const BATTERY_SECTION_MAX_HEIGHT: f32 = 300.0;
 
+/// Cap for the Misc card (keyboard backlight, fingerprint LED, ports).
+const MISC_SECTION_MAX_HEIGHT: f32 = 300.0;
+
 fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message> {
     let battery = &snap.battery;
     let config = &snap.config;
@@ -774,7 +777,13 @@ fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
 
     content = content.push(ports_section(snap));
 
-    content.into()
+    let right_pad = iced::Padding::ZERO.right(14.0);
+    container(
+        scrollable(container(content).padding(right_pad)).height(Length::Shrink)
+    )
+    .width(Length::Fill)
+    .max_height(MISC_SECTION_MAX_HEIGHT)
+    .into()
 }
 
 fn kblight_section(snap: &ViewSnapshot) -> Element<'_, Message> {
