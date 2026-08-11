@@ -125,13 +125,17 @@ impl TrayManager {
         notify_tray_thread();
     }
 
+    /// Restore the parked window back on screen at its saved position.
+    /// The swapchain stays valid while parked, so no blank frame appears.
     pub fn restore_window(&self) {
-        crate::system_info::show_window(self.hwnd, crate::system_info::SW_RESTORE);
-        crate::system_info::set_foreground_window(self.hwnd);
+        crate::system_info::restore_window_from_tray(self.hwnd);
     }
 
+    /// Park the window off-screen (keeps it WS_VISIBLE so WM_PAINT keeps
+    /// arriving and the swapchain stays valid) instead of SW_HIDE, which
+    /// would make the first frames after restore blank/white.
     pub fn hide_window(&self) {
-        crate::system_info::show_window(self.hwnd, crate::system_info::SW_HIDE);
+        crate::system_info::hide_window_to_tray(self.hwnd);
     }
 
     pub fn shutdown(&mut self) {

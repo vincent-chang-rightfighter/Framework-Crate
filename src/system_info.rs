@@ -17,8 +17,6 @@ const SM_CXSCREEN: i32 = 0;
 const SM_CYSCREEN: i32 = 1;
 
 // Tray icon constants
-pub const SW_HIDE: i32 = 0;
-pub const SW_RESTORE: i32 = 9;
 const WM_NULL: u32 = 0x00;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
 const TPM_RETURNCMD: u32 = 0x0100;
@@ -105,6 +103,129 @@ extern "system" {
     fn AppendMenuW(hMenu: *mut core::ffi::c_void, uFlags: u32, uIDNewItem: usize, lpNewItem: LPCWSTR) -> i32;
     fn TrackPopupMenu(hMenu: *mut core::ffi::c_void, uFlags: u32, x: i32, y: i32, nReserved: i32, hWnd: *mut core::ffi::c_void, prcRect: *const core::ffi::c_void) -> i32;
     fn DestroyMenu(hMenu: *mut core::ffi::c_void) -> i32;
+    fn GetWindowPlacement(hWnd: *mut core::ffi::c_void, lpwndpl: *mut WINDOWPLACEMENT) -> i32;
+    fn SetWindowPlacement(hWnd: *mut core::ffi::c_void, lpwndpl: *const WINDOWPLACEMENT) -> i32;
+    fn GetWindowLongPtrW(hWnd: *mut core::ffi::c_void, nIndex: i32) -> isize;
+    fn SetWindowLongPtrW(hWnd: *mut core::ffi::c_void, nIndex: i32, dwNewLong: isize) -> isize;
+    fn SetFocus(hWnd: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+    fn SetWindowPos(
+        hWnd: *mut core::ffi::c_void,
+        hWndInsertAfter: *mut core::ffi::c_void,
+        x: i32,
+        y: i32,
+        cx: i32,
+        cy: i32,
+        uFlags: u32,
+    ) -> i32;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(clippy::upper_case_acronyms)]
+struct POINT {
+    x: i32,
+    y: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(clippy::upper_case_acronyms)]
+struct RECT {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(clippy::upper_case_acronyms)]
+#[allow(non_snake_case)]
+struct WINDOWPLACEMENT {
+    length: u32,
+    flags: u32,
+    showCmd: u32,
+    ptMinPosition: POINT,
+    ptMaxPosition: POINT,
+    rcNormalPosition: RECT,
+}
+
+const GWL_EXSTYLE: i32 = -20;
+const WS_EX_TOOLWINDOW: isize = 0x00000080;
+const SW_SHOWNOACTIVATE: u32 = 4;
+const SW_RESTORE: u32 = 9;
+const SWP_NOSIZE: u32 = 0x0001;
+const SWP_NOMOVE: u32 = 0x0002;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_NOACTIVATE: u32 = 0x0010;
+const SWP_FRAMECHANGED: u32 = 0x0020;
+/// Classic off-screen parking coordinates (far outside the virtual screen).
+const OFFSCREEN: i32 = -32000;
+
+/// Placement saved when the window is parked, used to restore its on-screen
+/// position and size.
+static SAVED_PLACEMENT: std::sync::Mutex<Option<WINDOWPLACEMENT>> = std::sync::Mutex::new(None);
+
+/// "Hide" the window by parking it off-screen instead of SW_HIDE. The window
+/// stays WS_VISIBLE, so WM_PAINT keeps arriving and the swapchain stays valid
+/// while hidden — on restore there is no white/blank frame.
+pub fn hide_window_to_tray(hwnd: isize) {
+    let h = hwnd as *mut core::ffi::c_void;
+    // SAFETY: hwnd is a valid window handle from FindWindowW/CreateWindowExW.
+    unsafe {
+        let mut placement = std::mem::zeroed::<WINDOWPLACEMENT>();
+        placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+        if GetWindowPlacement(h, &mut placement) != 0 {
+            *SAVED_PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()) = Some(placement);
+        }
+        let width = (placement.rcNormalPosition.right - placement.rcNormalPosition.left).max(100);
+        let height = (placement.rcNormalPosition.bottom - placement.rcNormalPosition.top).max(100);
+        let parked = WINDOWPLACEMENT {
+            length: placement.length,
+            flags: 0,
+            showCmd: SW_SHOWNOACTIVATE,
+            ptMinPosition: placement.ptMinPosition,
+            ptMaxPosition: placement.ptMaxPosition,
+            rcNormalPosition: RECT {
+                left: OFFSCREEN,
+                top: OFFSCREEN,
+                right: OFFSCREEN + width,
+                bottom: OFFSCREEN + height,
+            },
+        };
+        // Un-minimize/un-maximize at the parked position without activating.
+        SetWindowPlacement(h, &parked);
+        // Remove taskbar / alt-tab presence while parked. SWP_FRAMECHANGED
+        // makes the taskbar re-evaluate the extended style.
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW);
+        SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        // Drop keyboard focus so keystrokes don't reach the invisible window.
+        SetFocus(std::ptr::null_mut());
+    }
+}
+
+/// Restore a parked window back on screen at its saved position.
+pub fn restore_window_from_tray(hwnd: isize) {
+    let h = hwnd as *mut core::ffi::c_void;
+    // SAFETY: hwnd is a valid window handle from FindWindowW/CreateWindowExW.
+    unsafe {
+        // Re-add taskbar / alt-tab presence. SWP_FRAMECHANGED makes the
+        // taskbar re-evaluate the extended style.
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        SetWindowLongPtrW(h, GWL_EXSTYLE, ex & !WS_EX_TOOLWINDOW);
+        SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        if let Some(mut placement) =
+            SAVED_PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()).take()
+        {
+            placement.showCmd = SW_RESTORE;
+            placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+            SetWindowPlacement(h, &placement);
+        } else {
+            ShowWindow(h, SW_RESTORE as i32);
+        }
+        SetForegroundWindow(h);
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -347,20 +468,6 @@ pub fn find_window_by_title(title: &str) -> Option<isize> {
     } else {
         Some(hwnd as isize)
     }
-}
-
-pub fn show_window(hwnd: isize, cmd: i32) {
-    // SAFETY: ShowWindow changes the visibility of the specified window.
-    // hwnd is a valid window handle from FindWindowW/CreateWindowExW.
-    // cmd is one of SW_HIDE, SW_SHOW, SW_RESTORE constants.
-    unsafe { ShowWindow(hwnd as *mut core::ffi::c_void, cmd); }
-}
-
-pub fn set_foreground_window(hwnd: isize) {
-    // SAFETY: SetForegroundWindow brings the specified window to the foreground.
-    // hwnd is a valid window handle. This may fail if the calling process
-    // is not in the foreground, but we ignore the return value gracefully.
-    unsafe { SetForegroundWindow(hwnd as *mut core::ffi::c_void); }
 }
 
 pub fn is_iconic(hwnd: isize) -> bool {
