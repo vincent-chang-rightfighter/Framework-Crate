@@ -148,6 +148,10 @@ struct WINDOWPLACEMENT {
     ptMinPosition: POINT,
     ptMaxPosition: POINT,
     rcNormalPosition: RECT,
+    /// Reserved (rcDevice). Must be present: SetWindowPlacement validates
+    /// `length == sizeof(WINDOWPLACEMENT)` (60 bytes on x64/x86) and fails
+    /// otherwise, leaving the window parked on screen.
+    rcDevice: RECT,
 }
 
 const GWL_EXSTYLE: i32 = -20;
@@ -165,6 +169,11 @@ const SWP_NOACTIVATE: u32 = 0x0010;
 const SWP_FRAMECHANGED: u32 = 0x0020;
 /// Classic off-screen parking coordinates (far outside the virtual screen).
 const OFFSCREEN: i32 = -32000;
+
+/// The Windows SDK WINDOWPLACEMENT is exactly 60 bytes (incl. reserved
+/// rcDevice) on both x86 and x64. SetWindowPlacement fails if `length` does
+/// not match sizeof(WINDOWPLACEMENT), so pin the size at compile time.
+const _: () = assert!(std::mem::size_of::<WINDOWPLACEMENT>() == 60);
 
 /// Placement saved when the window is parked, used to restore its on-screen
 /// position and size.
@@ -196,9 +205,20 @@ pub fn hide_window_to_tray(hwnd: isize) {
                 right: OFFSCREEN + width,
                 bottom: OFFSCREEN + height,
             },
+            rcDevice: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
         };
         // Un-minimize/un-maximize at the parked position without activating.
-        SetWindowPlacement(h, &parked);
+        if SetWindowPlacement(h, &parked) == 0 {
+            tracing::error!(
+                "SetWindowPlacement (park) failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
         // Remove taskbar / alt-tab presence while parked. WS_EX_TOOLWINDOW
         // alone is not enough: winit's default WS_EX_APPWINDOW forces a
         // taskbar button even alongside it, so clear that too. SWP_FRAMECHANGED
@@ -227,7 +247,12 @@ pub fn restore_window_from_tray(hwnd: isize) {
         {
             placement.showCmd = SW_RESTORE;
             placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
-            SetWindowPlacement(h, &placement);
+            if SetWindowPlacement(h, &placement) == 0 {
+                tracing::error!(
+                    "SetWindowPlacement (restore) failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
         } else {
             ShowWindow(h, SW_RESTORE as i32);
         }
