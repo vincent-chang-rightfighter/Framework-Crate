@@ -98,7 +98,7 @@ pub struct App {
     pub last_curve_edit_ts: Instant,
     pub last_curve_points: Vec<[u32; 2]>,
     pub icon_create_in_flight: bool,
-    pub(crate) cached_snapshot: std::cell::RefCell<Option<crate::views::ViewSnapshot>>,
+    pub(crate) cached_snapshot: Option<crate::views::ViewSnapshot>,
 }
 
 pub struct SystemInfo {
@@ -131,7 +131,7 @@ pub struct AppState {
     pub versions: Arc<RwLock<Arc<Option<cli::ec_wrapper::VersionsData>>>>,
     pub battery: Arc<RwLock<Arc<Option<BatteryInfo>>>>,
     pub poll_ms: Arc<AtomicU64>,
-    pub temp_history: Arc<RwLock<Arc<VecDeque<temp_chart::TempSample>>>>,
+    pub temp_history: Arc<RwLock<Arc<temp_chart::ThermalHistory>>>,
     pub kblight: Arc<RwLock<Arc<Option<u32>>>>,
     pub expansion_cards: Arc<RwLock<Arc<Vec<cli::ec_wrapper::ExpansionCard>>>>,
     pub pd_ports: Arc<RwLock<Arc<Vec<cli::ec_wrapper::UsbCPort>>>>,
@@ -170,7 +170,7 @@ impl App {
             versions: Arc::new(RwLock::new(Arc::new(None))),
             battery: Arc::new(RwLock::new(Arc::new(None))),
             poll_ms: Arc::new(AtomicU64::new(poll_ms)),
-            temp_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
+            temp_history: Arc::new(RwLock::new(Arc::new(temp_chart::ThermalHistory::new()))),
             kblight: Arc::new(RwLock::new(Arc::new(None))),
             expansion_cards: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             pd_ports: Arc::new(RwLock::new(Arc::new(Vec::new()))),
@@ -231,7 +231,7 @@ impl App {
             last_curve_edit_ts: Instant::now(),
             last_curve_points: Vec::new(),
             icon_create_in_flight: false,
-            cached_snapshot: std::cell::RefCell::new(None),
+            cached_snapshot: None,
         };
 
         let init_task = Task::perform(async move {
@@ -284,6 +284,15 @@ impl App {
                 let now_ms = crate::util::current_time_ms();
                 self.state.last_interaction_ts.store(now_ms, Ordering::Release);
             }
+        }
+        // Rebuild the view snapshot whenever new data arrived (background
+        // thread sets view_dirty) or none exists yet. Runs here (not in
+        // view()) so sub-views can borrow from a snapshot owned by `self`.
+        if self.init_complete
+            && (self.state.view_dirty.load(Ordering::Acquire) || self.cached_snapshot.is_none())
+        {
+            self.cached_snapshot = Some(crate::views::ViewSnapshot::from_app(self));
+            self.state.view_dirty.store(false, Ordering::Release);
         }
         match message {
             Message::Tick => {
@@ -381,6 +390,8 @@ impl App {
                 self.init_complete = true;
                 self.rebuild_header_info();
                 self.rebuild_sensor_cache();
+                self.cached_snapshot = Some(crate::views::ViewSnapshot::from_app(self));
+                self.state.view_dirty.store(false, Ordering::Release);
                 return tick_task(0);
             }
             Message::StartupError(msg) => {

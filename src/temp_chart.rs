@@ -16,6 +16,65 @@ pub struct TempSample {
     pub temps: std::sync::Arc<BTreeMap<String, i32>>,
 }
 
+/// How often the double-buffer `published` snapshot is refreshed (ms). The
+/// chart shows a 30s window, so a 1s publishing lag is invisible while it
+/// cuts full-deque clones from "every changed poll" to 1/s.
+pub const HISTORY_PUBLISH_MS: i64 = 1_000;
+
+/// Double-buffered temperature history.
+///
+/// The background writer mutates `draft` in place (push + prune, no
+/// allocation beyond VecDeque growth). Readers receive an `Arc` snapshot
+/// that is re-published at most once per `HISTORY_PUBLISH_MS`, so the
+/// per-sample full-history clone is eliminated.
+#[derive(Clone)]
+pub struct ThermalHistory {
+    draft: std::collections::VecDeque<TempSample>,
+    published: Arc<std::collections::VecDeque<TempSample>>,
+    last_publish_ms: i64,
+}
+
+impl Default for ThermalHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ThermalHistory {
+    pub fn new() -> Self {
+        Self {
+            draft: std::collections::VecDeque::new(),
+            published: Arc::new(std::collections::VecDeque::new()),
+            last_publish_ms: 0,
+        }
+    }
+
+    /// Writer side: push a sample and drop entries older than the window.
+    /// Caller must hold the write lock.
+    pub fn push_sample(&mut self, sample: TempSample, now_ms: i64) {
+        self.draft.push_back(sample);
+        let cutoff = now_ms - HISTORY_MS;
+        while let Some(front) = self.draft.front() {
+            if front.ts_ms <= cutoff {
+                self.draft.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Reader side: return an `Arc` snapshot of the history, re-publishing
+    /// the draft at most once per `HISTORY_PUBLISH_MS`. Cheap when the
+    /// interval has not elapsed (just an Arc refcount increment).
+    pub fn snapshot(&mut self, now_ms: i64) -> Arc<std::collections::VecDeque<TempSample>> {
+        if self.last_publish_ms == 0 || now_ms - self.last_publish_ms >= HISTORY_PUBLISH_MS {
+            self.published = Arc::new(self.draft.clone());
+            self.last_publish_ms = now_ms;
+        }
+        Arc::clone(&self.published)
+    }
+}
+
 pub struct TempHistory {
     pub samples: Arc<std::collections::VecDeque<TempSample>>,
     pub colors: Arc<Vec<Color>>,
@@ -249,4 +308,73 @@ fn draw_temp_chart_contents(
                 );
             }
         }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(ts: i64) -> TempSample {
+        TempSample {
+            ts_ms: ts,
+            temps: Arc::new(BTreeMap::new()),
+        }
+    }
+
+    #[test]
+    fn history_new_is_empty() {
+        let h = ThermalHistory::new();
+        assert!(h.draft.is_empty());
+        assert!(h.published.is_empty());
+        assert_eq!(h.last_publish_ms, 0);
+    }
+
+    #[test]
+    fn push_sample_prunes_expired_entries() {
+        let mut h = ThermalHistory::new();
+        let now = 100_000i64;
+        // Old sample far outside the 30s window
+        h.push_sample(sample(now - 100_000), now);
+        // Recent samples
+        h.push_sample(sample(now - 20_000), now);
+        h.push_sample(sample(now - 10_000), now);
+        h.push_sample(sample(now), now);
+        assert_eq!(h.draft.len(), 3, "expired entry should be pruned");
+        assert_eq!(h.draft.front().unwrap().ts_ms, now - 20_000);
+    }
+
+    #[test]
+    fn snapshot_publishes_immediately_on_first_call() {
+        let mut h = ThermalHistory::new();
+        let now = 100_000i64;
+        h.push_sample(sample(now), now);
+        let snap = h.snapshot(now);
+        assert_eq!(snap.len(), 1);
+        assert!(Arc::ptr_eq(&snap, &h.published));
+    }
+
+    #[test]
+    fn snapshot_reuses_arc_within_publish_interval() {
+        let mut h = ThermalHistory::new();
+        let now = 100_000i64;
+        h.push_sample(sample(now), now);
+        let snap1 = h.snapshot(now);
+        h.push_sample(sample(now + 200), now + 200);
+        // Still within the 1s publish interval
+        let snap2 = h.snapshot(now + 900);
+        assert!(Arc::ptr_eq(&snap1, &snap2), "no republish within interval");
+        assert_eq!(snap2.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_republishes_after_interval() {
+        let mut h = ThermalHistory::new();
+        let now = 100_000i64;
+        h.push_sample(sample(now), now);
+        let snap1 = h.snapshot(now);
+        h.push_sample(sample(now + 1_500), now + 1_500);
+        let snap2 = h.snapshot(now + 1_500);
+        assert!(!Arc::ptr_eq(&snap1, &snap2), "should republish after interval");
+        assert_eq!(snap2.len(), 2);
+    }
 }

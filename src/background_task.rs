@@ -152,21 +152,14 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
     });
 
     with_write_lock(&state.temp_history, |hist| {
-        let mut h = (**hist).clone();
-        let sample = temp_chart::TempSample {
-            ts_ms: now,
-            temps: temps_for_history,
-        };
-        h.push_back(sample);
-        let cutoff = now - crate::temp_chart::HISTORY_MS;
-        while let Some(front) = h.front() {
-            if front.ts_ms <= cutoff {
-                h.pop_front();
-            } else {
-                break;
-            }
-        }
-        *hist = Arc::new(h);
+        let hist = Arc::make_mut(hist);
+        hist.push_sample(
+            temp_chart::TempSample {
+                ts_ms: now,
+                temps: temps_for_history,
+            },
+            now,
+        );
     });
     true
 }

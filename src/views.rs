@@ -4,6 +4,7 @@ use crate::cli;
 use crate::read_lock;
 use crate::style::*;
 use crate::types::FanControlMode;
+use crate::with_write_lock;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::widget::rule;
 use iced::widget::space;
@@ -30,7 +31,9 @@ impl ViewSnapshot {
             thermal: Arc::clone(&read_lock(&app.state.thermal)),
             config: Arc::clone(&read_lock(&app.state.config)),
             sensor_cache: Arc::clone(&read_lock(&app.state.sensor_cache)),
-            temp_history: Arc::clone(&read_lock(&app.state.temp_history)),
+            temp_history: with_write_lock(&app.state.temp_history, |h| {
+                Arc::make_mut(h).snapshot(crate::util::current_time_ms_i64())
+            }),
             battery: Arc::clone(&read_lock(&app.state.battery)),
             kblight: Arc::clone(&read_lock(&app.state.kblight)),
             expansion_cards: Arc::clone(&read_lock(&app.state.expansion_cards)),
@@ -94,19 +97,16 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
         return view_quit_warning(app);
     }
 
-    let dirty = app.state.view_dirty.load(std::sync::atomic::Ordering::Acquire);
-    if dirty {
-        let s = ViewSnapshot::from_app(app);
-        app.state.view_dirty.store(false, std::sync::atomic::Ordering::Release);
-        *app.cached_snapshot.borrow_mut() = Some(s);
-    }
-    if app.cached_snapshot.borrow().is_none() {
-        // Defensive: only reachable on the first frame if the dirty flag was
-        // cleared before a snapshot was cached.
-        *app.cached_snapshot.borrow_mut() = Some(ViewSnapshot::from_app(app));
-    }
-    let snap_guard = app.cached_snapshot.borrow();
-    let snap = snap_guard.as_ref().unwrap();
+    let snap = match &app.cached_snapshot {
+        Some(snap) => snap,
+        None => {
+            // First frame after init (before the first Tick rebuild): show a
+            // placeholder instead of borrowing from a temporary snapshot.
+            return container(text("Preparing view...").size(FONT_BODY))
+                .padding(20)
+                .into();
+        }
+    };
 
     let header = view_header(app);
     let config_warning = if app.config_save_failed {
@@ -291,14 +291,14 @@ fn view_header(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-fn view_sensors(app: &App, snap: &ViewSnapshot) -> Element<'static, Message> {
-    let thermal = Arc::clone(&snap.thermal);
+fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message> {
+    let thermal = &snap.thermal;
     match thermal.as_ref().as_ref() {
         Some(thermal) => {
             let mut content = column![].spacing(6);
 
-            let cache = Arc::clone(&snap.sensor_cache);
-            let config = Arc::clone(&snap.config);
+            let cache = &snap.sensor_cache;
+            let config = &snap.config;
             let all_empty = config.telemetry.selected_sensors.is_empty();
 
             let settings_label = if app.show_sensor_settings { "[-] Settings" } else { "[+] Settings" };
@@ -312,12 +312,14 @@ fn view_sensors(app: &App, snap: &ViewSnapshot) -> Element<'static, Message> {
                 ]
             );
 
-            let settings_panel: Element<'static, Message> = if app.show_sensor_settings {
+            let settings_panel: Element<'_, Message> = if app.show_sensor_settings {
                 let mut settings_content = column![].spacing(4).padding(4);
                 settings_content = settings_content.push(text("Sensors").size(FONT_BODY));
 
                 for (idx, name) in cache.keys.iter().enumerate() {
-                    let color = sensor_color(name, &cache.keys);
+                    // The loop index is the position in `cache.keys`, so use
+                    // it directly instead of a per-row linear scan.
+                    let color = SENSOR_COLORS[idx % SENSOR_COLORS.len()];
                     let is_on = all_empty || config.telemetry.selected_sensors.contains(name);
                     let on_off = if is_on { "On" } else { "Off" };
                     let on_color = if is_on { COLOR_GREEN } else { COLOR_GRAY };
@@ -334,7 +336,7 @@ fn view_sensors(app: &App, snap: &ViewSnapshot) -> Element<'static, Message> {
                                     })
                              ).on_press(Message::SensorToggled(idx, !is_on))
                               .style(btn_style).padding(0),
-                            text(name.clone()).size(FONT_BODY),
+                            text(name.as_str()).size(FONT_BODY),
                             space::horizontal(),
                             text(on_off).size(FONT_SMALL).style(move |_theme| iced::widget::text::Style { color: Some(on_color) }),
                         ].align_y(iced::Alignment::Center).spacing(6)
@@ -356,7 +358,7 @@ fn view_sensors(app: &App, snap: &ViewSnapshot) -> Element<'static, Message> {
             content = content.push(settings_panel);
 
             let history = Arc::clone(&snap.temp_history);
-            let sorted_sensors = Arc::clone(&cache.sorted);
+            let sorted_sensors = &cache.sorted;
             let chart_colors = Arc::clone(&cache.colors);
 
             let mut list_content = column![].spacing(2);
@@ -370,7 +372,7 @@ fn view_sensors(app: &App, snap: &ViewSnapshot) -> Element<'static, Message> {
                     let _ = write!(temp_buf, "{}°C", temp);
                     let row = row![
                         colored_dot(color, 10.0),
-                        text(name.clone()).size(FONT_BODY).width(Length::Fill),
+                        text(name.as_str()).size(FONT_BODY).width(Length::Fill),
                         text(temp_buf.clone()).size(FONT_BODY),
                     ].align_y(iced::Alignment::Center).spacing(6);
                     list_content = list_content.push(row);
@@ -381,7 +383,7 @@ fn view_sensors(app: &App, snap: &ViewSnapshot) -> Element<'static, Message> {
                 container(crate::temp_chart::view_temp_chart(crate::temp_chart::TempHistory {
                     samples: history,
                     colors: chart_colors,
-                    sensor_names: sorted_sensors,
+                    sensor_names: Arc::clone(&cache.sorted),
                 }))
                     .width(Length::Fill)
                     .height(150)
@@ -397,9 +399,9 @@ fn view_sensors(app: &App, snap: &ViewSnapshot) -> Element<'static, Message> {
     }
 }
 
-fn view_fan_control(snap: &ViewSnapshot) -> Element<'static, Message> {
-    let thermal = Arc::clone(&snap.thermal);
-    let config = Arc::clone(&snap.config);
+fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
+    let thermal = &snap.thermal;
+    let config = &snap.config;
     let current_mode = config.fan.mode;
 
     let fan_rpm_text = thermal.as_ref().as_ref().and_then(|t| {
@@ -538,7 +540,7 @@ fn view_charge_limit_section(enabled: bool, value: u32) -> Element<'static, Mess
     ].spacing(4).into()
 }
 
-fn view_battery_info(battery: &crate::cli::ec_wrapper::BatteryData, charging: bool) -> Element<'static, Message> {
+fn view_battery_info(battery: &crate::cli::ec_wrapper::BatteryData, charging: bool) -> Element<'_, Message> {
     let mut rows = column![].spacing(4);
 
     if let Some(v) = battery.remaining_capacity_mah {
@@ -590,7 +592,7 @@ fn view_battery_info(battery: &crate::cli::ec_wrapper::BatteryData, charging: bo
     rows.into()
 }
 
-fn view_battery_verbose(battery: &crate::cli::ec_wrapper::BatteryData, show_details: bool) -> Option<Element<'static, Message>> {
+fn view_battery_verbose(battery: &crate::cli::ec_wrapper::BatteryData, show_details: bool) -> Option<Element<'_, Message>> {
     let has_verbose = battery.manufacturer.is_some()
         || battery.model_number.is_some()
         || battery.serial_number.is_some()
@@ -622,9 +624,9 @@ fn view_battery_verbose(battery: &crate::cli::ec_wrapper::BatteryData, show_deta
     Some(content.into())
 }
 
-fn view_battery(app: &App, snap: &ViewSnapshot) -> Element<'static, Message> {
-    let battery = Arc::clone(&snap.battery);
-    let config = Arc::clone(&snap.config);
+fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message> {
+    let battery = &snap.battery;
+    let config = &snap.config;
     if let Some(battery) = battery.as_ref().as_ref() {
         let charging = battery.power_info.ac_present == Some(true)
             && battery.power_info.discharging != Some(true);
@@ -672,25 +674,25 @@ fn view_battery(app: &App, snap: &ViewSnapshot) -> Element<'static, Message> {
     }
 }
 
-fn battery_detail_rows(battery_info: &crate::cli::ec_wrapper::BatteryData) -> Option<Element<'static, Message>> {
+fn battery_detail_rows(battery_info: &crate::cli::ec_wrapper::BatteryData) -> Option<Element<'_, Message>> {
     let mut rows = column![].spacing(2).padding(4);
     let mut has_content = false;
 
     if let Some(ref v) = battery_info.manufacturer {
         has_content = true;
-        rows = rows.push(row![text("Manufacturer:").size(FONT_SMALL), space::horizontal(), text(v.clone()).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(row![text("Manufacturer:").size(FONT_SMALL), space::horizontal(), text(v.as_str()).size(FONT_SMALL)].spacing(4));
     }
     if let Some(ref v) = battery_info.model_number {
         has_content = true;
-        rows = rows.push(row![text("Model:").size(FONT_SMALL), space::horizontal(), text(v.clone()).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(row![text("Model:").size(FONT_SMALL), space::horizontal(), text(v.as_str()).size(FONT_SMALL)].spacing(4));
     }
     if let Some(ref v) = battery_info.serial_number {
         has_content = true;
-        rows = rows.push(row![text("Serial:").size(FONT_SMALL), space::horizontal(), text(v.clone()).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(row![text("Serial:").size(FONT_SMALL), space::horizontal(), text(v.as_str()).size(FONT_SMALL)].spacing(4));
     }
     if let Some(ref v) = battery_info.battery_type {
         has_content = true;
-        rows = rows.push(row![text("Type:").size(FONT_SMALL), space::horizontal(), text(v.clone()).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(row![text("Type:").size(FONT_SMALL), space::horizontal(), text(v.as_str()).size(FONT_SMALL)].spacing(4));
     }
     if let Some(v) = battery_info.remaining_capacity_wh {
         has_content = true;
@@ -730,7 +732,7 @@ fn battery_detail_rows(battery_info: &crate::cli::ec_wrapper::BatteryData) -> Op
     }
 }
 
-fn view_misc(snap: &ViewSnapshot) -> Element<'static, Message> {
+fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
     let mut content = column![text("Misc").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) })].spacing(6);
 
     content = content.push(kblight_section(snap));
@@ -752,10 +754,10 @@ fn view_misc(snap: &ViewSnapshot) -> Element<'static, Message> {
     content.into()
 }
 
-fn kblight_section(snap: &ViewSnapshot) -> Element<'static, Message> {
-    let kblight = Arc::clone(&snap.kblight);
+fn kblight_section(snap: &ViewSnapshot) -> Element<'_, Message> {
+    let kblight = &snap.kblight;
     let mut content = column![].spacing(2);
-    if let Some(kb) = *kblight {
+    if let Some(kb) = kblight.as_ref().as_ref().copied() {
         content = content.push(row![
             text("Keyboard Backlight").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
             space::horizontal(),
@@ -771,10 +773,10 @@ fn kblight_section(snap: &ViewSnapshot) -> Element<'static, Message> {
     content.into()
 }
 
-fn ports_section(snap: &ViewSnapshot) -> Element<'static, Message> {
-    let cards = Arc::clone(&snap.expansion_cards);
-    let ports = Arc::clone(&snap.pd_ports);
-    let history = Arc::clone(&snap.pd_ports_history);
+fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
+    let cards = &snap.expansion_cards;
+    let ports = &snap.pd_ports;
+    let history = &snap.pd_ports_history;
     let mut content = column![text("Ports & Expansion Cards").size(FONT_SECTION)].spacing(2);
 
     if ports.is_empty() && cards.is_empty() {
@@ -818,7 +820,7 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'static, Message> {
         for card in cards.iter().filter(|c| c.name.contains("Audio")) {
             let mut row_content = row![
                 colored_dot(COLOR_GREEN, 8.0),
-                text(card.name.clone()).size(FONT_BODY),
+                text(card.name.as_str()).size(FONT_BODY),
             ].align_y(iced::Alignment::Center).spacing(6);
             if let Some(ref fw) = card.active_firmware {
                 row_content = row_content.push(text(format!("v{}", fw)).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
