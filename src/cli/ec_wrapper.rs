@@ -368,20 +368,23 @@ impl EcClient {
         };
 
         if let Some((ro, rw, current_image)) = self.ec.flash_version() {
-            data.ec_build_version = Some(format!("RO:{} RW:{} Current:{:?}", ro, rw, current_image));
-            data.ec_current_image = Some(format!("{:?}", current_image));
+            let current = match current_image {
+                framework_lib::chromium_ec::EcCurrentImage::RO => "RO",
+                framework_lib::chromium_ec::EcCurrentImage::RW => "RW",
+                _ => "Unknown",
+            };
+            data.ec_build_version = Some(if current == "RO" { ro } else { rw });
+            data.ec_current_image = Some(current.to_string());
         }
 
         if let Some(esrt) = framework_lib::esrt::get_esrt() {
             for entry in esrt.entries.iter().take(esrt.resource_count as usize) {
                 let version = format!(
-                    "{:02X}.{:02X}.{:02X}.{:02X}",
-                    entry.fw_version >> 24,
-                    (entry.fw_version >> 16) & 0xFF,
+                    "{:02X}.{:02X}",
                     (entry.fw_version >> 8) & 0xFF,
                     entry.fw_version & 0xFF
                 );
-                if entry.fw_type == 0 {
+                if entry.fw_type == 1 {
                     data.uefi_version = Some(version);
                 }
             }
