@@ -171,7 +171,7 @@ impl TrayManager {
 
     pub fn is_recently_restored(&self) -> bool {
         self.just_restored_at
-            .map(|t| t.elapsed() < std::time::Duration::from_millis(800))
+            .map(|t| t.elapsed() < std::time::Duration::from_millis(2000))
             .unwrap_or(false)
     }
 

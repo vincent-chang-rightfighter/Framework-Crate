@@ -117,6 +117,7 @@ extern "system" {
         cy: i32,
         uFlags: u32,
     ) -> i32;
+    fn keybd_event(bVk: u8, bScan: u8, dwFlags: u32, dwExtraInfo: usize);
 }
 
 #[repr(C)]
@@ -168,6 +169,7 @@ const SWP_NOMOVE: u32 = 0x0002;
 const SWP_NOZORDER: u32 = 0x0004;
 const SWP_NOACTIVATE: u32 = 0x0010;
 const SWP_FRAMECHANGED: u32 = 0x0020;
+const SWP_SHOWWINDOW: u32 = 0x0040;
 /// Classic off-screen parking coordinates (far outside the virtual screen).
 const OFFSCREEN: i32 = -32000;
 
@@ -237,6 +239,15 @@ pub fn restore_window_from_tray(hwnd: isize) {
             SetWindowLongPtrW(h, GWL_STYLE, orig_style);
         }
         SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+        // Explicitly restore from iconic state FIRST. SetWindowPlacement with
+        // SW_RESTORE alone is unreliable when the window was parked off-screen
+        // with WS_EX_TOOLWINDOW while iconic. ShowWindow(SW_RESTORE) clears
+        // the iconic flag before we attempt to reposition.
+        if IsIconic(h) != 0 {
+            ShowWindow(h, SW_RESTORE as i32);
+        }
+
         if let Some(mut placement) =
             SAVED_PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()).take()
         {
@@ -263,12 +274,30 @@ pub fn restore_window_from_tray(hwnd: isize) {
                     r.top,
                     r.right - r.left,
                     r.bottom - r.top,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 );
             }
         } else {
             ShowWindow(h, SW_RESTORE as i32);
         }
+    }
+    // Use force_foreground_window outside the unsafe block so it can also
+    // simulate the Alt key workaround without nesting unsafe.
+    force_foreground_window(hwnd);
+}
+
+/// Force a window to the foreground, working around the Windows restriction
+/// that only the foreground process can call SetForegroundWindow successfully.
+/// Simulates an Alt key press to trick Windows into allowing the call.
+pub fn force_foreground_window(hwnd: isize) {
+    let h = hwnd as *mut core::ffi::c_void;
+    const VK_MENU: u8 = 0x12; // Alt key
+    const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
+    const KEYEVENTF_KEYUP: u32 = 0x0002;
+    unsafe {
+        // Simulate Alt key press/release to allow SetForegroundWindow to work
+        keybd_event(VK_MENU, 0, KEYEVENTF_EXTENDEDKEY, 0);
+        keybd_event(VK_MENU, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);
         SetForegroundWindow(h);
     }
 }

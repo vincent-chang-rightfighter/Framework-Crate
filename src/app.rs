@@ -106,6 +106,10 @@ pub struct App {
     pub last_curve_edit_ts: Instant,
     pub last_curve_points: Vec<[u32; 2]>,
     pub icon_create_in_flight: bool,
+    /// Consecutive iconic check count – auto-minimize only triggers after
+    /// is_iconic() returns true for at least this many consecutive 5-second
+    /// check cycles, preventing false positives during the restore transition.
+    pub iconic_check_count: u32,
     pub(crate) cached_snapshot: Option<crate::views::ViewSnapshot>,
     /// Laid-out height (logical px) of the main view, reported by the
     /// HeightProbe widget every layout pass. The window is resized to match.
@@ -250,6 +254,7 @@ impl App {
             last_curve_edit_ts: Instant::now(),
             last_curve_points: Vec::new(),
             icon_create_in_flight: false,
+            iconic_check_count: 0,
             cached_snapshot: None,
             content_height: Arc::new(Mutex::new(None)),
             window_id: None,
@@ -401,17 +406,30 @@ impl App {
                             }
                         }
                         // Auto-minimize check throttled to the same 5s cadence
-                        // (is_iconic is a syscall). Skip for 800ms after restore
+                        // (is_iconic is a syscall). Skip for 2s after restore
                         // to avoid an infinite minimize/restore loop.
+                        // Require is_iconic() to return true for 2+ consecutive
+                        // checks before triggering, preventing false positives
+                        // during the DWM state transition after restore.
                         if !self.tray.is_recently_restored()
-                            && system_info::is_iconic(self.tray.hwnd())
                             && self.state.visible.load(Ordering::Acquire)
                         {
-                            tracing::info!("Window minimized, auto-minimizing to tray");
-                            return Task::batch([
-                                Task::perform(async {}, |_| Message::MinimizeToTray),
-                                tick_task(next_ms),
-                            ]);
+                            if system_info::is_iconic(self.tray.hwnd()) {
+                                self.iconic_check_count += 1;
+                                if self.iconic_check_count >= 2 {
+                                    tracing::info!(
+                                        "Window minimized (iconic_check_count={}), auto-minimizing to tray",
+                                        self.iconic_check_count
+                                    );
+                                    self.iconic_check_count = 0;
+                                    return Task::batch([
+                                        Task::perform(async {}, |_| Message::MinimizeToTray),
+                                        tick_task(next_ms),
+                                    ]);
+                                }
+                            } else {
+                                self.iconic_check_count = 0;
+                            }
                         }
                     }
                     if let Some(event) = self.tray.receive_event() {
@@ -712,6 +730,7 @@ impl App {
             }
             Message::MinimizeToTray => {
                 tracing::info!("MinimizeToTray: tray_initialized={}", self.tray_initialized);
+                self.iconic_check_count = 0;
                 if !self.tray_initialized {
                     if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
                         tracing::info!("Found window HWND: {}", hwnd);
@@ -752,6 +771,7 @@ impl App {
                 // the first visible frame renders current data.
                 self.state.view_dirty.store(true, Ordering::Release);
                 self.icon_create_in_flight = false;
+                self.iconic_check_count = 0;
             }
             Message::TrayQuit => {
                 self.tray.mark_restored();
