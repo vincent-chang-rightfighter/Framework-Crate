@@ -154,6 +154,7 @@ struct WINDOWPLACEMENT {
     rcDevice: RECT,
 }
 
+const GWL_STYLE: i32 = -16;
 const GWL_EXSTYLE: i32 = -20;
 const WS_EX_TOOLWINDOW: isize = 0x00000080;
 /// winit sets WS_EX_APPWINDOW by default (window_state.rs ON_TASKBAR).
@@ -178,6 +179,9 @@ const _: () = assert!(std::mem::size_of::<WINDOWPLACEMENT>() == 60);
 /// Placement saved when the window is parked, used to restore its on-screen
 /// position and size.
 static SAVED_PLACEMENT: std::sync::Mutex<Option<WINDOWPLACEMENT>> = std::sync::Mutex::new(None);
+/// Original GWL_STYLE saved when parked, so minimize/maximize buttons are
+/// restored (WS_EX_TOOLWINDOW causes DWM to use tool-window chrome).
+static SAVED_STYLE: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
 
 /// "Hide" the window by parking it off-screen instead of SW_HIDE. The window
 /// stays WS_VISIBLE, so WM_PAINT keeps arriving and the swapchain stays valid
@@ -208,6 +212,8 @@ pub fn hide_window_to_tray(hwnd: isize) {
         // taskbar button even alongside it, so clear that too. SWP_FRAMECHANGED
         // makes the taskbar re-evaluate the extended style.
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        let style = GetWindowLongPtrW(h, GWL_STYLE);
+        *SAVED_STYLE.lock().unwrap_or_else(|p| p.into_inner()) = Some(style);
         SetWindowLongPtrW(h, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW);
         SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         // Drop keyboard focus so keystrokes don't reach the invisible window.
@@ -221,10 +227,15 @@ pub fn restore_window_from_tray(hwnd: isize) {
     // SAFETY: hwnd is a valid window handle from FindWindowW/CreateWindowExW.
     unsafe {
         // Re-add taskbar / alt-tab presence (restore WS_EX_APPWINDOW that
-        // winit set at creation). SWP_FRAMECHANGED makes the taskbar
-        // re-evaluate the extended style.
+        // winit set at creation). Also restore the original window style
+        // (GWL_STYLE) because WS_EX_TOOLWINDOW causes DWM to use tool-window
+        // chrome which hides minimize/maximize buttons. SWP_FRAMECHANGED
+        // makes the taskbar and DWM re-evaluate.
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
         SetWindowLongPtrW(h, GWL_EXSTYLE, (ex & !WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW);
+        if let Some(orig_style) = SAVED_STYLE.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            SetWindowLongPtrW(h, GWL_STYLE, orig_style);
+        }
         SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         if let Some(mut placement) =
             SAVED_PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()).take()

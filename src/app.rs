@@ -312,19 +312,10 @@ impl App {
         if !self.init_complete || self.show_settings || self.show_quit_warning || self.height_set {
             return None;
         }
-        let id = match self.window_id {
-            Some(id) => id,
-            None => return None,
-        };
-        let current = match self.window_height {
-            Some(h) => h,
-            None => return None,
-        };
+        let id = self.window_id?;
+        let current = self.window_height?;
         let target = *self.content_height.lock();
-        let target = match target {
-            Some(h) => h,
-            None => return None,
-        };
+        let target = target?;
         let target = target.min(AUTO_MAX_HEIGHT) + 25.0;
         if (target - current).abs() > 0.5 {
             Some(iced::window::resize(id, iced::Size::new(AUTO_WIDTH, target)))
