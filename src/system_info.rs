@@ -307,7 +307,7 @@ pub fn force_foreground_window(hwnd: isize) {
     const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
     const KEYEVENTF_KEYUP: u32 = 0x0002;
     unsafe {
-        // Simulate Alt key press/release to allow SetForegroundWindow to work
+        // Simulate Alt key press/release to allow SetForegroundWindow to work.
         keybd_event(VK_MENU, 0, KEYEVENTF_EXTENDEDKEY, 0);
         keybd_event(VK_MENU, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);
         SetForegroundWindow(h);
@@ -316,20 +316,18 @@ pub fn force_foreground_window(hwnd: isize) {
 
 #[cfg(target_arch = "x86_64")]
 pub fn cpu_name() -> String {
-    // SAFETY: CPUID is available on all x86_64 CPUs. Leaves 0x80000002–0x80000004
+    // CPUID is available on all x86_64 CPUs. Leaves 0x80000002–0x80000004
     // are standard AMD/Intel vendor strings with no side effects.
-    unsafe {
-        let mut brand = [0u8; 48];
-        for (leaf, offset) in [(0x80000002u32, 0), (0x80000003, 16), (0x80000004, 32)] {
-            let result = core::arch::x86_64::__cpuid_count(leaf, 0);
-            brand[offset..offset + 4].copy_from_slice(&result.eax.to_le_bytes());
-            brand[offset + 4..offset + 8].copy_from_slice(&result.ebx.to_le_bytes());
-            brand[offset + 8..offset + 12].copy_from_slice(&result.ecx.to_le_bytes());
-            brand[offset + 12..offset + 16].copy_from_slice(&result.edx.to_le_bytes());
-        }
-        let end = brand.iter().position(|&b| b == 0).unwrap_or(48);
-        String::from_utf8_lossy(&brand[..end]).trim().to_string()
+    let mut brand = [0u8; 48];
+    for (leaf, offset) in [(0x80000002u32, 0), (0x80000003, 16), (0x80000004, 32)] {
+        let result = core::arch::x86_64::__cpuid_count(leaf, 0);
+        brand[offset..offset + 4].copy_from_slice(&result.eax.to_le_bytes());
+        brand[offset + 4..offset + 8].copy_from_slice(&result.ebx.to_le_bytes());
+        brand[offset + 8..offset + 12].copy_from_slice(&result.ecx.to_le_bytes());
+        brand[offset + 12..offset + 16].copy_from_slice(&result.edx.to_le_bytes());
     }
+    let end = brand.iter().position(|&b| b == 0).unwrap_or(48);
+    String::from_utf8_lossy(&brand[..end]).trim().to_string()
 }
 
 #[cfg(not(target_arch = "x86_64"))]
