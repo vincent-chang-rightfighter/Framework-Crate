@@ -66,7 +66,7 @@ struct WNDCLASSW {
 }
 
 #[link(name = "user32")]
-extern "system" {
+unsafe extern "system" {
     fn GetMessageW(lpMsg: *mut MSG, hWnd: *mut core::ffi::c_void, wMsgFilterMin: u32, wMsgFilterMax: u32) -> i32;
     fn TranslateMessage(lpMsg: *const MSG) -> i32;
     fn DispatchMessageW(lpMsg: *const MSG) -> i32;
@@ -144,7 +144,7 @@ fn message_pump_loop(
     thread_ready_tx: mpsc::SyncSender<()>,
 ) {
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetCurrentThreadId() -> u32;
     }
     TRAY_THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::Release);

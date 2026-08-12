@@ -44,7 +44,7 @@ struct MemoryStatusEx {
 // ============================================================================
 
 #[link(name = "kernel32")]
-extern "system" {
+unsafe extern "system" {
     fn GetSystemMetrics(nIndex: i32) -> i32;
     fn GlobalMemoryStatusEx(lpBuffer: *mut MemoryStatusEx) -> i32;
 }
@@ -64,23 +64,23 @@ struct OsVersionInfoW {
 }
 
 #[link(name = "ntdll")]
-extern "system" {
+unsafe extern "system" {
     fn RtlGetVersion(version_info: *mut OsVersionInfoW) -> u32;
 }
 
 #[link(name = "user32")]
-extern "system" {
+unsafe extern "system" {
     fn GetDC(hwnd: *mut core::ffi::c_void) -> HDC;
     fn ReleaseDC(hwnd: *mut core::ffi::c_void, hdc: HDC) -> i32;
 }
 
 #[link(name = "gdi32")]
-extern "system" {
+unsafe extern "system" {
     fn GetDeviceCaps(hdc: HDC, index: i32) -> i32;
 }
 
 #[link(name = "advapi32")]
-extern "system" {
+unsafe extern "system" {
     fn RegOpenKeyExW(
         hKey: HKEY,
         lpSubKey: LPCWSTR,
@@ -100,7 +100,7 @@ extern "system" {
 }
 
 #[link(name = "user32")]
-extern "system" {
+unsafe extern "system" {
     fn FindWindowW(lpClassName: LPCWSTR, lpWindowName: LPCWSTR) -> *mut core::ffi::c_void;
     fn ShowWindow(hWnd: *mut core::ffi::c_void, nCmdShow: i32) -> i32;
     fn SetForegroundWindow(hWnd: *mut core::ffi::c_void) -> i32;
@@ -636,7 +636,7 @@ pub fn load_icon_from_bytes(data: &[u8]) -> Option<isize> {
     let mut owned = data[offset..offset + size].to_vec();
 
     #[link(name = "user32")]
-    extern "system" {
+    unsafe extern "system" {
         fn CreateIconFromResourceEx(
             presbits: *mut u8,
             dwResSize: u32,

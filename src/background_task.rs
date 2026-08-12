@@ -45,7 +45,7 @@ pub fn pin_to_slowest_core() {
 fn verify_affinity(expected_id: usize) {
     #[cfg(target_os = "windows")]
     {
-        extern "system" {
+        unsafe extern "system" {
             fn GetCurrentThread() -> *mut core::ffi::c_void;
             fn SetThreadAffinityMask(hThread: *mut core::ffi::c_void, dwMask: usize) -> usize;
         }
