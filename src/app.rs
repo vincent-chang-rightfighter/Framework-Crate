@@ -13,6 +13,7 @@ use crate::system_info;
 use crate::temp_chart;
 use crate::sub_state::{FanState, ThermalState, PeripheralState, BatteryState, SystemState, LifecycleState};
 use crate::style::*;
+use crate::util::{read_lock, with_write_lock};
 use crate::views;
 
 /// Window width (logical px) used for auto-resizing. The width is fixed by
@@ -21,17 +22,6 @@ const AUTO_WIDTH: f32 = 900.0;
 /// Ceiling for the auto-resized window height (logical px), so the window
 /// never outgrows the screen work area (fan curve mode can be very tall).
 const AUTO_MAX_HEIGHT: f32 = 760.0;
-
-pub fn read_lock<T>(lock: &Arc<RwLock<Arc<T>>>) -> Arc<T> {
-    Arc::clone(&lock.read())
-}
-
-pub fn with_write_lock<T, R>(
-    lock: &Arc<RwLock<Arc<T>>>,
-    f: impl FnOnce(&mut Arc<T>) -> R,
-) -> R {
-    f(&mut lock.write())
-}
 
 /// Execute a closure on the EC client via spawn_blocking. If the EC client
 /// is not available, the task completes silently. Errors from the closure
@@ -157,9 +147,6 @@ pub struct SystemInfo {
     pub header_device_name: String,
     pub header_info_text: String,
 }
-
-pub type PdPortType = cli::ec_wrapper::UsbCPort;
-pub type PdPortsHistory = VecDeque<Arc<Vec<PdPortType>>>;
 
 #[derive(Clone, Default)]
 pub struct SensorCache {

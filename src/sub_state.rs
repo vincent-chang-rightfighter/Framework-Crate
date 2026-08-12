@@ -7,6 +7,7 @@ use parking_lot::RwLock;
 use crate::cli;
 use crate::temp_chart;
 use crate::types::{Config, BatteryInfo};
+use crate::util::{read_lock, with_write_lock};
 
 /// Re-exported history type alias used by peripherals.
 pub type PdPortsHistory = VecDeque<Arc<Vec<cli::ec_wrapper::UsbCPort>>>;
@@ -62,6 +63,26 @@ impl Default for ThermalState {
     }
 }
 
+/// Read-only snapshot of thermal state for rendering.
+pub struct ThermalSnapshot {
+    pub data: Arc<Option<cli::ec_wrapper::ThermalData>>,
+    pub sensor_cache: Arc<crate::app::SensorCache>,
+    pub temp_history: Arc<std::collections::VecDeque<temp_chart::TempSample>>,
+}
+
+impl ThermalState {
+    /// Take a consistent snapshot of all thermal fields.
+    pub fn snapshot(&self, now_ms: i64) -> ThermalSnapshot {
+        ThermalSnapshot {
+            data: Arc::clone(&read_lock(&self.data)),
+            sensor_cache: Arc::clone(&read_lock(&self.sensor_cache)),
+            temp_history: with_write_lock(&self.history, |h| {
+                Arc::make_mut(h).snapshot(now_ms)
+            }),
+        }
+    }
+}
+
 /// Peripheral state (keyboard, expansion cards, USB-C ports).
 #[derive(Clone)]
 pub struct PeripheralState {
@@ -82,6 +103,26 @@ impl Default for PeripheralState {
             expansion_cards: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             pd_ports: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             pd_ports_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
+        }
+    }
+}
+
+/// Read-only snapshot of peripheral state for rendering.
+pub struct PeripheralSnapshot {
+    pub kblight: Arc<Option<u32>>,
+    pub expansion_cards: Arc<Vec<cli::ec_wrapper::ExpansionCard>>,
+    pub pd_ports: Arc<Vec<cli::ec_wrapper::UsbCPort>>,
+    pub pd_ports_history: Arc<PdPortsHistory>,
+}
+
+impl PeripheralState {
+    /// Take a consistent snapshot of all peripheral fields.
+    pub fn snapshot(&self) -> PeripheralSnapshot {
+        PeripheralSnapshot {
+            kblight: Arc::clone(&read_lock(&self.kblight)),
+            expansion_cards: Arc::clone(&read_lock(&self.expansion_cards)),
+            pd_ports: Arc::clone(&read_lock(&self.pd_ports)),
+            pd_ports_history: Arc::clone(&read_lock(&self.pd_ports_history)),
         }
     }
 }

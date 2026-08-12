@@ -18,7 +18,8 @@ mod sub_state;
 mod tray;
 mod util;
 
-pub use app::{App, AppState, SystemInfo, Message, read_lock, with_write_lock};
+pub use app::{App, AppState, SystemInfo, Message};
+pub use util::{read_lock, with_write_lock};
 pub use style::*;
 
 fn main() {

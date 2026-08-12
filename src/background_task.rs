@@ -3,7 +3,8 @@ use std::sync::atomic::Ordering;
 use parking_lot::RwLock;
 use tracing::warn;
 
-use crate::app::{AppState, read_lock, with_write_lock};
+use crate::app::AppState;
+use crate::util::{read_lock, with_write_lock};
 use crate::cli;
 use crate::fan_control::CurveStepper;
 use crate::style::{POLL_RATE_MIN_MS, IDLE_THRESHOLD_MS, IDLE_INTERVAL_MS, EXPANSION_SCAN_MS, VERSIONS_REFRESH_MS};
@@ -68,7 +69,7 @@ fn verify_affinity(expected_id: usize) {
 
 fn push_pd_ports_history(
     pd_ports: &Arc<RwLock<Arc<Vec<cli::ec_wrapper::UsbCPort>>>>,
-    history: &Arc<RwLock<Arc<crate::app::PdPortsHistory>>>,
+    history: &Arc<RwLock<Arc<crate::sub_state::PdPortsHistory>>>,
 ) {
     let snapshot = Arc::clone(&read_lock(pd_ports));
     with_write_lock(history, |hist| {

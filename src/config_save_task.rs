@@ -4,7 +4,8 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::warn;
 
-use crate::app::{AppState, read_lock};
+use crate::app::AppState;
+use crate::util::read_lock;
 use crate::background_task::pin_to_slowest_core;
 use crate::types::{Config, SettingU8};
 

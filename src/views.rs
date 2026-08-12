@@ -1,10 +1,9 @@
 use crate::App;
 use crate::Message;
 use crate::cli;
-use crate::read_lock;
+use crate::util::read_lock;
 use crate::style::*;
 use crate::types::FanControlMode;
-use crate::with_write_lock;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::widget::rule;
 use iced::widget::space;
@@ -21,24 +20,25 @@ pub(crate) struct ViewSnapshot {
     pub kblight: Arc<Option<u32>>,
     pub expansion_cards: Arc<Vec<cli::ec_wrapper::ExpansionCard>>,
     pub pd_ports: Arc<Vec<cli::ec_wrapper::UsbCPort>>,
-    pub pd_ports_history: Arc<crate::app::PdPortsHistory>,
+    pub pd_ports_history: Arc<crate::sub_state::PdPortsHistory>,
     pub curve_full_points: Arc<Vec<[u32; 2]>>,
 }
 
 impl ViewSnapshot {
     pub fn from_app(app: &App) -> Self {
+        let now_ms = crate::util::current_time_ms_i64();
+        let thermal_snap = app.state.thermal.snapshot(now_ms);
+        let peripheral_snap = app.state.peripherals.snapshot();
         Self {
-            thermal: Arc::clone(&read_lock(&app.state.thermal.data)),
+            thermal: thermal_snap.data,
             config: Arc::clone(&read_lock(&app.state.lifecycle.config)),
-            sensor_cache: Arc::clone(&read_lock(&app.state.thermal.sensor_cache)),
-            temp_history: with_write_lock(&app.state.thermal.history, |h| {
-                Arc::make_mut(h).snapshot(crate::util::current_time_ms_i64())
-            }),
+            sensor_cache: thermal_snap.sensor_cache,
+            temp_history: thermal_snap.temp_history,
             battery: Arc::clone(&read_lock(&app.state.battery.info)),
-            kblight: Arc::clone(&read_lock(&app.state.peripherals.kblight)),
-            expansion_cards: Arc::clone(&read_lock(&app.state.peripherals.expansion_cards)),
-            pd_ports: Arc::clone(&read_lock(&app.state.peripherals.pd_ports)),
-            pd_ports_history: Arc::clone(&read_lock(&app.state.peripherals.pd_ports_history)),
+            kblight: peripheral_snap.kblight,
+            expansion_cards: peripheral_snap.expansion_cards,
+            pd_ports: peripheral_snap.pd_ports,
+            pd_ports_history: peripheral_snap.pd_ports_history,
             curve_full_points: Arc::clone(&read_lock(&app.state.fan.curve_full_points)),
         }
     }
