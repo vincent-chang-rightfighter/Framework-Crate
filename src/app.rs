@@ -343,139 +343,114 @@ impl App {
         task
     }
 
-    fn update_inner(&mut self, message: Message) -> Task<Message> {
-        match &message {
-            Message::Tick | Message::InitComplete | Message::StartupError(_) | Message::WindowResized(..) => {}
-            _ => {
-                let now_ms = crate::util::current_time_ms();
-                self.state.lifecycle.last_interaction_ts.store(now_ms, Ordering::Release);
-            }
-        }
-        // Rebuild the view snapshot whenever new data arrived (background
-        // thread sets view_dirty) or none exists yet. Runs here (not in
-        // view()) so sub-views can borrow from a snapshot owned by `self`.
+    fn maybe_rebuild_snapshot(&mut self) {
         if self.init_complete
             && (self.state.lifecycle.view_dirty.load(Ordering::Acquire) || self.cached_snapshot.is_none())
         {
             self.cached_snapshot = Some(crate::views::ViewSnapshot::from_app(self));
             self.state.lifecycle.view_dirty.store(false, Ordering::Release);
         }
-        match message {
-            Message::Tick => {
-                let elapsed = self.last_tick.elapsed().as_millis() as u64;
-                if elapsed < self.tick_interval_ms {
-                    return tick_task(self.tick_interval_ms - elapsed);
-                }
-                self.last_tick = Instant::now();
-                // Debounce curve_full_points recomputation (100ms after last slider edit)
-                if self.pending_curve_update && self.last_curve_edit_ts.elapsed().as_millis() >= 100 {
-                    self.pending_curve_update = false;
-                    self.update_curve_full_points();
-                }
-                self.cli_present = self.state.system.cli_available.load(Ordering::Acquire);
-                self.config_save_failed = self.state.lifecycle.bg_config_save_failed.load(Ordering::Relaxed);
+    }
 
-                let now_ms = crate::util::current_time_ms();
-                let idle = now_ms.saturating_sub(self.state.lifecycle.last_interaction_ts.load(Ordering::Acquire)) > IDLE_THRESHOLD_MS;
-                let visible = self.state.lifecycle.visible.load(Ordering::Acquire);
-                let next_ms = if !visible {
-                    UI_HIDDEN_INTERVAL_MS
-                } else if idle {
-                    UI_IDLE_INTERVAL_MS
-                } else {
-                    self.tick_interval_ms
-                };
+    fn handle_tick_message(&mut self) -> Task<Message> {
+        let elapsed = self.last_tick.elapsed().as_millis() as u64;
+        if elapsed < self.tick_interval_ms {
+            return tick_task(self.tick_interval_ms - elapsed);
+        }
+        self.last_tick = Instant::now();
+        // Debounce curve_full_points recomputation (100ms after last slider edit)
+        if self.pending_curve_update && self.last_curve_edit_ts.elapsed().as_millis() >= 100 {
+            self.pending_curve_update = false;
+            self.update_curve_full_points();
+        }
+        self.cli_present = self.state.system.cli_available.load(Ordering::Acquire);
+        self.config_save_failed = self.state.lifecycle.bg_config_save_failed.load(Ordering::Relaxed);
 
-                if !self.tray_initialized {
+        let now_ms = crate::util::current_time_ms();
+        let idle = now_ms.saturating_sub(self.state.lifecycle.last_interaction_ts.load(Ordering::Acquire)) > IDLE_THRESHOLD_MS;
+        let visible = self.state.lifecycle.visible.load(Ordering::Acquire);
+        let next_ms = if !visible {
+            UI_HIDDEN_INTERVAL_MS
+        } else if idle {
+            UI_IDLE_INTERVAL_MS
+        } else {
+            self.tick_interval_ms
+        };
+
+        if !self.tray_initialized {
+            if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
+                self.tray.init(hwnd);
+                self.tray_initialized = true;
+                tracing::info!("Tray initialized with HWND: {}", hwnd);
+                self.tray.show_icon_async();
+            }
+        }
+
+        if self.tray_initialized {
+            // Only validate HWND every 5 seconds to avoid repeated FindWindowW syscalls
+            const HWND_CHECK_INTERVAL_MS: u64 = 5000;
+            if now_ms.saturating_sub(self.last_hwnd_check_ts) >= HWND_CHECK_INTERVAL_MS {
+                self.last_hwnd_check_ts = now_ms;
+                if !system_info::is_window(self.tray.hwnd()) {
+                    tracing::warn!("HWND {} invalid, reinitializing tray", self.tray.hwnd());
                     if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
-                        self.tray.init(hwnd);
-                        self.tray_initialized = true;
-                        tracing::info!("Tray initialized with HWND: {}", hwnd);
+                        self.tray.reinit(hwnd);
                         self.tray.show_icon_async();
+                    } else {
+                        self.tray_initialized = false;
+                        tracing::error!("Cannot find window after HWND invalidation");
                     }
                 }
-
-                if self.tray_initialized {
-                    // Only validate HWND every 5 seconds to avoid repeated FindWindowW syscalls
-                    const HWND_CHECK_INTERVAL_MS: u64 = 5000;
-                    if now_ms.saturating_sub(self.last_hwnd_check_ts) >= HWND_CHECK_INTERVAL_MS {
-                        self.last_hwnd_check_ts = now_ms;
-                        if !system_info::is_window(self.tray.hwnd()) {
-                            tracing::warn!("HWND {} invalid, reinitializing tray", self.tray.hwnd());
-                            if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
-                                self.tray.reinit(hwnd);
-                                self.tray.show_icon_async();
-                            } else {
-                                self.tray_initialized = false;
-                                tracing::error!("Cannot find window after HWND invalidation");
-                            }
+                if !self.tray.is_recently_restored()
+                    && self.state.lifecycle.visible.load(Ordering::Acquire)
+                {
+                    if system_info::is_iconic(self.tray.hwnd()) {
+                        self.iconic_check_count += 1;
+                        if self.iconic_check_count >= 2 {
+                            tracing::info!(
+                                "Window minimized (iconic_check_count={}), auto-minimizing to tray",
+                                self.iconic_check_count
+                            );
+                            self.iconic_check_count = 0;
+                            return Task::batch([
+                                Task::perform(async {}, |_| Message::MinimizeToTray),
+                                tick_task(next_ms),
+                            ]);
                         }
-                        // Auto-minimize check throttled to the same 5s cadence
-                        // (is_iconic is a syscall). Skip for 2s after restore
-                        // to avoid an infinite minimize/restore loop.
-                        // Require is_iconic() to return true for 2+ consecutive
-                        // checks before triggering, preventing false positives
-                        // during the DWM state transition after restore.
-                        if !self.tray.is_recently_restored()
-                            && self.state.lifecycle.visible.load(Ordering::Acquire)
-                        {
-                            if system_info::is_iconic(self.tray.hwnd()) {
-                                self.iconic_check_count += 1;
-                                if self.iconic_check_count >= 2 {
-                                    tracing::info!(
-                                        "Window minimized (iconic_check_count={}), auto-minimizing to tray",
-                                        self.iconic_check_count
-                                    );
-                                    self.iconic_check_count = 0;
-                                    return Task::batch([
-                                        Task::perform(async {}, |_| Message::MinimizeToTray),
-                                        tick_task(next_ms),
-                                    ]);
-                                }
-                            } else {
-                                self.iconic_check_count = 0;
-                            }
-                        }
-                    }
-                    if let Some(event) = self.tray.receive_event() {
-                        match &event {
-                            crate::tray::TrayEvent::Show | crate::tray::TrayEvent::MenuShow => {
-                                self.tray.mark_restored();
-                                tracing::info!("Tray show event received, marking restored");
-                            }
-                            _ => {}
-                        }
-                        let task = Task::perform(async move { event }, Message::TrayEventReceived);
-                        let tick = tick_task(next_ms);
-                        return Task::batch([task, tick]);
-                    }
-                    // If the icon was just created asynchronously (from MinimizeToTray),
-                    // hide the window now that the icon is ready.
-                    if self.pending_minimize_to_tray
-                        && self.tray.check_icon_ready()
-                        && self.state.lifecycle.visible.load(Ordering::Acquire)
-                    {
-                        self.tray.hide_window();
-                        self.state.lifecycle.visible.store(false, Ordering::Release);
-                        self.pending_minimize_to_tray = false;
-                        self.icon_create_in_flight = false;
-                        tracing::info!("Tray icon ready, window hidden");
+                    } else {
+                        self.iconic_check_count = 0;
                     }
                 }
+            }
+            if let Some(event) = self.tray.receive_event() {
+                match &event {
+                    crate::tray::TrayEvent::Show | crate::tray::TrayEvent::MenuShow => {
+                        self.tray.mark_restored();
+                        tracing::info!("Tray show event received, marking restored");
+                    }
+                    _ => {}
+                }
+                let task = Task::perform(async move { event }, Message::TrayEventReceived);
+                let tick = tick_task(next_ms);
+                return Task::batch([task, tick]);
+            }
+            if self.pending_minimize_to_tray
+                && self.tray.check_icon_ready()
+                && self.state.lifecycle.visible.load(Ordering::Acquire)
+            {
+                self.tray.hide_window();
+                self.state.lifecycle.visible.store(false, Ordering::Release);
+                self.pending_minimize_to_tray = false;
+                self.icon_create_in_flight = false;
+                tracing::info!("Tray icon ready, window hidden");
+            }
+        }
 
-                return tick_task(next_ms);
-            }
-            Message::InitComplete => {
-                self.init_complete = true;
-                self.rebuild_header_info();
-                self.rebuild_sensor_cache();
-                self.cached_snapshot = Some(crate::views::ViewSnapshot::from_app(self));
-                self.state.lifecycle.view_dirty.store(false, Ordering::Release);
-                return tick_task(0);
-            }
-            Message::StartupError(msg) => {
-                self.startup_error = Some(msg);
-            }
+        tick_task(next_ms)
+    }
+
+    fn handle_config_message(&mut self, message: Message) -> Option<Task<Message>> {
+        match message {
             Message::FanModeChanged(mode) => {
                 self.state.fan.mode.store(mode.to_u8() as u64, Ordering::Release);
                 let curve_poll = {
@@ -489,12 +464,12 @@ impl App {
                     });
                     curve_poll_ms
                 };
-                // Sync curve_poll_ms atomic so background loop avoids config lock
                 if let Some(ms) = curve_poll {
                     self.state.fan.curve_poll_ms.store(ms, Ordering::Release);
                 }
                 self.update_curve_full_points();
                 self.save_config();
+                Some(Task::none())
             }
             Message::FanDutyChanged(duty) => {
                 let duty = duty.clamp(0, 100);
@@ -503,6 +478,7 @@ impl App {
                 });
                 self.state.fan.last_applied_duty.store(duty as u64, Ordering::Release);
                 self.save_config();
+                Some(Task::none())
             }
             Message::FanCurvePointTempChanged(idx, temp) => {
                 let temp = temp.clamp(0, 99);
@@ -516,6 +492,7 @@ impl App {
                 self.pending_curve_update = true;
                 self.last_curve_edit_ts = Instant::now();
                 self.save_config();
+                Some(Task::none())
             }
             Message::FanCurvePointDutyChanged(idx, duty) => {
                 let duty = duty.clamp(0, 100);
@@ -529,6 +506,7 @@ impl App {
                 self.pending_curve_update = true;
                 self.last_curve_edit_ts = Instant::now();
                 self.save_config();
+                Some(Task::none())
             }
             Message::FanCurvePollMsChanged(ms) => {
                 let clamped = ms.max(500);
@@ -539,6 +517,7 @@ impl App {
                     }
                 });
                 self.save_config();
+                Some(Task::none())
             }
             Message::FanCurveHysteresisChanged(h) => {
                 self.mutate_config(|cfg| {
@@ -547,6 +526,7 @@ impl App {
                     }
                 });
                 self.save_config();
+                Some(Task::none())
             }
             Message::FanCurveRateLimitChanged(r) => {
                 self.mutate_config(|cfg| {
@@ -555,6 +535,7 @@ impl App {
                     }
                 });
                 self.save_config();
+                Some(Task::none())
             }
             Message::ChargeLimitToggled(enabled) => {
                 self.mutate_config(|cfg| {
@@ -565,6 +546,7 @@ impl App {
                     }
                 });
                 self.save_config();
+                Some(Task::none())
             }
             Message::ChargeLimitChanged(value) => {
                 self.mutate_config(|cfg| {
@@ -572,9 +554,7 @@ impl App {
                     limit.value = value.min(CHARGE_LIMIT_MAX) as u8;
                 });
                 self.save_config();
-            }
-            Message::ToggleSensorSettings => {
-                self.show_sensor_settings = !self.show_sensor_settings;
+                Some(Task::none())
             }
             Message::SensorToggled(idx, enabled) => {
                 let name = {
@@ -582,7 +562,7 @@ impl App {
                     cache.keys.get(idx).cloned()
                 };
                 let Some(name) = name else {
-                    return Task::none();
+                    return Some(Task::none());
                 };
                 self.mutate_config(|cfg| {
                     if cfg.telemetry.selected_sensors.is_empty() {
@@ -599,6 +579,7 @@ impl App {
                 });
                 self.rebuild_sensor_cache();
                 self.save_config();
+                Some(Task::none())
             }
             Message::PollRateChanged(ms) => {
                 let ms = ms.max(POLL_RATE_MIN_MS as u64);
@@ -607,6 +588,7 @@ impl App {
                 });
                 self.state.lifecycle.poll_ms.store(ms, Ordering::Relaxed);
                 self.save_config();
+                Some(Task::none())
             }
             Message::UiRefreshRateChanged(ms) => {
                 let ms = ms.clamp(50, 1000);
@@ -616,88 +598,17 @@ impl App {
                 self.tick_interval_ms = ms;
                 self.last_tick = Instant::now();
                 self.save_config();
+                Some(Task::none())
             }
-            Message::SettingsToggled => {
-                self.show_settings = !self.show_settings;
-            }
-            Message::KblightChanged(percent) => {
-                let kblight = Arc::clone(&self.state.peripherals.kblight);
-                return run_ec_task(&self.state.system.ec_client, move |ec| {
-                    if let Err(e) = ec.kblight_set(percent) {
-                        warn!("Failed to set keyboard backlight: {}", e);
-                    }
-                    if let Ok(kb) = ec.kblight_get() {
-                        with_write_lock(&kblight, |guard| {
-                            *guard = Arc::new(Some(kb));
-                        });
-                    }
-                });
-            }
-            Message::FpLedLevelChanged(level) => {
-                return run_ec_task(&self.state.system.ec_client, move |ec| {
-                    if let Err(e) = ec.fp_led_level_set(level) {
-                        warn!("Failed to set fingerprint LED: {}", e);
-                    }
-                });
-            }
-            Message::ToggleBatteryDetails => {
-                self.show_battery_details = !self.show_battery_details;
-            }
-            Message::DismissConfigWarning => {
-                self.config_save_failed = false;
-                self.config_load_warning = None;
-            }
+            _ => None,
+        }
+    }
+
+    fn handle_tray_message(&mut self, message: Message) -> Option<Task<Message>> {
+        match message {
             Message::CloseRequested(id) => {
                 self.closing_window_id = Some(id);
-                return Task::perform(async {}, |_| Message::MinimizeToTray);
-            }
-            Message::WindowResized(id, size) => {
-                self.window_id = Some(id);
-                self.window_height = Some(size.height);
-            }
-            Message::QuitWithRestore => {
-                self.show_quit_warning = false;
-                self.state.lifecycle.shutdown.store(true, Ordering::Release);
-                return Task::batch([
-                    run_ec_task(&self.state.system.ec_client, |ec| {
-                        if let Err(e) = ec.autofanctrl() {
-                            warn!("Failed to restore auto fan control on quit: {}", e);
-                        }
-                    }),
-                    Task::perform(async {}, |_| Message::QuitShutdown),
-                ]);
-            }
-            Message::QuitDutyChanged(duty) => {
-                self.quit_duty_value = duty.clamp(0, 100);
-            }
-            Message::QuitWithDuty => {
-                self.show_quit_warning = false;
-                self.state.lifecycle.shutdown.store(true, Ordering::Release);
-                let duty = self.quit_duty_value;
-                return Task::batch([
-                    run_ec_task(&self.state.system.ec_client, move |ec| {
-                        if let Err(e) = ec.set_fan_duty(duty, None) {
-                            warn!("Failed to set quit fan duty: {}", e);
-                        }
-                    }),
-                    Task::perform(async {}, |_| Message::QuitShutdown),
-                ]);
-            }
-            Message::QuitWithoutRestore => {
-                self.show_quit_warning = false;
-                self.tray.shutdown();
-                self.state.lifecycle.shutdown.store(true, Ordering::Release);
-                self.save_config_now();
-                return self.close_window();
-            }
-            Message::QuitShutdown => {
-                self.show_quit_warning = false;
-                self.tray.shutdown();
-                self.save_config_now();
-                return self.close_window();
-            }
-            Message::QuitCanceled => {
-                self.show_quit_warning = false;
+                Some(Task::perform(async {}, |_| Message::MinimizeToTray))
             }
             Message::MinimizeToTray => {
                 tracing::info!("MinimizeToTray: tray_initialized={}", self.tray_initialized);
@@ -712,9 +623,6 @@ impl App {
                     }
                 }
                 if self.tray_initialized {
-                    // Use async to avoid blocking the UI thread.
-                    // The icon will be created on the message pump thread;
-                    // we check icon_ready on the next tick to hide the window.
                     let icon_ready = self.tray.check_icon_ready();
                     if !icon_ready && !self.icon_create_in_flight {
                         self.tray.show_icon_async();
@@ -732,17 +640,16 @@ impl App {
                 } else {
                     tracing::warn!("Cannot minimize to tray: HWND not found");
                 }
+                Some(Task::none())
             }
             Message::RestoreFromTray => {
                 self.tray.mark_restored();
                 self.tray.restore_window();
                 self.state.lifecycle.visible.store(true, Ordering::Release);
-                // The swapchain may hold a stale/blank frame after a long hide
-                // (surface invalidated while hidden). Force a fresh snapshot so
-                // the first visible frame renders current data.
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.icon_create_in_flight = false;
                 self.iconic_check_count = 0;
+                Some(Task::none())
             }
             Message::TrayQuit => {
                 self.tray.mark_restored();
@@ -756,24 +663,155 @@ impl App {
                     self.tray.shutdown();
                     self.state.lifecycle.shutdown.store(true, Ordering::Release);
                     self.save_config_now();
-                    return self.close_window();
+                    return Some(self.close_window());
                 }
+                Some(Task::none())
             }
             Message::TrayEventReceived(event) => {
                 match event {
                     crate::tray::TrayEvent::Show => {
-                        return Task::perform(async {}, |_| Message::RestoreFromTray);
+                        Some(Task::perform(async {}, |_| Message::RestoreFromTray))
                     }
                     crate::tray::TrayEvent::MenuShow => {
-                        return Task::perform(async {}, |_| Message::RestoreFromTray);
+                        Some(Task::perform(async {}, |_| Message::RestoreFromTray))
                     }
                     crate::tray::TrayEvent::MenuQuit => {
-                        return Task::perform(async {}, |_| Message::TrayQuit);
+                        Some(Task::perform(async {}, |_| Message::TrayQuit))
                     }
                 }
             }
+            _ => None,
         }
-        Task::none()
+    }
+
+    fn handle_quit_message(&mut self, message: Message) -> Option<Task<Message>> {
+        match message {
+            Message::QuitWithRestore => {
+                self.show_quit_warning = false;
+                self.state.lifecycle.shutdown.store(true, Ordering::Release);
+                Some(Task::batch([
+                    run_ec_task(&self.state.system.ec_client, |ec| {
+                        if let Err(e) = ec.autofanctrl() {
+                            warn!("Failed to restore auto fan control on quit: {}", e);
+                        }
+                    }),
+                    Task::perform(async {}, |_| Message::QuitShutdown),
+                ]))
+            }
+            Message::QuitDutyChanged(duty) => {
+                self.quit_duty_value = duty.clamp(0, 100);
+                Some(Task::none())
+            }
+            Message::QuitWithDuty => {
+                self.show_quit_warning = false;
+                self.state.lifecycle.shutdown.store(true, Ordering::Release);
+                let duty = self.quit_duty_value;
+                Some(Task::batch([
+                    run_ec_task(&self.state.system.ec_client, move |ec| {
+                        if let Err(e) = ec.set_fan_duty(duty, None) {
+                            warn!("Failed to set quit fan duty: {}", e);
+                        }
+                    }),
+                    Task::perform(async {}, |_| Message::QuitShutdown),
+                ]))
+            }
+            Message::QuitWithoutRestore => {
+                self.show_quit_warning = false;
+                self.tray.shutdown();
+                self.state.lifecycle.shutdown.store(true, Ordering::Release);
+                self.save_config_now();
+                Some(self.close_window())
+            }
+            Message::QuitShutdown => {
+                self.show_quit_warning = false;
+                self.tray.shutdown();
+                self.save_config_now();
+                Some(self.close_window())
+            }
+            Message::QuitCanceled => {
+                self.show_quit_warning = false;
+                Some(Task::none())
+            }
+            _ => None,
+        }
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
+        match &message {
+            Message::Tick | Message::InitComplete | Message::StartupError(_) | Message::WindowResized(..) => {}
+            _ => {
+                let now_ms = crate::util::current_time_ms();
+                self.state.lifecycle.last_interaction_ts.store(now_ms, Ordering::Release);
+            }
+        }
+        self.maybe_rebuild_snapshot();
+        if let Some(task) = self.handle_config_message(message.clone()) {
+            return task;
+        }
+        if let Some(task) = self.handle_tray_message(message.clone()) {
+            return task;
+        }
+        if let Some(task) = self.handle_quit_message(message.clone()) {
+            return task;
+        }
+        match message {
+            Message::Tick => self.handle_tick_message(),
+            Message::InitComplete => {
+                self.init_complete = true;
+                self.rebuild_header_info();
+                self.rebuild_sensor_cache();
+                self.cached_snapshot = Some(crate::views::ViewSnapshot::from_app(self));
+                self.state.lifecycle.view_dirty.store(false, Ordering::Release);
+                tick_task(0)
+            }
+            Message::StartupError(msg) => {
+                self.startup_error = Some(msg);
+                Task::none()
+            }
+            Message::WindowResized(id, size) => {
+                self.window_id = Some(id);
+                self.window_height = Some(size.height);
+                Task::none()
+            }
+            Message::ToggleSensorSettings => {
+                self.show_sensor_settings = !self.show_sensor_settings;
+                Task::none()
+            }
+            Message::SettingsToggled => {
+                self.show_settings = !self.show_settings;
+                Task::none()
+            }
+            Message::KblightChanged(percent) => {
+                let kblight = Arc::clone(&self.state.peripherals.kblight);
+                run_ec_task(&self.state.system.ec_client, move |ec| {
+                    if let Err(e) = ec.kblight_set(percent) {
+                        warn!("Failed to set keyboard backlight: {}", e);
+                    }
+                    if let Ok(kb) = ec.kblight_get() {
+                        with_write_lock(&kblight, |guard| {
+                            *guard = Arc::new(Some(kb));
+                        });
+                    }
+                })
+            }
+            Message::FpLedLevelChanged(level) => {
+                run_ec_task(&self.state.system.ec_client, move |ec| {
+                    if let Err(e) = ec.fp_led_level_set(level) {
+                        warn!("Failed to set fingerprint LED: {}", e);
+                    }
+                })
+            }
+            Message::ToggleBatteryDetails => {
+                self.show_battery_details = !self.show_battery_details;
+                Task::none()
+            }
+            Message::DismissConfigWarning => {
+                self.config_save_failed = false;
+                self.config_load_warning = None;
+                Task::none()
+            }
+            _ => Task::none(),
+        }
     }
 
     fn save_config(&mut self) {

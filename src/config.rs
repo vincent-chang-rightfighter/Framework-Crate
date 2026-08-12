@@ -1,6 +1,11 @@
 use crate::types::Config;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+/// Serialize all config writes through a single lock so there is a single
+/// writer for the hot save path and shutdown-time persists.
+static CONFIG_SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Unique suffix per save call so concurrent writers (background task and
 /// exit-time sync save) never collide on the same temp file.
@@ -52,6 +57,7 @@ pub fn load() -> Result<Config, String> {
 }
 
 pub fn save(config: &Config) -> Result<(), String> {
+    let _guard = CONFIG_SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     save_impl(config, true)
 }
 
@@ -59,6 +65,7 @@ pub fn save(config: &Config) -> Result<(), String> {
 /// where writes are frequent and a crash losing the latest tweak is
 /// acceptable; shutdown paths use `save` for full durability.
 pub fn save_fast(config: &Config) -> Result<(), String> {
+    let _guard = CONFIG_SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     save_impl(config, false)
 }
 

@@ -22,6 +22,8 @@ pub use app::{App, AppState, SystemInfo, Message};
 pub use util::{read_lock, with_write_lock};
 pub use style::*;
 
+include!(concat!(env!("OUT_DIR"), "/icon_rgba.rs"));
+
 fn main() {
     background_task::pin_to_slowest_core();
 
@@ -36,9 +38,10 @@ fn main() {
             .init();
     }
 
-    let window_icon = iced::window::icon::from_file_data(
-        include_bytes!("../assets/app.png"),
-        None,
+    let window_icon = iced::window::icon::from_rgba(
+        ICON_RGBA.to_vec(),
+        ICON_WIDTH,
+        ICON_HEIGHT,
     )
     .expect("Failed to load window icon");
 

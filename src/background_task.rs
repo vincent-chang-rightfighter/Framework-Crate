@@ -83,6 +83,10 @@ fn push_pd_ports_history(
     });
 }
 
+fn mark_view_dirty(state: &AppState) {
+    state.lifecycle.view_dirty.store(true, Ordering::Release);
+}
+
 fn estimate_duty_from_thermal(state: &AppState) -> Option<u32> {
     let thermal_snap = read_lock(&state.thermal.data);
     if let Some(ref t) = *thermal_snap {
@@ -214,7 +218,7 @@ pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<cli::
             *guard = Arc::new(cards);
         });
     }
-    state.lifecycle.view_dirty.store(true, Ordering::Release);
+    mark_view_dirty(state);
 }
 
 pub fn spawn(state: AppState) {
@@ -301,7 +305,7 @@ pub fn spawn(state: AppState) {
                     let ec_clone = Arc::clone(&ec);
                     if let Ok(Ok(t)) = tokio::task::spawn_blocking(move || ec_clone.thermal()).await {
                         if record_thermal_sample(&bg_state2, t) {
-                            bg_state2.lifecycle.view_dirty.store(true, Ordering::Release);
+                            mark_view_dirty(&bg_state2);
                         }
                     }
                     // While the user is idle, skip the per-cycle UI-only reads (battery) to
@@ -315,7 +319,7 @@ pub fn spawn(state: AppState) {
                                     *guard = Arc::new(Some(new_info));
                                 }
                             });
-                            bg_state2.lifecycle.view_dirty.store(true, Ordering::Release);
+                            mark_view_dirty(&bg_state2);
                         }
                     }
 
@@ -334,7 +338,7 @@ pub fn spawn(state: AppState) {
                                 with_write_lock(&bg_state2.peripherals.pd_ports, |guard| {
                                     *guard = Arc::new(ports);
                                 });
-                                bg_state2.lifecycle.view_dirty.store(true, Ordering::Release);
+                                mark_view_dirty(&bg_state2);
                             }
                             push_pd_ports_history(&bg_state2.peripherals.pd_ports, &bg_state2.peripherals.pd_ports_history);
                         }
@@ -343,7 +347,7 @@ pub fn spawn(state: AppState) {
                             with_write_lock(&bg_state2.peripherals.expansion_cards, |guard| {
                                 if **guard != cards {
                                     *guard = Arc::new(cards);
-                                    bg_state2.lifecycle.view_dirty.store(true, Ordering::Release);
+                                    mark_view_dirty(&bg_state2);
                                 }
                             });
                         }
@@ -355,7 +359,7 @@ pub fn spawn(state: AppState) {
                             with_write_lock(&bg_state2.system.versions, |guard| {
                                 if guard.as_ref().as_ref() != Some(&v) {
                                     *guard = Arc::new(Some(v));
-                                    bg_state2.lifecycle.view_dirty.store(true, Ordering::Release);
+                                    mark_view_dirty(&bg_state2);
                                 }
                             });
                         }
