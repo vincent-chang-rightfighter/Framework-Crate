@@ -480,15 +480,12 @@ impl App {
                 self.state.fan.mode.store(mode.to_u8() as u64, Ordering::Release);
                 let curve_poll = {
                     let mut curve_poll_ms = None;
-                    with_write_lock(&self.state.lifecycle.config, |guard| {
-                        let cfg = Arc::make_mut(guard);
+                    self.mutate_config(|cfg| {
                         if mode == FanControlMode::Curve && cfg.fan.curve.is_none() {
                             cfg.fan.curve = Some(crate::types::GlobalCurveConfig::default());
                         }
                         cfg.fan.mode = mode;
-                        if let Some(ref curve) = cfg.fan.curve {
-                            curve_poll_ms = Some(curve.poll_ms);
-                        }
+                        curve_poll_ms = cfg.fan.curve.as_ref().map(|c| c.poll_ms);
                     });
                     curve_poll_ms
                 };
@@ -501,8 +498,7 @@ impl App {
             }
             Message::FanDutyChanged(duty) => {
                 let duty = duty.clamp(0, 100);
-                with_write_lock(&self.state.lifecycle.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
+                self.mutate_config(|cfg| {
                     cfg.fan.manual = Some(crate::types::ManualConfig { duty_pct: duty });
                 });
                 self.state.fan.last_applied_duty.store(duty as u64, Ordering::Release);
@@ -510,8 +506,7 @@ impl App {
             }
             Message::FanCurvePointTempChanged(idx, temp) => {
                 let temp = temp.clamp(0, 99);
-                with_write_lock(&self.state.lifecycle.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
+                self.mutate_config(|cfg| {
                     if let Some(ref mut curve) = cfg.fan.curve {
                         if idx < curve.curve.points.len() {
                             curve.curve.points[idx][0] = temp;
@@ -524,8 +519,7 @@ impl App {
             }
             Message::FanCurvePointDutyChanged(idx, duty) => {
                 let duty = duty.clamp(0, 100);
-                with_write_lock(&self.state.lifecycle.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
+                self.mutate_config(|cfg| {
                     if let Some(ref mut curve) = cfg.fan.curve {
                         if idx < curve.curve.points.len() {
                             curve.curve.points[idx][1] = duty;
@@ -539,8 +533,7 @@ impl App {
             Message::FanCurvePollMsChanged(ms) => {
                 let clamped = ms.max(500);
                 self.state.fan.curve_poll_ms.store(clamped, Ordering::Release);
-                with_write_lock(&self.state.lifecycle.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
+                self.mutate_config(|cfg| {
                     if let Some(ref mut curve) = cfg.fan.curve {
                         curve.poll_ms = clamped;
                     }
@@ -548,8 +541,7 @@ impl App {
                 self.save_config();
             }
             Message::FanCurveHysteresisChanged(h) => {
-                with_write_lock(&self.state.lifecycle.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
+                self.mutate_config(|cfg| {
                     if let Some(ref mut curve) = cfg.fan.curve {
                         curve.curve.hysteresis_c = h;
                     }
@@ -557,8 +549,7 @@ impl App {
                 self.save_config();
             }
             Message::FanCurveRateLimitChanged(r) => {
-                with_write_lock(&self.state.lifecycle.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
+                self.mutate_config(|cfg| {
                     if let Some(ref mut curve) = cfg.fan.curve {
                         curve.curve.rate_limit_pct_per_step = r;
                     }
@@ -566,8 +557,7 @@ impl App {
                 self.save_config();
             }
             Message::ChargeLimitToggled(enabled) => {
-                with_write_lock(&self.state.lifecycle.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
+                self.mutate_config(|cfg| {
                     let limit = cfg.battery.charge_limit_max_pct.get_or_insert(crate::types::SettingU8 { enabled: false, value: CHARGE_LIMIT_MIN as u8 });
                     limit.enabled = enabled;
                     if limit.value < CHARGE_LIMIT_MIN as u8 {
@@ -577,8 +567,7 @@ impl App {
                 self.save_config();
             }
             Message::ChargeLimitChanged(value) => {
-                with_write_lock(&self.state.lifecycle.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
+                self.mutate_config(|cfg| {
                     let limit = cfg.battery.charge_limit_max_pct.get_or_insert(crate::types::SettingU8 { enabled: false, value: CHARGE_LIMIT_MIN as u8 });
                     limit.value = value.min(CHARGE_LIMIT_MAX) as u8;
                 });
@@ -595,8 +584,7 @@ impl App {
                 let Some(name) = name else {
                     return Task::none();
                 };
-                with_write_lock(&self.state.lifecycle.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
+                self.mutate_config(|cfg| {
                     if cfg.telemetry.selected_sensors.is_empty() {
                         let cache = read_lock(&self.state.thermal.sensor_cache);
                         cfg.telemetry.selected_sensors = cache.keys.clone();
@@ -614,8 +602,7 @@ impl App {
             }
             Message::PollRateChanged(ms) => {
                 let ms = ms.max(POLL_RATE_MIN_MS as u64);
-                with_write_lock(&self.state.lifecycle.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
+                self.mutate_config(|cfg| {
                     cfg.telemetry.poll_ms = ms;
                 });
                 self.state.lifecycle.poll_ms.store(ms, Ordering::Relaxed);
@@ -623,8 +610,7 @@ impl App {
             }
             Message::UiRefreshRateChanged(ms) => {
                 let ms = ms.clamp(50, 1000);
-                with_write_lock(&self.state.lifecycle.config, |guard| {
-                    let cfg = Arc::make_mut(guard);
+                self.mutate_config(|cfg| {
                     cfg.telemetry.ui_refresh_ms = ms;
                 });
                 self.tick_interval_ms = ms;
@@ -821,6 +807,14 @@ impl App {
         if let Err(e) = crate::config::save(&cfg) {
             warn!("Failed to save config: {}", e);
         }
+    }
+
+    /// Mutate the config under a write lock. Caller must call `save_config()`
+    /// afterwards if the change should be persisted.
+    fn mutate_config(&self, f: impl FnOnce(&mut Config)) {
+        with_write_lock(&self.state.lifecycle.config, |guard| {
+            f(Arc::make_mut(guard));
+        });
     }
 
     fn close_window(&self) -> Task<Message> {

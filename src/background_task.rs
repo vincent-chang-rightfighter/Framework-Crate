@@ -41,6 +41,7 @@ pub fn pin_to_slowest_core() {
     }
 }
 
+#[cfg(debug_assertions)]
 fn verify_affinity(expected_id: usize) {
     #[cfg(target_os = "windows")]
     {

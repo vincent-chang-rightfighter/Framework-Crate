@@ -18,7 +18,7 @@ pub struct FanReading {
     pub rpm: u32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct BatteryData {
     pub ac_present: Option<bool>,
     pub last_full_charge_capacity_mah: Option<u32>,

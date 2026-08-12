@@ -185,7 +185,7 @@ pub struct BatteryConfig {
     pub charge_limit_max_pct: Option<SettingU8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct BatteryInfo {
     pub power_info: crate::cli::ec_wrapper::BatteryData,
 }
