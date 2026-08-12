@@ -14,6 +14,7 @@ mod views;
 mod app;
 mod background_task;
 mod config_save_task;
+mod sub_state;
 mod tray;
 mod util;
 
@@ -221,7 +222,7 @@ mod tests {
         let _guard = app_config_lock();
         let (mut app, _) = App::new();
         let _ = app.update(Message::FanModeChanged(FanControlMode::Curve));
-        let cfg = read_lock(&app.state.config);
+        let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.fan.mode, FanControlMode::Curve);
         assert!(cfg.fan.curve.is_some());
     }
@@ -232,7 +233,7 @@ mod tests {
         let (mut app, _) = App::new();
         let _ = app.update(Message::FanModeChanged(FanControlMode::Curve));
         let _ = app.update(Message::FanModeChanged(FanControlMode::Disabled));
-        let cfg = read_lock(&app.state.config);
+        let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.fan.mode, FanControlMode::Disabled);
     }
 
@@ -241,7 +242,7 @@ mod tests {
         let _guard = app_config_lock();
         let (mut app, _) = App::new();
         let _ = app.update(Message::FanDutyChanged(5));
-        let cfg = read_lock(&app.state.config);
+        let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.fan.manual.as_ref().map(|m| m.duty_pct), Some(5));
     }
 
@@ -250,7 +251,7 @@ mod tests {
         let _guard = app_config_lock();
         let (mut app, _) = App::new();
         let _ = app.update(Message::FanDutyChanged(200));
-        let cfg = read_lock(&app.state.config);
+        let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.fan.manual.as_ref().map(|m| m.duty_pct), Some(100));
     }
 
@@ -259,7 +260,7 @@ mod tests {
         let _guard = app_config_lock();
         let (mut app, _) = App::new();
         let _ = app.update(Message::FanDutyChanged(60));
-        let cfg = read_lock(&app.state.config);
+        let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.fan.manual.as_ref().map(|m| m.duty_pct), Some(60));
     }
 
@@ -268,7 +269,7 @@ mod tests {
         let _guard = app_config_lock();
         let (mut app, _) = App::new();
         let _ = app.update(Message::ChargeLimitToggled(true));
-        let cfg = read_lock(&app.state.config);
+        let cfg = read_lock(&app.state.lifecycle.config);
         let limit = cfg.battery.charge_limit_max_pct;
         assert!(limit.is_some());
         assert!(limit.unwrap().enabled);
@@ -279,7 +280,7 @@ mod tests {
         let _guard = app_config_lock();
         let (mut app, _) = App::new();
         let _ = app.update(Message::ChargeLimitChanged(80));
-        let cfg = read_lock(&app.state.config);
+        let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.battery.charge_limit_max_pct.map(|l| l.value), Some(80));
     }
 
@@ -288,9 +289,9 @@ mod tests {
         let _guard = app_config_lock();
         let (mut app, _) = App::new();
         let _ = app.update(Message::PollRateChanged(1000));
-        let cfg = read_lock(&app.state.config);
+        let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.telemetry.poll_ms, 1000);
-        assert_eq!(app.state.poll_ms.load(Ordering::Relaxed), 1000);
+        assert_eq!(app.state.lifecycle.poll_ms.load(Ordering::Relaxed), 1000);
     }
 
     #[tokio::test]
@@ -299,7 +300,7 @@ mod tests {
         let (mut app, _) = App::new();
         let _ = app.update(Message::UiRefreshRateChanged(200));
         assert_eq!(app.tick_interval_ms, 200);
-        let cfg = read_lock(&app.state.config);
+        let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.telemetry.ui_refresh_ms, 200);
     }
 

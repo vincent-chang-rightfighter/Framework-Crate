@@ -19,7 +19,7 @@ fn battery_key(cfg: &Config) -> BatteryKey {
 }
 
 async fn apply_battery_settings(cfg: &Config, state: &AppState) {
-    let ec = { read_lock(&state.ec_client) };
+    let ec = { read_lock(&state.system.ec_client) };
     let Some(ref ec) = *ec else { return };
     if let Some(ref limit) = cfg.battery.charge_limit_max_pct {
         let pct = if limit.enabled { limit.value } else { 100 };
@@ -65,7 +65,7 @@ pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
                     Ok(Err(_)) => {
                         // Channel closed — save latest config and exit
                         let cfg_arc = Arc::clone(&latest);
-                        let save_failed = Arc::clone(&state.bg_config_save_failed);
+                        let save_failed = Arc::clone(&state.lifecycle.bg_config_save_failed);
                         tokio::task::spawn_blocking(move || {
                             if let Err(e) = crate::config::save_fast(&cfg_arc) {
                                 warn!("Failed to save config on channel close: {}", e);
@@ -82,7 +82,7 @@ pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
             }
 
             let cfg_arc = Arc::clone(&latest);
-            let save_failed = Arc::clone(&state.bg_config_save_failed);
+            let save_failed = Arc::clone(&state.lifecycle.bg_config_save_failed);
             tokio::task::spawn_blocking(move || {
                 if let Err(e) = crate::config::save_fast(&cfg_arc) {
                     warn!("Failed to save config: {}", e);

@@ -28,18 +28,18 @@ pub(crate) struct ViewSnapshot {
 impl ViewSnapshot {
     pub fn from_app(app: &App) -> Self {
         Self {
-            thermal: Arc::clone(&read_lock(&app.state.thermal)),
-            config: Arc::clone(&read_lock(&app.state.config)),
-            sensor_cache: Arc::clone(&read_lock(&app.state.sensor_cache)),
-            temp_history: with_write_lock(&app.state.temp_history, |h| {
+            thermal: Arc::clone(&read_lock(&app.state.thermal.data)),
+            config: Arc::clone(&read_lock(&app.state.lifecycle.config)),
+            sensor_cache: Arc::clone(&read_lock(&app.state.thermal.sensor_cache)),
+            temp_history: with_write_lock(&app.state.thermal.history, |h| {
                 Arc::make_mut(h).snapshot(crate::util::current_time_ms_i64())
             }),
-            battery: Arc::clone(&read_lock(&app.state.battery)),
-            kblight: Arc::clone(&read_lock(&app.state.kblight)),
-            expansion_cards: Arc::clone(&read_lock(&app.state.expansion_cards)),
-            pd_ports: Arc::clone(&read_lock(&app.state.pd_ports)),
-            pd_ports_history: Arc::clone(&read_lock(&app.state.pd_ports_history)),
-            curve_full_points: Arc::clone(&read_lock(&app.state.curve_full_points)),
+            battery: Arc::clone(&read_lock(&app.state.battery.info)),
+            kblight: Arc::clone(&read_lock(&app.state.peripherals.kblight)),
+            expansion_cards: Arc::clone(&read_lock(&app.state.peripherals.expansion_cards)),
+            pd_ports: Arc::clone(&read_lock(&app.state.peripherals.pd_ports)),
+            pd_ports_history: Arc::clone(&read_lock(&app.state.peripherals.pd_ports_history)),
+            curve_full_points: Arc::clone(&read_lock(&app.state.fan.curve_full_points)),
         }
     }
 }
@@ -159,7 +159,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
 }
 
 fn view_settings(app: &App) -> Element<'_, Message> {
-    let versions = read_lock(&app.state.versions);
+    let versions = read_lock(&app.state.system.versions);
 
     let title_row = row![
         text("About").size(20),
@@ -212,7 +212,7 @@ fn view_settings(app: &App) -> Element<'_, Message> {
     }
     sw_content = sw_content.push(space::vertical().height(8));
     sw_content = sw_content.push(text("Poll Rate:").size(FONT_BODY));
-    let config = read_lock(&app.state.config);
+    let config = read_lock(&app.state.lifecycle.config);
     let poll_ms = config.telemetry.poll_ms as u32;
     sw_content = sw_content.push(
         row![
@@ -242,7 +242,7 @@ fn view_settings(app: &App) -> Element<'_, Message> {
 }
 
 fn view_quit_warning(app: &App) -> Element<'_, Message> {
-    let config = read_lock(&app.state.config);
+    let config = read_lock(&app.state.lifecycle.config);
     let current_duty = config.fan.manual.as_ref().map(|m| m.duty_pct).unwrap_or(50);
     let set_duty = app.quit_duty_value;
 

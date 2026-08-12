@@ -7,10 +7,11 @@ use tracing::{debug, warn};
 
 use crate::background_task;
 use crate::config_save_task;
-use crate::types::{Config, FanControlMode, BatteryInfo};
+use crate::types::{Config, FanControlMode};
 use crate::cli;
 use crate::system_info;
 use crate::temp_chart;
+use crate::sub_state::{FanState, ThermalState, PeripheralState, BatteryState, SystemState, LifecycleState};
 use crate::style::*;
 use crate::views;
 
@@ -169,30 +170,12 @@ pub struct SensorCache {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub cli_available: Arc<AtomicBool>,
-    pub shutdown: Arc<AtomicBool>,
-    pub config: Arc<RwLock<Arc<Config>>>,
-    pub ec_client: Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
-    pub thermal: Arc<RwLock<Arc<Option<cli::ec_wrapper::ThermalData>>>>,
-    pub versions: Arc<RwLock<Arc<Option<cli::ec_wrapper::VersionsData>>>>,
-    pub battery: Arc<RwLock<Arc<Option<BatteryInfo>>>>,
-    pub poll_ms: Arc<AtomicU64>,
-    pub temp_history: Arc<RwLock<Arc<temp_chart::ThermalHistory>>>,
-    pub kblight: Arc<RwLock<Arc<Option<u32>>>>,
-    pub expansion_cards: Arc<RwLock<Arc<Vec<cli::ec_wrapper::ExpansionCard>>>>,
-    pub pd_ports: Arc<RwLock<Arc<Vec<cli::ec_wrapper::UsbCPort>>>>,
-    pub pd_ports_history: Arc<RwLock<Arc<PdPortsHistory>>>,
-    pub last_applied_duty: Arc<AtomicU64>,
-    pub last_interaction_ts: Arc<AtomicU64>,
-    pub curve_full_points: Arc<RwLock<Arc<Vec<[u32; 2]>>>>,
-    pub bg_config_save_failed: Arc<AtomicBool>,
-    pub visible: Arc<AtomicBool>,
-    pub fan_max_rpm: Arc<AtomicU64>,
-    pub curve_poll_ms: Arc<AtomicU64>,
-    pub fan_mode: Arc<AtomicU64>,
-    pub sensor_cache: Arc<RwLock<Arc<SensorCache>>>,
-    pub last_fan_rpm_reset: Arc<AtomicU64>,
-    pub view_dirty: Arc<AtomicBool>,
+    pub system: SystemState,
+    pub fan: FanState,
+    pub thermal: ThermalState,
+    pub peripherals: PeripheralState,
+    pub battery: BatteryState,
+    pub lifecycle: LifecycleState,
 }
 
 impl App {
@@ -208,34 +191,46 @@ impl App {
         let ui_refresh_ms = loaded_config.telemetry.ui_refresh_ms;
 
         let state = AppState {
-            cli_available: Arc::new(AtomicBool::new(false)),
-            shutdown: Arc::new(AtomicBool::new(false)),
-            config: Arc::new(RwLock::new(Arc::new(loaded_config.clone()))),
-            ec_client: Arc::new(RwLock::new(Arc::new(None))),
-            thermal: Arc::new(RwLock::new(Arc::new(None))),
-            versions: Arc::new(RwLock::new(Arc::new(None))),
-            battery: Arc::new(RwLock::new(Arc::new(None))),
-            poll_ms: Arc::new(AtomicU64::new(poll_ms)),
-            temp_history: Arc::new(RwLock::new(Arc::new(temp_chart::ThermalHistory::new()))),
-            kblight: Arc::new(RwLock::new(Arc::new(None))),
-            expansion_cards: Arc::new(RwLock::new(Arc::new(Vec::new()))),
-            pd_ports: Arc::new(RwLock::new(Arc::new(Vec::new()))),
-            pd_ports_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
-            last_applied_duty: Arc::new(AtomicU64::new(0)),
-            last_interaction_ts: Arc::new(AtomicU64::new(crate::util::current_time_ms())),
-            curve_full_points: Arc::new(RwLock::new(Arc::new(crate::types::curve_full_points(
-                loaded_config.fan.curve.as_ref().map(|c| c.curve.points.as_slice()).unwrap_or(&[]),
-            )))),
-            bg_config_save_failed: Arc::new(AtomicBool::new(false)),
-            visible: Arc::new(AtomicBool::new(true)),
-            fan_max_rpm: Arc::new(AtomicU64::new(0)),
-            curve_poll_ms: Arc::new(AtomicU64::new(
-                loaded_config.fan.curve.as_ref().map(|c| c.poll_ms).unwrap_or(1000)
-            )),
-            fan_mode: Arc::new(AtomicU64::new(loaded_config.fan.mode.to_u8() as u64)),
-            sensor_cache: Arc::new(RwLock::new(Arc::new(SensorCache::default()))),
-            last_fan_rpm_reset: Arc::new(AtomicU64::new(crate::util::current_time_ms())),
-            view_dirty: Arc::new(AtomicBool::new(true)),
+            system: SystemState {
+                cli_available: Arc::new(AtomicBool::new(false)),
+                ec_client: Arc::new(RwLock::new(Arc::new(None))),
+                versions: Arc::new(RwLock::new(Arc::new(None))),
+            },
+            fan: FanState {
+                mode: Arc::new(AtomicU64::new(loaded_config.fan.mode.to_u8() as u64)),
+                curve_poll_ms: Arc::new(AtomicU64::new(
+                    loaded_config.fan.curve.as_ref().map(|c| c.poll_ms).unwrap_or(1000)
+                )),
+                last_applied_duty: Arc::new(AtomicU64::new(0)),
+                fan_max_rpm: Arc::new(AtomicU64::new(0)),
+                last_fan_rpm_reset: Arc::new(AtomicU64::new(crate::util::current_time_ms())),
+                curve_full_points: Arc::new(RwLock::new(Arc::new(crate::types::curve_full_points(
+                    loaded_config.fan.curve.as_ref().map(|c| c.curve.points.as_slice()).unwrap_or(&[]),
+                )))),
+            },
+            thermal: ThermalState {
+                data: Arc::new(RwLock::new(Arc::new(None))),
+                history: Arc::new(RwLock::new(Arc::new(temp_chart::ThermalHistory::new()))),
+                sensor_cache: Arc::new(RwLock::new(Arc::new(SensorCache::default()))),
+            },
+            peripherals: PeripheralState {
+                kblight: Arc::new(RwLock::new(Arc::new(None))),
+                expansion_cards: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+                pd_ports: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+                pd_ports_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
+            },
+            battery: BatteryState {
+                info: Arc::new(RwLock::new(Arc::new(None))),
+            },
+            lifecycle: LifecycleState {
+                config: Arc::new(RwLock::new(Arc::new(loaded_config.clone()))),
+                poll_ms: Arc::new(AtomicU64::new(poll_ms)),
+                shutdown: Arc::new(AtomicBool::new(false)),
+                visible: Arc::new(AtomicBool::new(true)),
+                last_interaction_ts: Arc::new(AtomicU64::new(crate::util::current_time_ms())),
+                bg_config_save_failed: Arc::new(AtomicBool::new(false)),
+                view_dirty: Arc::new(AtomicBool::new(true)),
+            },
         };
 
         let cpu = system_info::cpu_name();
@@ -288,12 +283,12 @@ impl App {
         let init_task = Task::perform(async move {
             match tokio::task::spawn_blocking(cli::EcClient::new).await {
                 Ok(Ok(ec)) => {
-                    state.cli_available.store(true, Ordering::Release);
+                    state.system.cli_available.store(true, Ordering::Release);
                     let arc_ec = Arc::new(ec);
-                    with_write_lock(&state.ec_client, |guard| {
+                    with_write_lock(&state.system.ec_client, |guard| {
                         *guard = Arc::new(Some(Arc::clone(&arc_ec)));
                     });
-                    let versions = Arc::clone(&state.versions);
+                    let versions = Arc::clone(&state.system.versions);
                     let ec_cl = Arc::clone(&arc_ec);
                     match tokio::task::spawn_blocking(move || ec_cl.versions()).await {
                         Ok(Ok(v)) => {
@@ -308,11 +303,11 @@ impl App {
                     Message::InitComplete
                 }
                 Ok(Err(e)) => {
-                    state.cli_available.store(false, Ordering::Release);
+                    state.system.cli_available.store(false, Ordering::Release);
                     Message::StartupError(format!("EC initialization failed: {}. Run as administrator.", e))
                 }
                 Err(e) => {
-                    state.cli_available.store(false, Ordering::Release);
+                    state.system.cli_available.store(false, Ordering::Release);
                     Message::StartupError(format!("EC spawn failed: {}", e))
                 }
             }
@@ -366,17 +361,17 @@ impl App {
             Message::Tick | Message::InitComplete | Message::StartupError(_) | Message::WindowResized(..) => {}
             _ => {
                 let now_ms = crate::util::current_time_ms();
-                self.state.last_interaction_ts.store(now_ms, Ordering::Release);
+                self.state.lifecycle.last_interaction_ts.store(now_ms, Ordering::Release);
             }
         }
         // Rebuild the view snapshot whenever new data arrived (background
         // thread sets view_dirty) or none exists yet. Runs here (not in
         // view()) so sub-views can borrow from a snapshot owned by `self`.
         if self.init_complete
-            && (self.state.view_dirty.load(Ordering::Acquire) || self.cached_snapshot.is_none())
+            && (self.state.lifecycle.view_dirty.load(Ordering::Acquire) || self.cached_snapshot.is_none())
         {
             self.cached_snapshot = Some(crate::views::ViewSnapshot::from_app(self));
-            self.state.view_dirty.store(false, Ordering::Release);
+            self.state.lifecycle.view_dirty.store(false, Ordering::Release);
         }
         match message {
             Message::Tick => {
@@ -390,12 +385,12 @@ impl App {
                     self.pending_curve_update = false;
                     self.update_curve_full_points();
                 }
-                self.cli_present = self.state.cli_available.load(Ordering::Acquire);
-                self.config_save_failed = self.state.bg_config_save_failed.load(Ordering::Relaxed);
+                self.cli_present = self.state.system.cli_available.load(Ordering::Acquire);
+                self.config_save_failed = self.state.lifecycle.bg_config_save_failed.load(Ordering::Relaxed);
 
                 let now_ms = crate::util::current_time_ms();
-                let idle = now_ms.saturating_sub(self.state.last_interaction_ts.load(Ordering::Acquire)) > IDLE_THRESHOLD_MS;
-                let visible = self.state.visible.load(Ordering::Acquire);
+                let idle = now_ms.saturating_sub(self.state.lifecycle.last_interaction_ts.load(Ordering::Acquire)) > IDLE_THRESHOLD_MS;
+                let visible = self.state.lifecycle.visible.load(Ordering::Acquire);
                 let next_ms = if !visible {
                     UI_HIDDEN_INTERVAL_MS
                 } else if idle {
@@ -435,7 +430,7 @@ impl App {
                         // checks before triggering, preventing false positives
                         // during the DWM state transition after restore.
                         if !self.tray.is_recently_restored()
-                            && self.state.visible.load(Ordering::Acquire)
+                            && self.state.lifecycle.visible.load(Ordering::Acquire)
                         {
                             if system_info::is_iconic(self.tray.hwnd()) {
                                 self.iconic_check_count += 1;
@@ -471,10 +466,10 @@ impl App {
                     // hide the window now that the icon is ready.
                     if self.pending_minimize_to_tray
                         && self.tray.check_icon_ready()
-                        && self.state.visible.load(Ordering::Acquire)
+                        && self.state.lifecycle.visible.load(Ordering::Acquire)
                     {
                         self.tray.hide_window();
-                        self.state.visible.store(false, Ordering::Release);
+                        self.state.lifecycle.visible.store(false, Ordering::Release);
                         self.pending_minimize_to_tray = false;
                         self.icon_create_in_flight = false;
                         tracing::info!("Tray icon ready, window hidden");
@@ -488,17 +483,17 @@ impl App {
                 self.rebuild_header_info();
                 self.rebuild_sensor_cache();
                 self.cached_snapshot = Some(crate::views::ViewSnapshot::from_app(self));
-                self.state.view_dirty.store(false, Ordering::Release);
+                self.state.lifecycle.view_dirty.store(false, Ordering::Release);
                 return tick_task(0);
             }
             Message::StartupError(msg) => {
                 self.startup_error = Some(msg);
             }
             Message::FanModeChanged(mode) => {
-                self.state.fan_mode.store(mode.to_u8() as u64, Ordering::Release);
+                self.state.fan.mode.store(mode.to_u8() as u64, Ordering::Release);
                 let curve_poll = {
                     let mut curve_poll_ms = None;
-                    with_write_lock(&self.state.config, |guard| {
+                    with_write_lock(&self.state.lifecycle.config, |guard| {
                         let cfg = Arc::make_mut(guard);
                         if mode == FanControlMode::Curve && cfg.fan.curve.is_none() {
                             cfg.fan.curve = Some(crate::types::GlobalCurveConfig::default());
@@ -512,23 +507,23 @@ impl App {
                 };
                 // Sync curve_poll_ms atomic so background loop avoids config lock
                 if let Some(ms) = curve_poll {
-                    self.state.curve_poll_ms.store(ms, Ordering::Release);
+                    self.state.fan.curve_poll_ms.store(ms, Ordering::Release);
                 }
                 self.update_curve_full_points();
                 self.save_config();
             }
             Message::FanDutyChanged(duty) => {
                 let duty = duty.clamp(0, 100);
-                with_write_lock(&self.state.config, |guard| {
+                with_write_lock(&self.state.lifecycle.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     cfg.fan.manual = Some(crate::types::ManualConfig { duty_pct: duty });
                 });
-                self.state.last_applied_duty.store(duty as u64, Ordering::Release);
+                self.state.fan.last_applied_duty.store(duty as u64, Ordering::Release);
                 self.save_config();
             }
             Message::FanCurvePointTempChanged(idx, temp) => {
                 let temp = temp.clamp(0, 99);
-                with_write_lock(&self.state.config, |guard| {
+                with_write_lock(&self.state.lifecycle.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     if let Some(ref mut curve) = cfg.fan.curve {
                         if idx < curve.curve.points.len() {
@@ -542,7 +537,7 @@ impl App {
             }
             Message::FanCurvePointDutyChanged(idx, duty) => {
                 let duty = duty.clamp(0, 100);
-                with_write_lock(&self.state.config, |guard| {
+                with_write_lock(&self.state.lifecycle.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     if let Some(ref mut curve) = cfg.fan.curve {
                         if idx < curve.curve.points.len() {
@@ -556,8 +551,8 @@ impl App {
             }
             Message::FanCurvePollMsChanged(ms) => {
                 let clamped = ms.max(500);
-                self.state.curve_poll_ms.store(clamped, Ordering::Release);
-                with_write_lock(&self.state.config, |guard| {
+                self.state.fan.curve_poll_ms.store(clamped, Ordering::Release);
+                with_write_lock(&self.state.lifecycle.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     if let Some(ref mut curve) = cfg.fan.curve {
                         curve.poll_ms = clamped;
@@ -566,7 +561,7 @@ impl App {
                 self.save_config();
             }
             Message::FanCurveHysteresisChanged(h) => {
-                with_write_lock(&self.state.config, |guard| {
+                with_write_lock(&self.state.lifecycle.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     if let Some(ref mut curve) = cfg.fan.curve {
                         curve.curve.hysteresis_c = h;
@@ -575,7 +570,7 @@ impl App {
                 self.save_config();
             }
             Message::FanCurveRateLimitChanged(r) => {
-                with_write_lock(&self.state.config, |guard| {
+                with_write_lock(&self.state.lifecycle.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     if let Some(ref mut curve) = cfg.fan.curve {
                         curve.curve.rate_limit_pct_per_step = r;
@@ -584,7 +579,7 @@ impl App {
                 self.save_config();
             }
             Message::ChargeLimitToggled(enabled) => {
-                with_write_lock(&self.state.config, |guard| {
+                with_write_lock(&self.state.lifecycle.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     let limit = cfg.battery.charge_limit_max_pct.get_or_insert(crate::types::SettingU8 { enabled: false, value: CHARGE_LIMIT_MIN as u8 });
                     limit.enabled = enabled;
@@ -595,7 +590,7 @@ impl App {
                 self.save_config();
             }
             Message::ChargeLimitChanged(value) => {
-                with_write_lock(&self.state.config, |guard| {
+                with_write_lock(&self.state.lifecycle.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     let limit = cfg.battery.charge_limit_max_pct.get_or_insert(crate::types::SettingU8 { enabled: false, value: CHARGE_LIMIT_MIN as u8 });
                     limit.value = value.min(CHARGE_LIMIT_MAX) as u8;
@@ -607,16 +602,16 @@ impl App {
             }
             Message::SensorToggled(idx, enabled) => {
                 let name = {
-                    let cache = read_lock(&self.state.sensor_cache);
+                    let cache = read_lock(&self.state.thermal.sensor_cache);
                     cache.keys.get(idx).cloned()
                 };
                 let Some(name) = name else {
                     return Task::none();
                 };
-                with_write_lock(&self.state.config, |guard| {
+                with_write_lock(&self.state.lifecycle.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     if cfg.telemetry.selected_sensors.is_empty() {
-                        let cache = read_lock(&self.state.sensor_cache);
+                        let cache = read_lock(&self.state.thermal.sensor_cache);
                         cfg.telemetry.selected_sensors = cache.keys.clone();
                     }
                     if enabled {
@@ -632,16 +627,16 @@ impl App {
             }
             Message::PollRateChanged(ms) => {
                 let ms = ms.max(POLL_RATE_MIN_MS as u64);
-                with_write_lock(&self.state.config, |guard| {
+                with_write_lock(&self.state.lifecycle.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     cfg.telemetry.poll_ms = ms;
                 });
-                self.state.poll_ms.store(ms, Ordering::Relaxed);
+                self.state.lifecycle.poll_ms.store(ms, Ordering::Relaxed);
                 self.save_config();
             }
             Message::UiRefreshRateChanged(ms) => {
                 let ms = ms.clamp(50, 1000);
-                with_write_lock(&self.state.config, |guard| {
+                with_write_lock(&self.state.lifecycle.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     cfg.telemetry.ui_refresh_ms = ms;
                 });
@@ -653,8 +648,8 @@ impl App {
                 self.show_settings = !self.show_settings;
             }
             Message::KblightChanged(percent) => {
-                let kblight = Arc::clone(&self.state.kblight);
-                return run_ec_task(&self.state.ec_client, move |ec| {
+                let kblight = Arc::clone(&self.state.peripherals.kblight);
+                return run_ec_task(&self.state.system.ec_client, move |ec| {
                     if let Err(e) = ec.kblight_set(percent) {
                         warn!("Failed to set keyboard backlight: {}", e);
                     }
@@ -666,7 +661,7 @@ impl App {
                 });
             }
             Message::FpLedLevelChanged(level) => {
-                return run_ec_task(&self.state.ec_client, move |ec| {
+                return run_ec_task(&self.state.system.ec_client, move |ec| {
                     if let Err(e) = ec.fp_led_level_set(level) {
                         warn!("Failed to set fingerprint LED: {}", e);
                     }
@@ -689,9 +684,9 @@ impl App {
             }
             Message::QuitWithRestore => {
                 self.show_quit_warning = false;
-                self.state.shutdown.store(true, Ordering::Release);
+                self.state.lifecycle.shutdown.store(true, Ordering::Release);
                 return Task::batch([
-                    run_ec_task(&self.state.ec_client, |ec| {
+                    run_ec_task(&self.state.system.ec_client, |ec| {
                         if let Err(e) = ec.autofanctrl() {
                             warn!("Failed to restore auto fan control on quit: {}", e);
                         }
@@ -704,10 +699,10 @@ impl App {
             }
             Message::QuitWithDuty => {
                 self.show_quit_warning = false;
-                self.state.shutdown.store(true, Ordering::Release);
+                self.state.lifecycle.shutdown.store(true, Ordering::Release);
                 let duty = self.quit_duty_value;
                 return Task::batch([
-                    run_ec_task(&self.state.ec_client, move |ec| {
+                    run_ec_task(&self.state.system.ec_client, move |ec| {
                         if let Err(e) = ec.set_fan_duty(duty, None) {
                             warn!("Failed to set quit fan duty: {}", e);
                         }
@@ -718,7 +713,7 @@ impl App {
             Message::QuitWithoutRestore => {
                 self.show_quit_warning = false;
                 self.tray.shutdown();
-                self.state.shutdown.store(true, Ordering::Release);
+                self.state.lifecycle.shutdown.store(true, Ordering::Release);
                 self.save_config_now();
                 return self.close_window();
             }
@@ -755,7 +750,7 @@ impl App {
                     if icon_ready {
                         self.icon_create_in_flight = false;
                         self.tray.hide_window();
-                        self.state.visible.store(false, Ordering::Release);
+                        self.state.lifecycle.visible.store(false, Ordering::Release);
                         tracing::info!("Window hidden, tray icon visible");
                     } else {
                         self.pending_minimize_to_tray = true;
@@ -768,25 +763,25 @@ impl App {
             Message::RestoreFromTray => {
                 self.tray.mark_restored();
                 self.tray.restore_window();
-                self.state.visible.store(true, Ordering::Release);
+                self.state.lifecycle.visible.store(true, Ordering::Release);
                 // The swapchain may hold a stale/blank frame after a long hide
                 // (surface invalidated while hidden). Force a fresh snapshot so
                 // the first visible frame renders current data.
-                self.state.view_dirty.store(true, Ordering::Release);
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.icon_create_in_flight = false;
                 self.iconic_check_count = 0;
             }
             Message::TrayQuit => {
                 self.tray.mark_restored();
                 self.tray.restore_window();
-                self.state.visible.store(true, Ordering::Release);
-                let config = read_lock(&self.state.config);
+                self.state.lifecycle.visible.store(true, Ordering::Release);
+                let config = read_lock(&self.state.lifecycle.config);
                 if config.fan.mode == FanControlMode::Manual {
                     self.quit_duty_value = config.fan.manual.as_ref().map(|m| m.duty_pct).unwrap_or(45).clamp(10, 100);
                     self.show_quit_warning = true;
                 } else {
                     self.tray.shutdown();
-                    self.state.shutdown.store(true, Ordering::Release);
+                    self.state.lifecycle.shutdown.store(true, Ordering::Release);
                     self.save_config_now();
                     return self.close_window();
                 }
@@ -809,8 +804,8 @@ impl App {
     }
 
     fn save_config(&mut self) {
-        self.state.view_dirty.store(true, Ordering::Release);
-        let cfg = read_lock(&self.state.config);
+        self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+        let cfg = read_lock(&self.state.lifecycle.config);
         if self.config_tx.send(Arc::clone(&cfg)).is_ok() {
             self.config_save_failed = false;
         } else {
@@ -823,10 +818,10 @@ impl App {
             if let Err(e) = crate::config::save(&cfg_owned) {
                 warn!("Fallback sync config save failed: {}", e);
                 self.config_save_failed = true;
-                self.state.bg_config_save_failed.store(true, Ordering::Relaxed);
+                self.state.lifecycle.bg_config_save_failed.store(true, Ordering::Relaxed);
             } else {
                 self.config_save_failed = false;
-                self.state.bg_config_save_failed.store(false, Ordering::Relaxed);
+                self.state.lifecycle.bg_config_save_failed.store(false, Ordering::Relaxed);
             }
         }
     }
@@ -835,7 +830,7 @@ impl App {
     /// (QuitWithoutRestore / CloseRequested). Using spawn_blocking here risks
     /// the write not completing before process::exit, so sync I/O is acceptable.
     fn save_config_now(&mut self) {
-        let cfg = read_lock(&self.state.config);
+        let cfg = read_lock(&self.state.lifecycle.config);
         if let Err(e) = crate::config::save(&cfg) {
             warn!("Failed to save config: {}", e);
         }
@@ -855,20 +850,20 @@ impl App {
     }
 
     fn update_curve_full_points(&mut self) {
-        let cfg = read_lock(&self.state.config);
+        let cfg = read_lock(&self.state.lifecycle.config);
         let pts: &[[u32; 2]] = cfg.fan.curve.as_ref().map(|c| c.curve.points.as_slice()).unwrap_or(&[]);
         if self.last_curve_points.as_slice() == pts {
             return;
         }
         self.last_curve_points = pts.to_vec();
         let new_full = Arc::new(crate::types::curve_full_points(pts));
-        with_write_lock(&self.state.curve_full_points, |guard| {
+        with_write_lock(&self.state.fan.curve_full_points, |guard| {
             *guard = new_full;
         });
     }
 
     fn rebuild_header_info(&mut self) {
-        let versions = read_lock(&self.state.versions);
+        let versions = read_lock(&self.state.system.versions);
         self.system_info.header_device_name = versions.as_ref().as_ref()
             .and_then(|v| v.mainboard_type.as_deref())
             .unwrap_or("Framework Crate")
@@ -916,15 +911,15 @@ impl App {
 
     /// Rebuild sensor_cache sorted and colors from current config + keys.
     pub(crate) fn rebuild_sensor_cache(&self) {
-        let cache = read_lock(&self.state.sensor_cache);
-        let config = read_lock(&self.state.config);
+        let cache = read_lock(&self.state.thermal.sensor_cache);
+        let config = read_lock(&self.state.lifecycle.config);
         let sorted = crate::types::sorted_sensor_list(&config.telemetry.selected_sensors, &cache.keys);
         let colors: Vec<iced::Color> = sorted.iter()
             .map(|name| crate::style::sensor_color(name, &cache.keys))
             .collect();
         // Must drop the read lock on sensor_cache before acquiring a write lock below.
         drop(cache);
-        with_write_lock(&self.state.sensor_cache, |g| {
+        with_write_lock(&self.state.thermal.sensor_cache, |g| {
             let old = Arc::make_mut(g);
             old.sorted = Arc::new(sorted);
             old.colors = Arc::new(colors);
