@@ -4,6 +4,10 @@ A native desktop GUI for Framework laptop fan control, battery charge limits, an
 
 Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-control).
 
+## Screenshot
+
+![Framework Crate running](Framework-Crate.png)
+
 ## Features
 
 - **Fan Control** — Auto (firmware), manual (0–100% duty), and curve mode with an interactive editor (4 draggable points, hysteresis, and rate limiting)
