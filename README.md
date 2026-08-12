@@ -2,15 +2,15 @@
 
 A native desktop GUI for Framework laptop fan control, battery charge limits, and live hardware telemetry. Built with Rust and [Iced](https://iced.rs/) 0.14, using [`framework_lib`](https://github.com/FrameworkComputer/framework-system) for direct EC hardware access.
 
-Inspired by [framework-control](https://github.com/ozturkkl/framework-control) by [ozturkkl](https://github.com/ozturkkl).
+Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-control).
 
 ## Features
 
-- **Fan Control** — Auto (firmware), Manual (duty 0–100%), and Curve mode with interactive editor (4 draggable points, hysteresis, rate limiting)
-- **Battery Management** — Max charge limit (30–100%) with toggle enable/disable, health, voltage, current display
-- **Live Telemetry** — Real-time temperature chart (30s sliding window), per-sensor display with colored indicators, fan RPM in header
-- **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card and USB-C port detection
-- **About Page** — Hardware info (CPU, RAM, Display, BIOS) and software settings (poll rate, refresh interval)
+- **Fan Control** — Auto (firmware), manual (0–100% duty), and curve mode with an interactive editor (4 draggable points, hysteresis, and rate limiting)
+- **Battery Management** — Maximum charge limit (30–100%) with enable/disable toggle, health, voltage, and current display
+- **Live Telemetry** — Real-time temperature chart (30s sliding window), per-sensor display with colored indicators, and fan RPM in the header
+- **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card, and USB-C port detection
+- **About Page** — Hardware info (CPU, RAM, display, BIOS) and software settings (poll rate, refresh interval)
 - **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit)
 
 ## Requirements
@@ -25,18 +25,18 @@ Inspired by [framework-control](https://github.com/ozturkkl/framework-control) b
 cargo build --release
 ```
 
-## Binary size checks
+## Binary Size Checks
 
 ```powershell
-# Debug build (larger because it keeps unoptimized code + debuginfo)
+# Debug build (larger because it keeps unoptimized code and full debuginfo)
 cargo build
 Get-Item .\target\debug\framework-crate.exe | Select-Object Name,Length
 
-# Release build (smaller, suitable for distribution)
+# Release build (smaller and suitable for distribution)
 cargo build --release
 Get-Item .\target\release\framework-crate.exe | Select-Object Name,Length
 
-# Compare debug vs release in one command
+# Compare debug and release builds in one command
 cargo build; Get-Item .\target\debug\framework-crate.exe | Select-Object Name,Length; Get-Item .\target\release\framework-crate.exe | Select-Object Name,Length
 ```
 
@@ -98,14 +98,14 @@ framework_lib (CrosEc) → background_task → Arc<RwLock> → UI (view reads)
 
 ### Performance Optimizations
 
-- `EcClient` shared via `Arc` — no hardware re-init on clone
-- `ThermalData.temps` as `Arc<BTreeMap>` — history samples share data
-- `SensorCache.sorted/colors` as `Arc<Vec>` — zero-copy per UI tick
-- Config lock held <1µs (reads only needed fields, drops immediately)
-- `curve_full_points` debounced (100ms after last slider edit)
-- PD port history pushed only on data change
-- Fan curve keeps running during idle (temperature response)
-- `mutate_config` helper reduces boilerplate for config mutations
+- `EcClient` is shared via `Arc` — no hardware re-initialization on clone
+- `ThermalData.temps` uses `Arc<BTreeMap>` — history samples share data
+- `SensorCache.sorted/colors` uses `Arc<Vec>` — zero-copy per UI tick
+- Config locks are held for less than 1µs by reading only the needed fields and dropping immediately
+- `curve_full_points` is debounced (100ms after the last slider edit)
+- PD port history is pushed only when data changes
+- The fan curve keeps running during idle periods to maintain temperature response
+- The `mutate_config` helper reduces boilerplate for config mutations
 
 ## Configuration
 
@@ -138,8 +138,8 @@ selected_sensors = []
 
 ## Known Limitations
 
-- **Platform-specific**: Currently only supports Intel Core Ultra Series 1 (Meteor Lake) Framework laptops. CPU identification uses x86_64 CPUID intrinsics.
-- **EC driver**: Requires the Framework EC kernel driver to be installed for `framework_lib` to communicate with hardware.
+- **Platform-specific**: This project currently supports only Intel Core Ultra Series 1 (Meteor Lake) Framework laptops. CPU identification uses x86_64 CPUID intrinsics.
+- **EC driver**: The Framework EC kernel driver must be installed for `framework_lib` to communicate with the hardware.
 
 ## Third-Party Dependencies
 
@@ -150,7 +150,7 @@ selected_sensors = []
 
 The application icon is the "settings" icon (System category) from the [Iconoir](https://iconoir.com/) icon set, licensed under the [MIT License](https://github.com/iconoir-icons/iconoir/blob/master/LICENSE).
 
-Rendering parameters: Optical Size 32, Stroke Weight 1.5, color `#7300ff` (R 115, G 0, B 255). The source SVG (`assets/settings.svg`) is reproduced with attribution to Iconoir.
+Rendering parameters: optical size 32, stroke weight 1.5, color `#7300ff` (R 115, G 0, B 255). The source SVG (`assets/settings.svg`) is reproduced with attribution to Iconoir.
 
 ## License
 
