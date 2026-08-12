@@ -766,7 +766,7 @@ mod tests {
     const SW_SHOW: i32 = 5;
 
     #[link(name = "user32")]
-    extern "system" {
+    unsafe extern "system" {
         fn CreateWindowExW(
             dwExStyle: u32,
             lpClassName: LPCWSTR,

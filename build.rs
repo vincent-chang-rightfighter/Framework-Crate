@@ -12,7 +12,7 @@ fn main() {
 
         // Windows PE metadata shown in Explorer / file properties.
         res.set("ProductName", "Framework Crate");
-        res.set("FileDescription", "Framework laptop fan control and telemetry");
+        res.set("FileDescription", "Framework Crate");
         res.set("CompanyName", "Vincent Chang");
         res.set("LegalCopyright", "Copyright (c) 2026 Vincent Chang");
         res.set("ProductVersion", env!("CARGO_PKG_VERSION"));

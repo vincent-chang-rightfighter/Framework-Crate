@@ -25,6 +25,15 @@ pub use style::*;
 include!(concat!(env!("OUT_DIR"), "/icon_rgba.rs"));
 
 fn main() {
+    // Keep the async runtime small for a tray app. The Win32 tray message pump
+    // already owns a native thread; Tokio should not spin up a large worker pool.
+    // Respect an explicit override from the environment but default to two workers.
+    if std::env::var_os("TOKIO_WORKER_THREADS").is_none() {
+        unsafe {
+            std::env::set_var("TOKIO_WORKER_THREADS", "2");
+        }
+    }
+
     background_task::pin_to_slowest_core();
 
     #[cfg(not(test))]
