@@ -35,6 +35,14 @@ struct MemoryStatusEx {
     ull_avail_extended_virtual: u64,
 }
 
+// ============================================================================
+// Raw Win32 FFI declarations
+//
+// These are hand-declared because some APIs are not available in the
+// `windows-sys` feature set we use, or we need finer control over the
+// #[link] attributes. All functions are safe to call with valid handles.
+// ============================================================================
+
 #[link(name = "kernel32")]
 extern "system" {
     fn GetSystemMetrics(nIndex: i32) -> i32;
@@ -119,6 +127,10 @@ extern "system" {
     ) -> i32;
     fn keybd_event(bVk: u8, bScan: u8, dwFlags: u32, dwExtraInfo: usize);
 }
+
+// ============================================================================
+// Win32 structs and constants for window management / tray
+// ============================================================================
 
 #[repr(C)]
 #[derive(Clone, Copy)]

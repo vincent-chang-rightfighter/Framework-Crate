@@ -44,7 +44,7 @@ impl CurveStepper {
                 let should_apply = curve_target > current
                     || hysteresis_c == 0
                     || temp >= self.transition_start_temp
-                    || temp <= self.transition_start_temp - hysteresis_c as i32;
+                    || temp <= self.transition_start_temp.saturating_sub(hysteresis_c as i32);
                 if should_apply {
                     self.active_target = Some(curve_target);
                     self.transition_start_temp = temp;

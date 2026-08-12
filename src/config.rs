@@ -39,6 +39,7 @@ fn default_config_dir() -> PathBuf {
 
 pub fn load() -> Result<Config, String> {
     let path = config_path()?;
+    tracing::debug!("Loading config from: {}", path.display());
     if path.exists() {
         let content = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
@@ -70,6 +71,7 @@ fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
         curve.curve.points.sort_by_key(|p| p[0]);
     }
     let path = config_path()?;
+    tracing::debug!("Saving config to: {}", path.display());
     let tmp_path = path.with_extension(unique_tmp_extension());
     let body = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
     let content = format!(

@@ -35,14 +35,14 @@ pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
         pin_to_slowest_core();
         let mut last_battery: Option<BatteryKey>;
 
-        // Process initial value — apply EC settings without re-writing the
-        // config file (it was just loaded from disk at startup, so the first
-        // save only happens after the first actual change).
+        // Record the initial battery key without applying — the EC client
+        // may not be ready yet (it is initialized asynchronously in init_task).
+        // Battery settings will be applied on the first config change that
+        // alters the charge limit key.
         {
             let cfg = Arc::clone(&config_rx.borrow());
             let key = battery_key(&cfg);
             last_battery = Some(key);
-            apply_battery_settings(&cfg, &state).await;
         }
 
         // Watch for changes — debounce: wait for the value to stabilise before saving.

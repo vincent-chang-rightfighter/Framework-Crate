@@ -32,6 +32,29 @@ pub fn with_write_lock<T, R>(
     f(&mut lock.write())
 }
 
+/// Execute a closure on the EC client via spawn_blocking. If the EC client
+/// is not available, the task completes silently. Errors from the closure
+/// are logged as warnings.
+pub(crate) fn run_ec_task(
+    ec_client: &Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
+    f: impl FnOnce(Arc<cli::EcClient>) + Send + 'static,
+) -> Task<Message> {
+    let ec_client = Arc::clone(ec_client);
+    Task::perform(
+        async move {
+            let ec_opt = { read_lock(&ec_client) };
+            if let Some(ref ec) = *ec_opt {
+                let ec = ec.clone();
+                if let Err(e) = tokio::task::spawn_blocking(move || f(ec)).await {
+                    warn!("EC task failed: {}", e);
+                }
+            }
+            Message::Tick
+        },
+        |msg| msg,
+    )
+}
+
 /// Self-rescheduling UI tick. Sleeping via tokio::time lets the runtime
 /// park the thread between ticks, so an idle UI wakes ~1x/sec instead of
 /// hammering update()/view() at a fixed 50ms.
@@ -495,14 +518,16 @@ impl App {
                 self.save_config();
             }
             Message::FanDutyChanged(duty) => {
-                let duty = duty.clamp(10, 100);
+                let duty = duty.clamp(0, 100);
                 with_write_lock(&self.state.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     cfg.fan.manual = Some(crate::types::ManualConfig { duty_pct: duty });
                 });
+                self.state.last_applied_duty.store(duty as u64, Ordering::Release);
                 self.save_config();
             }
             Message::FanCurvePointTempChanged(idx, temp) => {
+                let temp = temp.clamp(0, 99);
                 with_write_lock(&self.state.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     if let Some(ref mut curve) = cfg.fan.curve {
@@ -516,6 +541,7 @@ impl App {
                 self.save_config();
             }
             Message::FanCurvePointDutyChanged(idx, duty) => {
+                let duty = duty.clamp(0, 100);
                 with_write_lock(&self.state.config, |guard| {
                     let cfg = Arc::make_mut(guard);
                     if let Some(ref mut curve) = cfg.fan.curve {
@@ -627,37 +653,24 @@ impl App {
                 self.show_settings = !self.show_settings;
             }
             Message::KblightChanged(percent) => {
-                let ec_client = Arc::clone(&self.state.ec_client);
                 let kblight = Arc::clone(&self.state.kblight);
-                return Task::perform(async move {
-                    let ec_opt = { read_lock(&ec_client) };
-                    if let Some(ref ec) = *ec_opt {
-                        let ec_clone = ec.clone();
-                        if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.kblight_set(percent)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
-                            warn!("Failed to set keyboard backlight: {}", e);
-                        }
-                        let ec_clone = ec.clone();
-                        if let Ok(Ok(kb)) = tokio::task::spawn_blocking(move || ec_clone.kblight_get()).await {
-                            with_write_lock(&kblight, |guard| {
-                                *guard = Arc::new(Some(kb));
-                            });
-                        }
+                return run_ec_task(&self.state.ec_client, move |ec| {
+                    if let Err(e) = ec.kblight_set(percent) {
+                        warn!("Failed to set keyboard backlight: {}", e);
                     }
-                    Message::Tick
-                }, |msg| msg);
+                    if let Ok(kb) = ec.kblight_get() {
+                        with_write_lock(&kblight, |guard| {
+                            *guard = Arc::new(Some(kb));
+                        });
+                    }
+                });
             }
             Message::FpLedLevelChanged(level) => {
-                let ec_client = Arc::clone(&self.state.ec_client);
-                return Task::perform(async move {
-                    let ec_opt = { read_lock(&ec_client) };
-                    if let Some(ref ec) = *ec_opt {
-                        let ec_clone = ec.clone();
-                        if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.fp_led_level_set(level)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
-                            warn!("Failed to set fingerprint LED: {}", e);
-                        }
+                return run_ec_task(&self.state.ec_client, move |ec| {
+                    if let Err(e) = ec.fp_led_level_set(level) {
+                        warn!("Failed to set fingerprint LED: {}", e);
                     }
-                    Message::Tick
-                }, |msg| msg);
+                });
             }
             Message::ToggleBatteryDetails => {
                 self.show_battery_details = !self.show_battery_details;
@@ -677,40 +690,30 @@ impl App {
             Message::QuitWithRestore => {
                 self.show_quit_warning = false;
                 self.state.shutdown.store(true, Ordering::Release);
-                let ec_client = Arc::clone(&self.state.ec_client);
-                return Task::perform(
-                    async move {
-                        let ec = { read_lock(&ec_client) };
-                        if let Some(ref ec) = *ec {
-                            let ec_clone = ec.clone();
-                            if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.autofanctrl()).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
-                                warn!("Failed to restore auto fan control on quit: {}", e);
-                            }
+                return Task::batch([
+                    run_ec_task(&self.state.ec_client, |ec| {
+                        if let Err(e) = ec.autofanctrl() {
+                            warn!("Failed to restore auto fan control on quit: {}", e);
                         }
-                    },
-                    |_| Message::QuitShutdown,
-                );
+                    }),
+                    Task::perform(async {}, |_| Message::QuitShutdown),
+                ]);
             }
             Message::QuitDutyChanged(duty) => {
-                self.quit_duty_value = duty.clamp(10, 100);
+                self.quit_duty_value = duty.clamp(0, 100);
             }
             Message::QuitWithDuty => {
                 self.show_quit_warning = false;
                 self.state.shutdown.store(true, Ordering::Release);
                 let duty = self.quit_duty_value;
-                let ec_client = Arc::clone(&self.state.ec_client);
-                return Task::perform(
-                    async move {
-                        let ec = { read_lock(&ec_client) };
-                        if let Some(ref ec) = *ec {
-                            let ec_clone = ec.clone();
-                            if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(duty, None)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
-                                warn!("Failed to set quit fan duty: {}", e);
-                            }
+                return Task::batch([
+                    run_ec_task(&self.state.ec_client, move |ec| {
+                        if let Err(e) = ec.set_fan_duty(duty, None) {
+                            warn!("Failed to set quit fan duty: {}", e);
                         }
-                    },
-                    |_| Message::QuitShutdown,
-                );
+                    }),
+                    Task::perform(async {}, |_| Message::QuitShutdown),
+                ]);
             }
             Message::QuitWithoutRestore => {
                 self.show_quit_warning = false;
@@ -812,17 +815,19 @@ impl App {
             self.config_save_failed = false;
         } else {
             debug!("Config save channel dropped — falling back to sync save");
-            self.config_save_failed = true;
-            self.state.bg_config_save_failed.store(true, Ordering::Relaxed);
+            // Synchronous save ensures durability when the async channel is gone.
+            // On the hot path this is rare (only if config_save_task panicked);
+            // during normal operation the channel-based path is used.
             let cfg_owned: Config = (*cfg).clone();
-            let save_failed = Arc::clone(&self.state.bg_config_save_failed);
-            tokio::task::spawn_blocking(move || {
-                if let Err(e) = crate::config::save(&cfg_owned) {
-                    warn!("Background sync config save also failed: {}", e);
-                } else {
-                    save_failed.store(false, Ordering::Relaxed);
-                }
-            });
+            drop(cfg);
+            if let Err(e) = crate::config::save(&cfg_owned) {
+                warn!("Fallback sync config save failed: {}", e);
+                self.config_save_failed = true;
+                self.state.bg_config_save_failed.store(true, Ordering::Relaxed);
+            } else {
+                self.config_save_failed = false;
+                self.state.bg_config_save_failed.store(false, Ordering::Relaxed);
+            }
         }
     }
 

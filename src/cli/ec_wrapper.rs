@@ -110,6 +110,9 @@ pub fn classify_pd_port<'a>(
     stable_threshold: usize,
     display_card_installed: bool,
 ) -> &'static str {
+    /// Maximum number of history samples used for classification.
+    /// Callers should pass exactly 3 samples (from `PdPortsHistory`); extras
+    /// are silently ignored.
     const MAX_HIST: usize = 3;
     let empty = Vec::new();
     let mut hist_buf: [&Vec<UsbCPort>; MAX_HIST] = [&empty; MAX_HIST];
@@ -120,6 +123,12 @@ pub fn classify_pd_port<'a>(
             hist_len += 1;
         }
     }
+    debug_assert!(
+        hist_len <= MAX_HIST,
+        "classify_pd_port received {} history samples, expected at most {}",
+        hist_len,
+        MAX_HIST
+    );
     let history = &hist_buf[..hist_len];
 
     tracing::debug!(

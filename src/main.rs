@@ -242,7 +242,7 @@ mod tests {
         let (mut app, _) = App::new();
         let _ = app.update(Message::FanDutyChanged(5));
         let cfg = read_lock(&app.state.config);
-        assert_eq!(cfg.fan.manual.as_ref().map(|m| m.duty_pct), Some(10));
+        assert_eq!(cfg.fan.manual.as_ref().map(|m| m.duty_pct), Some(5));
     }
 
     #[tokio::test]
@@ -346,7 +346,7 @@ mod tests {
         let _guard = app_config_lock();
         let (mut app, _) = App::new();
         let _ = app.update(Message::QuitDutyChanged(5));
-        assert_eq!(app.quit_duty_value, 10);
+        assert_eq!(app.quit_duty_value, 5);
         let _ = app.update(Message::QuitDutyChanged(150));
         assert_eq!(app.quit_duty_value, 100);
         let _ = app.update(Message::QuitDutyChanged(50));

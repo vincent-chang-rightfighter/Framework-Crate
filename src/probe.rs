@@ -20,6 +20,14 @@ pub struct HeightProbe<'a, Message> {
     report: Arc<Mutex<Option<f32>>>,
 }
 
+impl<'a, Message> std::fmt::Debug for HeightProbe<'a, Message> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeightProbe")
+            .field("report", &self.report.lock())
+            .finish()
+    }
+}
+
 impl<'a, Message: Clone + 'a> HeightProbe<'a, Message> {
     /// Wraps `content` into an element that records the content height into
     /// `report` on every layout pass.

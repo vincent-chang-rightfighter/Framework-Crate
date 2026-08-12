@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::debug;
+use tracing::{debug, warn};
 
 // Validation constants for config values
 // POLL_MS_MIN reuses the public UI constant to avoid duplication.
@@ -15,8 +15,6 @@ const CURVE_POLL_MS_MAX: u64 = 10000;
 const HYSTERESIS_C_MAX: u32 = 10;
 const RATE_LIMIT_MIN: u32 = 1;
 const RATE_LIMIT_MAX: u32 = 100;
-const CHARGE_LIMIT_MIN: u8 = 25;
-const CHARGE_LIMIT_MAX: u8 = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Config {
@@ -53,7 +51,7 @@ impl Config {
 
         // Battery settings
         if let Some(ref mut limit) = self.battery.charge_limit_max_pct {
-            limit.value = limit.value.clamp(CHARGE_LIMIT_MIN, CHARGE_LIMIT_MAX);
+            limit.value = limit.value.clamp(crate::style::CHARGE_LIMIT_MIN as u8, crate::style::CHARGE_LIMIT_MAX as u8);
         }
     }
 }
@@ -71,9 +69,13 @@ pub enum FanControlMode {
 impl FanControlMode {
     pub fn from_u8(v: u8) -> Self {
         match v {
+            0 => Self::Disabled,
             1 => Self::Manual,
             2 => Self::Curve,
-            _ => Self::Disabled,
+            other => {
+                warn!("Unknown FanControlMode value: {}, defaulting to Disabled", other);
+                Self::Disabled
+            }
         }
     }
     pub fn to_u8(self) -> u8 {

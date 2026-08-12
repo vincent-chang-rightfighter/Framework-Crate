@@ -89,7 +89,10 @@ fn estimate_duty_from_thermal(state: &AppState) -> Option<u32> {
             if max_rpm > 0 {
                 (rpm * 100 / max_rpm).clamp(10, 100)
             } else {
-                50 // Safe default when max RPM is unknown
+                // When max RPM is unknown, use minimum duty to avoid a
+                // sudden fan speed jump on mode switch. The background
+                // loop will ramp to the target duty via rate limiting.
+                10
             }
         })
     } else {
@@ -484,16 +487,9 @@ pub fn spawn(state: AppState) {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 if state.shutdown.load(Ordering::Acquire) { break; }
             } else {
-                // Inner task exited normally (shouldn't happen, but handle gracefully)
-                // Restart instead of permanently stopping background polling.
-                consecutive_failures += 1;
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                    warn!("Background task exited unexpectedly {} times, giving up", consecutive_failures);
-                    break;
-                }
-                warn!("Background polling task exited unexpectedly, restarting in 3s...");
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                if state.shutdown.load(Ordering::Acquire) { break; }
+                // Inner task exited normally — only happens when shutdown is set.
+                // Break immediately to avoid wasting resources during shutdown.
+                break;
             }
         }
     });

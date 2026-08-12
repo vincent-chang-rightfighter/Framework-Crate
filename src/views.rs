@@ -148,6 +148,8 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     // Always reserve the banner slots (same Container widget type) so the
     // content subtree keeps its Tree state (canvas cache, scroll offsets)
     // when a warning appears/disappears mid-session.
+    // Note: cannot extract to named function — Container<'a> is invariant,
+    // so `|| container(space())` inline closures are required for type inference.
     root = root.push(config_warning.unwrap_or_else(|| container(space()).into()));
     root = root.push(cli_warning.unwrap_or_else(|| container(space())));
     let root = root.push(content);
@@ -256,7 +258,7 @@ fn view_quit_warning(app: &App) -> Element<'_, Message> {
 
     content = content.push(iced::widget::row![
         text("Set duty to:").size(FONT_BODY),
-        iced::widget::slider(10..=100, set_duty, Message::QuitDutyChanged),
+        iced::widget::slider(0..=100, set_duty, Message::QuitDutyChanged),
         text(format!("{}%", set_duty)).size(FONT_BODY),
     ].spacing(4).align_y(iced::Alignment::Center));
 
@@ -480,7 +482,7 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
         FanControlMode::Manual => {
             let duty = config.fan.manual.as_ref().map(|m| m.duty_pct).unwrap_or(50);
             content = content.push(
-                iced::widget::slider(10..=100, duty, Message::FanDutyChanged)
+                iced::widget::slider(0..=100, duty, Message::FanDutyChanged)
             );
         }
         FanControlMode::Curve => {
@@ -499,7 +501,6 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                 content = content.push(iced::widget::slider(1..=100, rate, Message::FanCurveRateLimitChanged));
 
                 content = content.push(text("Curve Points (Temp C -> Duty %)").size(FONT_SECTION));
-                // TODO: fan curve 控制點佈局需要調整 — 目前垂直堆疊過長，需重新設計 UI 排列
 
                 for (idx, point) in curve.curve.points.iter().enumerate() {
                     let temp = point[0];

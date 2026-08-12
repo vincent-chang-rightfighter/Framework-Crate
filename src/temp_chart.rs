@@ -5,8 +5,10 @@ use std::sync::Arc;
 
 const TEMP_MAX: f32 = 100.0;
 const TEMP_MIN: f32 = 0.0;
-pub const HISTORY_SECONDS: f32 = 30.0;
-pub const HISTORY_MS: i64 = 30_000;
+/// History window in seconds (used for x-axis labels and float calculations).
+pub const HISTORY_SECONDS: i64 = 30;
+/// History window in milliseconds (used for sample pruning and timestamps).
+pub const HISTORY_MS: i64 = HISTORY_SECONDS * 1_000;
 const Y_LABELS: [&str; 6] = ["0", "20", "40", "60", "80", "100"];
 const X_LABELS: [&str; 4] = ["0s", "10s", "20s", "30s"];
 
@@ -101,6 +103,14 @@ struct TempChartRenderer {
 /// Persistent state living in the widget `Tree` — survives `view()` rebuilds.
 struct TempChartState {
     cache: OnceCell<iced::widget::canvas::Cache<iced::Renderer>>,
+    /// Cache invalidation key: (samples Arc ptr, samples len, sensor_names Arc ptr).
+    ///
+    /// SAFETY: `Arc` never reallocates its backing allocation, so the base
+    /// pointer is stable for the lifetime of the allocation. Two `Arc`s
+    /// wrapping the same data share the same pointer. The key changes only
+    /// when `ViewSnapshot` clones a new `Arc` (i.e. new data arrived), which
+    /// is exactly when the canvas needs re-drawing. This avoids hashing or
+    /// deep-comparing the entire sample deque on every frame.
     cached_key: Cell<(*const (), usize, *const ())>,
     /// Reused line-point buffer, kept in the tree so it is not re-allocated
     /// on every `view()` rebuild.
@@ -234,7 +244,7 @@ fn draw_temp_chart_contents(
 
         // X-axis time labels (0s, 10s, 20s, 30s)
         for (i, sec) in [0, 10, 20, 30].iter().enumerate() {
-            let x = origin.x + (*sec as f32 / HISTORY_SECONDS) * plot_w;
+            let x = origin.x + (*sec as f32 / HISTORY_SECONDS as f32) * plot_w;
             frame.fill_text(iced::widget::canvas::Text {
                 content: X_LABELS[i].to_owned(),
                 position: Point::new(x, origin.y + plot_h + 4.0),
