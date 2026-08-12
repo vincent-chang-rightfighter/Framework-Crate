@@ -1,8 +1,8 @@
 [package]
 name = "framework-crate"
 version = "0.1.0"
-edition = "2021"
-
+edition = "2026"authors = ["Vincent Chang"]
+license = "MIT"
 [dependencies]
 iced = { version = "0.14", default-features = false, features = [
     "wgpu",

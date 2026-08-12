@@ -9,6 +9,16 @@ fn main() {
         println!("cargo:rerun-if-changed=assets/app.ico");
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/app.ico");
+
+        // Windows PE metadata shown in Explorer / file properties.
+        res.set("ProductName", "Framework Crate");
+        res.set("FileDescription", "Framework laptop fan control and telemetry");
+        res.set("CompanyName", "Vincent Chang");
+        res.set("LegalCopyright", "Copyright (c) 2026 Vincent Chang");
+        res.set("ProductVersion", env!("CARGO_PKG_VERSION"));
+        res.set("FileVersion", env!("CARGO_PKG_VERSION"));
+        res.set("OriginalFilename", "framework-crate.exe");
+
         res.compile().expect("Failed to compile Windows resource");
     }
 
