@@ -96,7 +96,6 @@ pub enum Message {
     QuitDutyChanged(u32),
     QuitCanceled,
     CollectDebugInfo,
-    DebugInfoCollected(String),
     ToggleExpansionCardDebug,
 }
 
@@ -142,8 +141,6 @@ pub struct App {
     /// window stays at that height even when the content grows (e.g. battery
     /// details expanded, fan curve mode) — those sections scroll instead.
     pub height_set: bool,
-    /// Debug report collected by "Collect Debug Info" button.
-    pub debug_report: Option<String>,
 }
 
 pub struct SystemInfo {
@@ -279,7 +276,6 @@ impl App {
             window_id: None,
             window_height: None,
             height_set: false,
-            debug_report: None,
         };
 
         let init_task = Task::perform(async move {
@@ -892,10 +888,11 @@ impl App {
                             port.port, port.power_role, port.data_role, port.dp_alt_mode, port.negotiated_watts));
                     }
                 }
-                Task::perform(async move { Message::DebugInfoCollected(report) }, |r| r)
-            }
-            Message::DebugInfoCollected(report) => {
-                self.debug_report = Some(report);
+                let path = std::env::temp_dir().join("framework_crate_debug.txt");
+                let _ = std::fs::write(&path, &report);
+                let _ = std::process::Command::new("notepad.exe")
+                    .arg(&path)
+                    .spawn();
                 Task::none()
             }
             _ => Task::none(),

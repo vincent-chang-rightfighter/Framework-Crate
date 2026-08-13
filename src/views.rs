@@ -283,28 +283,6 @@ fn view_settings(app: &App) -> Element<'_, Message> {
                 .style(btn_style),
         ].spacing(8)
     );
-    if let Some(ref report) = app.debug_report {
-        content = content.push(
-            container(
-                column![
-                    text("Debug Report").size(FONT_SECTION),
-                    scrollable(text(report.as_str()).size(FONT_SMALL)).height(200),
-                    row![
-                        button(text("Copy to Clipboard").size(FONT_SMALL))
-                            .on_press(Message::DebugInfoCollected(report.clone()))
-                            .style(btn_style),
-                    ].spacing(8),
-                ].spacing(4)
-            )
-            .padding(8)
-            .width(Length::Fill)
-            .style(|_theme| iced::widget::container::Style {
-                background: Some(iced::Color::from_rgba(0.1, 0.1, 0.15, 0.8).into()),
-                border: iced::Border::default().rounded(4),
-                ..Default::default()
-            })
-        );
-    }
 
     container(content)
         .center_x(Length::Fill)
