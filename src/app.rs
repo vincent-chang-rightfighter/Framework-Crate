@@ -97,6 +97,7 @@ pub enum Message {
     QuitCanceled,
     CollectDebugInfo,
     DebugInfoCollected(String),
+    ToggleExpansionCardDebug,
 }
 
 pub struct App {
@@ -107,6 +108,7 @@ pub struct App {
     pub show_settings: bool,
     pub init_complete: bool,
     pub config_save_failed: bool,
+    pub expansion_card_debug: bool,
     pub config_load_warning: Option<String>,
     pub show_quit_warning: bool,
     pub closing_window_id: Option<iced::window::Id>,
@@ -249,6 +251,7 @@ impl App {
             show_settings: false,
             init_complete: false,
             config_save_failed: false,
+            expansion_card_debug: false,
             config_load_warning,
             show_quit_warning: false,
             closing_window_id: None,
@@ -835,6 +838,10 @@ impl App {
             }
             Message::ToggleBatteryDetails => {
                 self.show_battery_details = !self.show_battery_details;
+                Task::none()
+            }
+            Message::ToggleExpansionCardDebug => {
+                self.expansion_card_debug = !self.expansion_card_debug;
                 Task::none()
             }
             Message::DismissConfigWarning => {

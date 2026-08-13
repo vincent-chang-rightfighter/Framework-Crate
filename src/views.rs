@@ -27,6 +27,7 @@ pub(crate) struct ViewSnapshot {
     pub fan_count: u64,
     pub unified_duty: bool,
     pub per_fan_duty: Arc<Vec<u32>>,
+    pub expansion_card_debug: bool,
 }
 
 impl ViewSnapshot {
@@ -53,6 +54,7 @@ impl ViewSnapshot {
             fan_count,
             unified_duty,
             per_fan_duty,
+            expansion_card_debug: app.expansion_card_debug,
         }
     }
 }
@@ -265,6 +267,15 @@ fn view_settings(app: &App) -> Element<'_, Message> {
     content = content.push(hw_content);
     content = content.push(sw_content);
     content = content.push(space::vertical().height(12));
+    let ec_debug = app.expansion_card_debug;
+    content = content.push(
+        row![
+            text("Expansion Card Debug Mode:").size(FONT_BODY),
+            button(text(if ec_debug { "ON" } else { "OFF" }).size(FONT_BODY))
+                .on_press(Message::ToggleExpansionCardDebug)
+                .style(btn_style),
+        ].spacing(8).align_y(iced::Alignment::Center)
+    );
     content = content.push(
         row![
             button(text("Collect Debug Info").size(FONT_BODY))
@@ -946,14 +957,16 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     text(format!("  {}", level)).size(FONT_SMALL).style(move |_theme| iced::widget::text::Style { color: Some(color) })
                 );
             }
-            let dp_alt_str = if port.dp_alt_mode { "DP_ALT" } else { "" };
-            let role_str = port.power_role.unwrap_or("?");
-            let data_str = port.data_role.unwrap_or("?");
-            let watts_str = port.negotiated_watts.map(|w| format!("{:.1}W", w)).unwrap_or_else(|| "-".to_string());
-            let debug_line = format!("  [{}] role={} data={} {} watts={}", port.port, role_str, data_str, dp_alt_str, watts_str);
-            content = content.push(
-                text(debug_line).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
-            );
+            if snap.expansion_card_debug {
+                let dp_alt_str = if port.dp_alt_mode { "DP_ALT" } else { "" };
+                let role_str = port.power_role.unwrap_or("?");
+                let data_str = port.data_role.unwrap_or("?");
+                let watts_str = port.negotiated_watts.map(|w| format!("{:.1}W", w)).unwrap_or_else(|| "-".to_string());
+                let debug_line = format!("  [{}] role={} data={} {} watts={}", port.port, role_str, data_str, dp_alt_str, watts_str);
+                content = content.push(
+                    text(debug_line).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+                );
+            }
         }
 
         for card in cards.iter().filter(|c| c.name.contains("Audio")) {
