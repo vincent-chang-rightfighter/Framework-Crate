@@ -248,7 +248,33 @@ pub fn spawn(state: AppState) {
                 let start_ms = crate::util::current_time_ms();
                 let mut last_expansion_scan: u64 = start_ms;
                 let mut last_versions_scan: u64 = start_ms;
+                let mut last_resume_ts: u64 = 0;
                 loop {
+                    let resume_ts = bg_state2.lifecycle.last_resume_ts.load(Ordering::Acquire);
+                    if resume_ts != 0 && resume_ts != last_resume_ts {
+                        last_resume_ts = resume_ts;
+                        curve_stepper.reset();
+                        last_manual_duty = None;
+                        manual_ramp_current = None;
+                        bg_state2.system.cli_available.store(false, Ordering::Release);
+                        with_write_lock(&bg_state2.system.ec_client, |guard| {
+                            *guard = Arc::new(None);
+                        });
+                        bg_state2.fan.fan_max_rpm.store(0, Ordering::Release);
+                        bg_state2.fan.last_fan_rpm_reset.store(resume_ts, Ordering::Release);
+                        bg_state2.fan.last_applied_duty.store(0, Ordering::Release);
+                        with_write_lock(&bg_state2.thermal.data, |guard| {
+                            *guard = Arc::new(None);
+                        });
+                        with_write_lock(&bg_state2.thermal.history, |hist| {
+                            let hist = Arc::make_mut(hist);
+                            *hist = temp_chart::ThermalHistory::new();
+                        });
+                        with_write_lock(&bg_state2.thermal.sensor_cache, |guard| {
+                            *guard = Arc::new(crate::app::SensorCache::default());
+                        });
+                        tracing::warn!("[RESUME] EC client, fan state, and thermal history reset after system resume");
+                    }
                     // Read fan mode from atomic (no config lock needed)
                     let fan_mode = crate::types::FanControlMode::from_u8(
                         bg_state2.fan.mode.load(Ordering::Acquire) as u8

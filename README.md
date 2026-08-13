@@ -142,7 +142,7 @@ selected_sensors = []
 
 ## Known Limitations
 
-- **Sleep / hibernate**: The fan-speed control logic can stop responding correctly after the system resumes from sleep or hibernation. This is a known issue and should be treated as a platform limitation until it is fixed.
+- **Sleep / hibernate**: Previously, the fan-speed control could stop responding correctly after the system resumed from sleep or hibernation. This has been addressed by detecting `WM_POWERBROADCAST` resume events, which reset the EC client, `CurveStepper` state, and thermal history so fan control recovers automatically on wake.
 - **Platform-specific**: This project has only been tested on Intel Core Ultra Series 1 (Meteor Lake) Framework laptops; broader support is not yet guaranteed.
 - **EC driver**: The Framework EC kernel driver must be installed for `framework_lib` to communicate with the hardware.
 

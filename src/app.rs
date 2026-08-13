@@ -217,6 +217,7 @@ impl App {
                 last_interaction_ts: Arc::new(AtomicU64::new(crate::util::current_time_ms())),
                 bg_config_save_failed: Arc::new(AtomicBool::new(false)),
                 view_dirty: Arc::new(AtomicBool::new(true)),
+                last_resume_ts: Arc::new(AtomicU64::new(0)),
             },
         };
 
@@ -677,6 +678,12 @@ impl App {
                     }
                     crate::tray::TrayEvent::MenuQuit => {
                         Some(Task::perform(async {}, |_| Message::TrayQuit))
+                    }
+                    crate::tray::TrayEvent::PowerResumed => {
+                        let now = crate::util::current_time_ms();
+                        self.state.lifecycle.last_resume_ts.store(now, Ordering::Release);
+                        tracing::warn!("[RESUME] System resumed from sleep/hibernate at {}", now);
+                        Some(Task::none())
                     }
                 }
             }

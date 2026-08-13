@@ -3,6 +3,7 @@ pub enum TrayEvent {
     Show,
     MenuShow,
     MenuQuit,
+    PowerResumed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

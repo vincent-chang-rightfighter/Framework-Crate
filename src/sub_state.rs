@@ -180,6 +180,11 @@ pub struct LifecycleState {
     pub bg_config_save_failed: Arc<AtomicBool>,
     /// View needs rebuild flag.
     pub view_dirty: Arc<AtomicBool>,
+    /// Last system resume timestamp (ms since epoch). Set by the tray
+    /// message pump when `WM_POWERBROADCAST` indicates a resume from
+    /// sleep/hibernate. The background task watches this and resets the
+    /// EC client and fan state when it changes.
+    pub last_resume_ts: Arc<AtomicU64>,
 }
 
 impl Default for LifecycleState {
@@ -192,6 +197,7 @@ impl Default for LifecycleState {
             last_interaction_ts: Arc::new(AtomicU64::new(0)),
             bg_config_save_failed: Arc::new(AtomicBool::new(false)),
             view_dirty: Arc::new(AtomicBool::new(true)),
+            last_resume_ts: Arc::new(AtomicU64::new(0)),
         }
     }
 }

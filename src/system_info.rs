@@ -18,6 +18,9 @@ const SM_CYSCREEN: i32 = 1;
 
 // Tray icon constants
 const WM_NULL: u32 = 0x00;
+pub const WM_POWERBROADCAST: u32 = 0x0218;
+pub const PBT_APMRESUMEAUTOMATIC: u32 = 0x0012;
+pub const PBT_APMRESUMESUSPEND: u32 = 0x0007;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
 const TPM_RETURNCMD: u32 = 0x0100;
 use crate::tray::event::{ID_SHOW, ID_QUIT};

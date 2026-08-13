@@ -5,6 +5,8 @@ use std::thread::JoinHandle;
 use crate::system_info;
 use super::event::{TrayCommand, TrayEvent, ID_SHOW, ID_QUIT};
 
+use crate::system_info::{WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND};
+
 const WM_APP: u32 = 0x8000;
 const WM_TRAYICON: u32 = WM_APP + 1;
 const WM_COMMAND_READY: u32 = WM_APP + 2;
@@ -109,6 +111,18 @@ unsafe extern "system" fn tray_wnd_proc(
             });
         }
         return 0;
+    }
+    if msg == WM_POWERBROADCAST {
+        let wparam_u32 = wparam as u32;
+        if wparam_u32 == PBT_APMRESUMEAUTOMATIC || wparam_u32 == PBT_APMRESUMESUSPEND {
+            tracing::info!("[POWER] System resumed from sleep/hibernate (wParam={:#x})", wparam_u32);
+            EVENT_TX.with(|tx| {
+                if let Some(sender) = tx.borrow().as_ref() {
+                    let _ = sender.send(TrayEvent::PowerResumed);
+                }
+            });
+            return 0;
+        }
     }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
