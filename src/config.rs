@@ -159,10 +159,10 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path) -> Result<(), S
         match std::fs::rename(tmp, dest) {
             Ok(()) => Ok(()),
             Err(e) => {
-                if bak.exists() {
-                    if let Err(restore_err) = std::fs::rename(&bak, dest) {
-                        tracing::warn!("Failed to restore config backup {:?} → {:?}: {}", bak, dest, restore_err);
-                    }
+                if bak.exists()
+                    && let Err(restore_err) = std::fs::rename(&bak, dest)
+                {
+                    tracing::warn!("Failed to restore config backup {:?} → {:?}: {}", bak, dest, restore_err);
                 }
                 Err(format!("rename failed: {}", e))
             }

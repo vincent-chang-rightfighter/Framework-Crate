@@ -714,10 +714,10 @@ fn view_battery_verbose(battery: &crate::cli::ec_wrapper::BatteryData, show_deta
         ]
     );
 
-    if show_details {
-        if let Some(details) = battery_detail_rows(battery) {
-            content = content.push(details);
-        }
+    if show_details
+        && let Some(details) = battery_detail_rows(battery)
+    {
+        content = content.push(details);
     }
 
     Some(content.into())
@@ -938,13 +938,13 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 }
             }
             content = content.push(row_content);
-            if port.pd_contract && !is_display_card {
-                if let Some(ref level) = port.negotiated_text {
-                    let color = if port.power_role == Some("Source") { COLOR_GRAY } else { COLOR_GREEN };
-                    content = content.push(
-                        text(format!("  {}", level)).size(FONT_SMALL).style(move |_theme| iced::widget::text::Style { color: Some(color) })
-                    );
-                }
+            if port.pd_contract && !is_display_card
+                && let Some(ref level) = port.negotiated_text
+            {
+                let color = if port.power_role == Some("Source") { COLOR_GRAY } else { COLOR_GREEN };
+                content = content.push(
+                    text(format!("  {}", level)).size(FONT_SMALL).style(move |_theme| iced::widget::text::Style { color: Some(color) })
+                );
             }
             let dp_alt_str = if port.dp_alt_mode { "DP_ALT" } else { "" };
             let role_str = port.power_role.unwrap_or("?");

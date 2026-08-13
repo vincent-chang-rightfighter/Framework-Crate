@@ -389,13 +389,13 @@ impl App {
             self.tick_interval_ms
         };
 
-        if !self.tray_initialized {
-            if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
-                self.tray.init(hwnd);
-                self.tray_initialized = true;
-                tracing::info!("Tray initialized with HWND: {}", hwnd);
-                self.tray.show_icon_async();
-            }
+        if !self.tray_initialized
+            && let Some(hwnd) = system_info::find_window_by_title("Framework Crate")
+        {
+            self.tray.init(hwnd);
+            self.tray_initialized = true;
+            tracing::info!("Tray initialized with HWND: {}", hwnd);
+            self.tray.show_icon_async();
         }
 
         if self.tray_initialized {
@@ -509,10 +509,10 @@ impl App {
             Message::FanCurvePointTempChanged(idx, temp) => {
                 let temp = temp.clamp(0, 99);
                 self.mutate_config(|cfg| {
-                    if let Some(ref mut curve) = cfg.fan.curve {
-                        if idx < curve.curve.points.len() {
-                            curve.curve.points[idx][0] = temp;
-                        }
+                    if let Some(ref mut curve) = cfg.fan.curve
+                        && idx < curve.curve.points.len()
+                    {
+                        curve.curve.points[idx][0] = temp;
                     }
                 });
                 self.pending_curve_update = true;
@@ -523,10 +523,10 @@ impl App {
             Message::FanCurvePointDutyChanged(idx, duty) => {
                 let duty = duty.clamp(0, 100);
                 self.mutate_config(|cfg| {
-                    if let Some(ref mut curve) = cfg.fan.curve {
-                        if idx < curve.curve.points.len() {
-                            curve.curve.points[idx][1] = duty;
-                        }
+                    if let Some(ref mut curve) = cfg.fan.curve
+                        && idx < curve.curve.points.len()
+                    {
+                        curve.curve.points[idx][1] = duty;
                     }
                 });
                 self.pending_curve_update = true;

@@ -552,13 +552,13 @@ impl EcClient {
         let mut cards = Vec::new();
         if let Ok(Some(board_id)) = self.ec.read_board_id_hc(
             framework_lib::chromium_ec::commands::BoardIdType::Mainboard,
-        ) {
-            if board_id != 0 {
-                cards.push(ExpansionCard {
-                    name: format!("Board ID: {:#06x}", board_id),
-                    active_firmware: None,
-                });
-            }
+        )
+            && board_id != 0
+        {
+            cards.push(ExpansionCard {
+                name: format!("Board ID: {:#06x}", board_id),
+                active_firmware: None,
+            });
         }
         cards
     }

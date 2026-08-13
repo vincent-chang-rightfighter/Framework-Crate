@@ -86,12 +86,12 @@ impl TrayManager {
 
     /// Check if the async icon creation has completed, updating `icon_loaded`.
     pub fn check_icon_ready(&mut self) -> bool {
-        if let Some(rx) = &self.icon_ready_rx {
-            if let Ok(ready) = rx.try_recv() {
-                self.icon_loaded = ready;
-                tracing::info!("IconReady from channel: {}", ready);
-                return ready;
-            }
+        if let Some(rx) = &self.icon_ready_rx
+            && let Ok(ready) = rx.try_recv()
+        {
+            self.icon_loaded = ready;
+            tracing::info!("IconReady from channel: {}", ready);
+            return ready;
         }
         self.icon_loaded
     }

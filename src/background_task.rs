@@ -28,15 +28,15 @@ fn reset_ec_on_panic(state: &AppState) {
 }
 
 pub fn pin_to_slowest_core() {
-    if let Some(cores) = core_affinity::get_core_ids() {
-        if let Some(&slowest) = cores.last() {
-            if core_affinity::set_for_current(slowest) {
-                tracing::debug!("[AFFINITY] Pinned to LP-E core (id={})", slowest.id);
-                #[cfg(debug_assertions)]
-                verify_affinity(slowest.id);
-            } else {
-                tracing::debug!("[AFFINITY] Failed to pin to core {}", slowest.id);
-            }
+    if let Some(cores) = core_affinity::get_core_ids()
+        && let Some(&slowest) = cores.last()
+    {
+        if core_affinity::set_for_current(slowest) {
+            tracing::debug!("[AFFINITY] Pinned to LP-E core (id={})", slowest.id);
+            #[cfg(debug_assertions)]
+            verify_affinity(slowest.id);
+        } else {
+            tracing::debug!("[AFFINITY] Failed to pin to core {}", slowest.id);
         }
     }
 }
@@ -92,8 +92,8 @@ fn estimate_duty_from_thermal(state: &AppState) -> Option<u32> {
     if let Some(ref t) = *thermal_snap {
         t.fans.iter().map(|f| f.rpm).max().map(|rpm| {
             let max_rpm = state.fan.fan_max_rpm.load(Ordering::Acquire) as u32;
-            if max_rpm > 0 {
-                (rpm * 100 / max_rpm).clamp(10, 100)
+            if let Some(pct) = (rpm * 100).checked_div(max_rpm) {
+                pct.clamp(10, 100)
             } else {
                 // When max RPM is unknown, use minimum duty to avoid a
                 // sudden fan speed jump on mode switch. The background
@@ -331,10 +331,10 @@ pub fn spawn(state: AppState) {
                     };
 
                     let ec_clone = Arc::clone(&ec);
-                    if let Ok(Ok(t)) = tokio::task::spawn_blocking(move || ec_clone.thermal()).await {
-                        if record_thermal_sample(&bg_state2, t) {
-                            mark_view_dirty(&bg_state2);
-                        }
+                    if let Ok(Ok(t)) = tokio::task::spawn_blocking(move || ec_clone.thermal()).await
+                        && record_thermal_sample(&bg_state2, t)
+                    {
+                        mark_view_dirty(&bg_state2);
                     }
                     // While the user is idle, skip the per-cycle UI-only reads (battery) to
                     // save subprocess spawns; thermal still feeds the fan curve.
@@ -500,9 +500,9 @@ pub fn spawn(state: AppState) {
                         }
                         crate::types::FanControlMode::Curve => {
                             let thermal_clone = read_lock(&bg_state2.thermal.data);
-                            if let Some(ref thermal) = *thermal_clone {
-                            if let (Some(hyst), Some(rate)) =
-                                (curve_hysteresis, curve_rate_limit)
+                            if let Some(ref thermal) = *thermal_clone
+                                && let (Some(hyst), Some(rate)) =
+                                    (curve_hysteresis, curve_rate_limit)
                             {
                                     let max_temp = thermal.temps.values().copied().max().unwrap_or(0);
                                     let full_pts_arc = read_lock(&bg_state2.fan.curve_full_points);
@@ -550,7 +550,6 @@ pub fn spawn(state: AppState) {
                                         }
                                         curve_stepper.note_applied(next);
                                     }
-                                }
                             }
                         }
                     }
