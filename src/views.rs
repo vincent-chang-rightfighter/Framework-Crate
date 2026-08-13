@@ -866,11 +866,12 @@ fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
     content = content.push(ports_section(snap));
 
     let right_pad = iced::Padding::ZERO.right(14.0);
+    let max_h = if snap.expansion_card_debug { 500.0 } else { MISC_SECTION_MAX_HEIGHT };
     container(
         scrollable(container(content).padding(right_pad)).height(Length::Shrink)
     )
     .width(Length::Fill)
-    .max_height(MISC_SECTION_MAX_HEIGHT)
+    .max_height(max_h)
     .into()
 }
 
