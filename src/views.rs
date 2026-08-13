@@ -273,7 +273,7 @@ fn view_settings(app: &App) -> Element<'_, Message> {
             text("Expansion Card Debug Mode:").size(FONT_BODY),
             button(text(if ec_debug { "ON" } else { "OFF" }).size(FONT_BODY))
                 .on_press(Message::ToggleExpansionCardDebug)
-                .style(btn_style),
+                .style(move |_theme, _status| mode_style(ec_debug)),
         ].spacing(8).align_y(iced::Alignment::Center)
     );
     content = content.push(
