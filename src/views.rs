@@ -901,6 +901,12 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
 
     if ports.is_empty() && cards.is_empty() {
         content = content.push(text("None detected").size(FONT_BODY).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
+        if snap.expansion_card_debug {
+            content = content.push(
+                text("[Debug] No ports or expansion cards detected").size(FONT_SMALL)
+                    .style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+            );
+        }
     } else {
         let dp_card = cards.iter().find(|c| c.name.contains("DisplayPort") || c.name.contains("HDMI"));
         for port in ports.iter() {
@@ -956,6 +962,22 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 row_content = row_content.push(text(format!("v{}", fw)).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
             }
             content = content.push(row_content);
+            if snap.expansion_card_debug {
+                let fw_str = card.active_firmware.as_deref().unwrap_or("N/A");
+                content = content.push(
+                    text(format!("  [Debug] name={} fw={}", card.name, fw_str)).size(FONT_SMALL)
+                        .style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+                );
+            }
+        }
+        for card in cards.iter().filter(|c| !c.name.contains("Audio")) {
+            if snap.expansion_card_debug {
+                let fw_str = card.active_firmware.as_deref().unwrap_or("N/A");
+                content = content.push(
+                    text(format!("  [Debug] {} fw={}", card.name, fw_str)).size(FONT_SMALL)
+                        .style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+                );
+            }
         }
     }
 
