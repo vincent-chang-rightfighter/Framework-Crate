@@ -69,6 +69,8 @@ pub enum Message {
     FanCurvePollMsChanged(u64),
     FanCurveHysteresisChanged(u32),
     FanCurveRateLimitChanged(u32),
+    FanUnifiedDutyToggled(bool),
+    FanPerDutyChanged(usize, u32),
     ChargeLimitToggled(bool),
     ChargeLimitChanged(u32),
     ToggleSensorSettings,
@@ -93,6 +95,8 @@ pub enum Message {
     QuitShutdown,
     QuitDutyChanged(u32),
     QuitCanceled,
+    CollectDebugInfo,
+    DebugInfoCollected(String),
 }
 
 pub struct App {
@@ -136,6 +140,8 @@ pub struct App {
     /// window stays at that height even when the content grows (e.g. battery
     /// details expanded, fan curve mode) — those sections scroll instead.
     pub height_set: bool,
+    /// Debug report collected by "Collect Debug Info" button.
+    pub debug_report: Option<String>,
 }
 
 pub struct SystemInfo {
@@ -182,6 +188,7 @@ impl App {
                 cli_available: Arc::new(AtomicBool::new(false)),
                 ec_client: Arc::new(RwLock::new(Arc::new(None))),
                 versions: Arc::new(RwLock::new(Arc::new(None))),
+                platform: Arc::new(RwLock::new(Arc::new(crate::cli::ec_wrapper::detect_platform()))),
             },
             fan: FanState {
                 mode: Arc::new(AtomicU64::new(loaded_config.fan.mode.to_u8() as u64)),
@@ -194,6 +201,9 @@ impl App {
                 curve_full_points: Arc::new(RwLock::new(Arc::new(crate::types::curve_full_points(
                     loaded_config.fan.curve.as_ref().map(|c| c.curve.points.as_slice()).unwrap_or(&[]),
                 )))),
+                fan_count: Arc::new(AtomicU64::new(0)),
+                unified_duty: Arc::new(AtomicBool::new(true)),
+                per_fan_duty: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             },
             thermal: ThermalState {
                 data: Arc::new(RwLock::new(Arc::new(None))),
@@ -266,6 +276,7 @@ impl App {
             window_id: None,
             window_height: None,
             height_set: false,
+            debug_report: None,
         };
 
         let init_task = Task::perform(async move {
@@ -479,6 +490,20 @@ impl App {
                 });
                 self.state.fan.last_applied_duty.store(duty as u64, Ordering::Release);
                 self.save_config();
+                Some(Task::none())
+            }
+            Message::FanUnifiedDutyToggled(unified) => {
+                self.state.fan.unified_duty.store(unified, Ordering::Release);
+                Some(Task::none())
+            }
+            Message::FanPerDutyChanged(fan_idx, duty) => {
+                let duty = duty.clamp(0, 100);
+                with_write_lock(&self.state.fan.per_fan_duty, |guard| {
+                    let duties = Arc::make_mut(guard);
+                    if fan_idx < duties.len() {
+                        duties[fan_idx] = duty;
+                    }
+                });
                 Some(Task::none())
             }
             Message::FanCurvePointTempChanged(idx, temp) => {
@@ -815,6 +840,55 @@ impl App {
             Message::DismissConfigWarning => {
                 self.config_save_failed = false;
                 self.config_load_warning = None;
+                Task::none()
+            }
+            Message::CollectDebugInfo => {
+                let mut report = String::with_capacity(1024);
+                report.push_str("=== Framework Crate Debug Report ===\n\n");
+                let platform = *read_lock(&self.state.system.platform);
+                report.push_str(&format!("Platform: {:?}\n", platform));
+                report.push_str(&format!("Mainboard: {}\n", self.system_info.cpu));
+                report.push_str(&format!("RAM: {}\n", self.system_info.mem));
+                report.push_str(&format!("OS: {}\n", self.system_info.os));
+                report.push_str(&format!("Display: {} {}\n", self.system_info.screen, self.system_info.refresh_rate));
+                if let Some(v) = read_lock(&self.state.system.versions).as_ref() {
+                    report.push_str(&format!("BIOS: {:?}\n", v.uefi_version));
+                    report.push_str(&format!("EC Firmware: {:?}\n", v.ec_build_version));
+                }
+                let config = read_lock(&self.state.lifecycle.config);
+                report.push_str(&format!("\nFan Mode: {:?}\n", config.fan.mode));
+                report.push_str(&format!("Fan Duty: {}\n", self.state.fan.last_applied_duty.load(Ordering::Acquire)));
+                report.push_str(&format!("Fan Count: {}\n", self.state.fan.fan_count.load(Ordering::Acquire)));
+                report.push_str(&format!("Unified Duty: {}\n", self.state.fan.unified_duty.load(Ordering::Acquire)));
+                if let Some(thermal) = read_lock(&self.state.thermal.data).as_ref() {
+                    report.push_str("\n=== Thermal Data ===\n");
+                    for (name, temp) in thermal.temps.iter() {
+                        report.push_str(&format!("  {}: {}°C\n", name, temp));
+                    }
+                    report.push_str("\n=== Fan RPM ===\n");
+                    for fan in &thermal.fans {
+                        report.push_str(&format!("  {}: {} RPM\n", fan.name, fan.rpm));
+                    }
+                }
+                if let Some(battery) = read_lock(&self.state.battery.info).as_ref() {
+                    report.push_str("\n=== Battery ===\n");
+                    report.push_str(&format!("  SOC: {:?}%\n", battery.power_info.soc_pct));
+                    report.push_str(&format!("  AC: {:?}\n", battery.power_info.ac_present));
+                    report.push_str(&format!("  Voltage: {:?}mV\n", battery.power_info.present_voltage_mv));
+                    report.push_str(&format!("  Rate: {:?}mA\n", battery.power_info.present_rate_ma));
+                }
+                let pd_ports = read_lock(&self.state.peripherals.pd_ports);
+                if !pd_ports.is_empty() {
+                    report.push_str("\n=== PD Ports ===\n");
+                    for port in pd_ports.iter() {
+                        report.push_str(&format!("  Port {}: role={:?}, data={:?}, dp_alt={}, watts={:?}\n",
+                            port.port, port.power_role, port.data_role, port.dp_alt_mode, port.negotiated_watts));
+                    }
+                }
+                Task::perform(async move { Message::DebugInfoCollected(report) }, |r| r)
+            }
+            Message::DebugInfoCollected(report) => {
+                self.debug_report = Some(report);
                 Task::none()
             }
             _ => Task::none(),

@@ -5,6 +5,8 @@ pub const COLOR_HEADER: iced::Color = iced::Color { r: 0.9, g: 0.9, b: 0.9, a: 1
 pub const COLOR_SETTINGS_BG: iced::Color = iced::Color { r: 0.15, g: 0.15, b: 0.18, a: 1.0 };
 pub const COLOR_CARD_BG: iced::Color = iced::Color { r: 0.14, g: 0.14, b: 0.17, a: 1.0 };
 pub const COLOR_CARD_BORDER: iced::Color = iced::Color { r: 0.25, g: 0.25, b: 0.28, a: 1.0 };
+pub const COLOR_NOT_SUPPORTED_BG: iced::Color = iced::Color { r: 0.25, g: 0.12, b: 0.12, a: 0.4 };
+pub const COLOR_NOT_SUPPORTED_TEXT: iced::Color = iced::Color { r: 0.7, g: 0.4, b: 0.4, a: 1.0 };
 
 /// Minimum hardware poll interval (ms). framework_tool takes ~50-100ms to run,
 /// so 200ms prevents overlapping subprocess calls while keeping UI responsive.

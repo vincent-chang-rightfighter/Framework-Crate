@@ -9,6 +9,7 @@ use iced::widget::rule;
 use iced::widget::space;
 use iced::{Element, Length};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 #[derive(Clone)]
 pub(crate) struct ViewSnapshot {
@@ -22,6 +23,10 @@ pub(crate) struct ViewSnapshot {
     pub pd_ports: Arc<Vec<cli::ec_wrapper::UsbCPort>>,
     pub pd_ports_history: Arc<crate::sub_state::PdPortsHistory>,
     pub curve_full_points: Arc<Vec<[u32; 2]>>,
+    pub platform: cli::ec_wrapper::PlatformFamily,
+    pub fan_count: u64,
+    pub unified_duty: bool,
+    pub per_fan_duty: Arc<Vec<u32>>,
 }
 
 impl ViewSnapshot {
@@ -29,6 +34,10 @@ impl ViewSnapshot {
         let now_ms = crate::util::current_time_ms_i64();
         let thermal_snap = app.state.thermal.snapshot(now_ms);
         let peripheral_snap = app.state.peripherals.snapshot();
+        let platform = *read_lock(&app.state.system.platform);
+        let fan_count = app.state.fan.fan_count.load(Ordering::Acquire);
+        let unified_duty = app.state.fan.unified_duty.load(Ordering::Acquire);
+        let per_fan_duty = Arc::clone(&read_lock(&app.state.fan.per_fan_duty));
         Self {
             thermal: thermal_snap.data,
             config: Arc::clone(&read_lock(&app.state.lifecycle.config)),
@@ -40,6 +49,10 @@ impl ViewSnapshot {
             pd_ports: peripheral_snap.pd_ports,
             pd_ports_history: peripheral_snap.pd_ports_history,
             curve_full_points: Arc::clone(&read_lock(&app.state.fan.curve_full_points)),
+            platform,
+            fan_count,
+            unified_duty,
+            per_fan_duty,
         }
     }
 }
@@ -58,6 +71,23 @@ fn warning_banner(msg: String) -> Element<'static, Message> {
     .style(|_theme| iced::widget::container::Style {
         background: Some(iced::Color::from_rgba(0.9, 0.6, 0.0, 0.15).into()),
         border: iced::Border::default().rounded(4).width(1).color(iced::Color::from_rgb(0.9, 0.6, 0.0)),
+        ..Default::default()
+    })
+    .into()
+}
+
+fn not_supported_section(title: &str) -> Element<'_, Message> {
+    container(
+        column![
+            text(title).size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_NOT_SUPPORTED_TEXT) }),
+            text("Not Supported").size(FONT_BODY).style(|_theme| iced::widget::text::Style { color: Some(COLOR_NOT_SUPPORTED_TEXT) }),
+        ].spacing(4)
+    )
+    .padding(iced::Padding::from([8, 12]))
+    .width(Length::Fill)
+    .style(|_theme| iced::widget::container::Style {
+        background: Some(COLOR_NOT_SUPPORTED_BG.into()),
+        border: iced::Border::default().rounded(4),
         ..Default::default()
     })
     .into()
@@ -234,6 +264,36 @@ fn view_settings(app: &App) -> Element<'_, Message> {
     content = content.push(title_row);
     content = content.push(hw_content);
     content = content.push(sw_content);
+    content = content.push(space::vertical().height(12));
+    content = content.push(
+        row![
+            button(text("Collect Debug Info").size(FONT_BODY))
+                .on_press(Message::CollectDebugInfo)
+                .style(btn_style),
+        ].spacing(8)
+    );
+    if let Some(ref report) = app.debug_report {
+        content = content.push(
+            container(
+                column![
+                    text("Debug Report").size(FONT_SECTION),
+                    scrollable(text(report.as_str()).size(FONT_SMALL)).height(200),
+                    row![
+                        button(text("Copy to Clipboard").size(FONT_SMALL))
+                            .on_press(Message::DebugInfoCollected(report.clone()))
+                            .style(btn_style),
+                    ].spacing(8),
+                ].spacing(4)
+            )
+            .padding(8)
+            .width(Length::Fill)
+            .style(|_theme| iced::widget::container::Style {
+                background: Some(iced::Color::from_rgba(0.1, 0.1, 0.15, 0.8).into()),
+                border: iced::Border::default().rounded(4),
+                ..Default::default()
+            })
+        );
+    }
 
     container(content)
         .center_x(Length::Fill)
@@ -481,9 +541,36 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
         }
         FanControlMode::Manual => {
             let duty = config.fan.manual.as_ref().map(|m| m.duty_pct).unwrap_or(50);
-            content = content.push(
-                iced::widget::slider(0..=100, duty, Message::FanDutyChanged)
-            );
+            if snap.fan_count > 1 {
+                let unified = snap.unified_duty;
+                content = content.push(
+                    row![
+                        text("Unified Duty:").size(FONT_BODY),
+                        button(text(if unified { "ON" } else { "OFF" }).size(FONT_BODY))
+                            .on_press(Message::FanUnifiedDutyToggled(!unified))
+                            .style(btn_style),
+                    ].spacing(8).align_y(iced::Alignment::Center)
+                );
+                if unified {
+                    content = content.push(
+                        iced::widget::slider(0..=100, duty, Message::FanDutyChanged)
+                    );
+                } else {
+                    for (idx, &per_duty) in snap.per_fan_duty.iter().enumerate() {
+                        content = content.push(
+                            row![
+                                text(format!("Fan {}:", idx + 1)).size(FONT_BODY),
+                                iced::widget::slider(0..=100, per_duty, move |d| Message::FanPerDutyChanged(idx, d)),
+                                text(format!("{}%", per_duty)).size(FONT_BODY),
+                            ].spacing(8).align_y(iced::Alignment::Center)
+                        );
+                    }
+                }
+            } else {
+                content = content.push(
+                    iced::widget::slider(0..=100, duty, Message::FanDutyChanged)
+                );
+            }
         }
         FanControlMode::Curve => {
             if let Some(ref curve) = config.fan.curve {
@@ -645,6 +732,9 @@ const BATTERY_SECTION_MAX_HEIGHT: f32 = 300.0;
 const MISC_SECTION_MAX_HEIGHT: f32 = 300.0;
 
 fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message> {
+    if !snap.platform.has_battery() {
+        return not_supported_section("Battery & Power");
+    }
     let battery = &snap.battery;
     let config = &snap.config;
     if let Some(battery) = battery.as_ref().as_ref() {
@@ -762,17 +852,25 @@ fn battery_detail_rows(battery_info: &crate::cli::ec_wrapper::BatteryData) -> Op
 fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
     let mut content = column![text("Misc").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) })].spacing(6);
 
-    content = content.push(kblight_section(snap));
+    if snap.platform.has_keyboard_backlight() {
+        content = content.push(kblight_section(snap));
+    } else {
+        content = content.push(not_supported_section("Keyboard Backlight"));
+    }
 
     content = content.push(space::vertical().height(8));
 
-    content = content.push(text("Fingerprint LED").size(FONT_SECTION));
-    let button_row = row![
-        button(text("Low").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("low")).style(btn_style),
-        button(text("Medium").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("medium")).style(btn_style),
-        button(text("High").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("high")).style(btn_style),
-    ].spacing(6);
-    content = content.push(button_row);
+    if snap.platform.has_fingerprint_led() {
+        content = content.push(text("Fingerprint LED").size(FONT_SECTION));
+        let button_row = row![
+            button(text("Low").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("low")).style(btn_style),
+            button(text("Medium").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("medium")).style(btn_style),
+            button(text("High").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("high")).style(btn_style),
+        ].spacing(6);
+        content = content.push(button_row);
+    } else {
+        content = content.push(not_supported_section("Fingerprint LED"));
+    }
 
     content = content.push(space::vertical().height(8));
 
@@ -848,6 +946,14 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     );
                 }
             }
+            let dp_alt_str = if port.dp_alt_mode { "DP_ALT" } else { "" };
+            let role_str = port.power_role.unwrap_or("?");
+            let data_str = port.data_role.unwrap_or("?");
+            let watts_str = port.negotiated_watts.map(|w| format!("{:.1}W", w)).unwrap_or_else(|| "-".to_string());
+            let debug_line = format!("  [{}] role={} data={} {} watts={}", port.port, role_str, data_str, dp_alt_str, watts_str);
+            content = content.push(
+                text(debug_line).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+            );
         }
 
         for card in cards.iter().filter(|c| c.name.contains("Audio")) {

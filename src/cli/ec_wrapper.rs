@@ -52,6 +52,38 @@ pub struct VersionsData {
     pub tool_version: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatformFamily {
+    Laptop12,
+    Laptop13,
+    Laptop16,
+    Desktop,
+    Unknown,
+}
+
+impl PlatformFamily {
+    pub fn has_battery(self) -> bool { matches!(self, PlatformFamily::Laptop12 | PlatformFamily::Laptop13 | PlatformFamily::Laptop16) }
+    pub fn has_fingerprint_led(self) -> bool { matches!(self, PlatformFamily::Laptop12 | PlatformFamily::Laptop13 | PlatformFamily::Laptop16) }
+    pub fn has_keyboard_backlight(self) -> bool { matches!(self, PlatformFamily::Laptop12 | PlatformFamily::Laptop13 | PlatformFamily::Laptop16) }
+}
+
+pub fn detect_platform() -> PlatformFamily {
+    match smbios::get_platform() {
+        Some(Platform::Framework12IntelGen13) => PlatformFamily::Laptop12,
+        Some(Platform::IntelCoreUltra1)
+        | Some(Platform::IntelCoreUltra3)
+        | Some(Platform::IntelGen11)
+        | Some(Platform::IntelGen12)
+        | Some(Platform::IntelGen13)
+        | Some(Platform::Framework13Amd7080)
+        | Some(Platform::Framework13AmdAi300) => PlatformFamily::Laptop13,
+        Some(Platform::Framework16Amd7080)
+        | Some(Platform::Framework16AmdAi300) => PlatformFamily::Laptop16,
+        Some(Platform::FrameworkDesktopAmdAiMax300) => PlatformFamily::Desktop,
+        _ => PlatformFamily::Unknown,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpansionCard {
     pub name: String,
@@ -145,13 +177,17 @@ pub fn classify_pd_port<'a>(
         return "DP/HDMI Expansion Card";
     }
     if port.pd_contract && role_is(port, "Source") {
-        let result = match port.negotiated_watts {
-            Some(w) if w <= DISPLAY_CARD_WATTS_THRESHOLD => "DisplayPort Expansion Card",
-            Some(_) => "HDMI Expansion Card",
-            None => "DP/HDMI Expansion Card",
-        };
-        tracing::debug!("[classify] Port {} → {} (Source+PD, watts={:?})", port.port, result, port.negotiated_watts);
-        return result;
+        if port.dp_alt_mode {
+            let result = match port.negotiated_watts {
+                Some(w) if w <= DISPLAY_CARD_WATTS_THRESHOLD => "DisplayPort Expansion Card",
+                Some(_) => "HDMI Expansion Card",
+                None => "DP/HDMI Expansion Card",
+            };
+            tracing::debug!("[classify] Port {} → {} (Source+PD+dp_alt, watts={:?})", port.port, result, port.negotiated_watts);
+            return result;
+        }
+        tracing::debug!("[classify] Port {} → USB-C Expansion Card (Source+PD, no dp_alt, watts={:?})", port.port, port.negotiated_watts);
+        return "USB-C Expansion Card";
     }
     if is_source_no_pd(port) {
         let has_seen_sink = history_has_role(history, port.port, "Sink", false)
@@ -495,8 +531,8 @@ impl EcClient {
             };
 
             tracing::debug!(
-                "[pd_ports] Port {}: c_state={}, pd_state={}, role={}, data={}, v={}mV i={}mA dp_alt=0x{:02X}",
-                i, c_state, pd_state, power_role, data_role, voltage, current, dp_alt_raw
+                "[pd_ports] Port {}: c_state={}, pd_state={}, role={}, data_role={}, v={}mV i={}mA dp_alt=0x{:02X} watts={:?}",
+                i, c_state, pd_state, power_role, data_role, voltage, current, dp_alt_raw, negotiated_watts
             );
 
             ports.push(UsbCPort {

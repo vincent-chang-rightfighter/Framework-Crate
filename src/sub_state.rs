@@ -27,6 +27,12 @@ pub struct FanState {
     pub last_fan_rpm_reset: Arc<AtomicU64>,
     /// Full fan curve points (with zero/100 endpoints added).
     pub curve_full_points: Arc<RwLock<Arc<Vec<[u32; 2]>>>>,
+    /// Number of fans detected (0 = unknown).
+    pub fan_count: Arc<AtomicU64>,
+    /// Whether to apply unified duty to all fans (true) or per-fan (false).
+    pub unified_duty: Arc<AtomicBool>,
+    /// Per-fan duty values (index = fan number).
+    pub per_fan_duty: Arc<RwLock<Arc<Vec<u32>>>>,
 }
 
 impl Default for FanState {
@@ -38,6 +44,9 @@ impl Default for FanState {
             fan_max_rpm: Arc::new(AtomicU64::new(0)),
             last_fan_rpm_reset: Arc::new(AtomicU64::new(0)),
             curve_full_points: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            fan_count: Arc::new(AtomicU64::new(0)),
+            unified_duty: Arc::new(AtomicBool::new(true)),
+            per_fan_duty: Arc::new(RwLock::new(Arc::new(Vec::new()))),
         }
     }
 }
@@ -151,6 +160,8 @@ pub struct SystemState {
     pub ec_client: Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
     /// Firmware/hardware version data.
     pub versions: Arc<RwLock<Arc<Option<cli::ec_wrapper::VersionsData>>>>,
+    /// Detected platform family (for feature gating).
+    pub platform: Arc<RwLock<Arc<cli::ec_wrapper::PlatformFamily>>>,
 }
 
 impl Default for SystemState {
@@ -159,6 +170,7 @@ impl Default for SystemState {
             cli_available: Arc::new(AtomicBool::new(false)),
             ec_client: Arc::new(RwLock::new(Arc::new(None))),
             versions: Arc::new(RwLock::new(Arc::new(None))),
+            platform: Arc::new(RwLock::new(Arc::new(cli::ec_wrapper::PlatformFamily::Unknown))),
         }
     }
 }

@@ -111,6 +111,8 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
     // Reset every 60 seconds so the max adapts to the actual current fan capability.
     const FAN_MAX_RPM_RESET_INTERVAL_MS: u64 = 60_000;
     let now_ts = crate::util::current_time_ms();
+    let fan_count = t.fans.len() as u64;
+    state.fan.fan_count.store(fan_count, Ordering::Release);
     if let Some(max_rpm) = t.fans.iter().map(|f| f.rpm).max() {
         let prev = state.fan.fan_max_rpm.load(Ordering::Acquire) as u32;
         let last_reset = state.fan.last_fan_rpm_reset.load(Ordering::Acquire);
@@ -447,25 +449,49 @@ pub fn spawn(state: AppState) {
                                 let current = manual_ramp_current.unwrap_or(target);
                                 let next = crate::fan_control::apply_rate_limit(current, target, 10);
                                 if last_manual_duty != Some(next) {
-                                    let ec_clone = Arc::clone(&ec);
-                                    match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, None)).await {
-                                        Ok(result) => match result {
-                                            Ok(()) => {
-                                                let mode_now = crate::types::FanControlMode::from_u8(
-                                                    bg_state2.fan.mode.load(Ordering::Acquire) as u8
-                                                );
-                                                if mode_now != mode { last_fan_mode = Some(mode); continue; }
-                                                bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
-                                                last_manual_duty = Some(next);
-                                                manual_ramp_current = Some(next);
+                                    let unified = bg_state2.fan.unified_duty.load(Ordering::Acquire);
+                                    if unified {
+                                        let ec_clone = Arc::clone(&ec);
+                                        match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, None)).await {
+                                            Ok(result) => match result {
+                                                Ok(()) => {
+                                                    let mode_now = crate::types::FanControlMode::from_u8(
+                                                        bg_state2.fan.mode.load(Ordering::Acquire) as u8
+                                                    );
+                                                    if mode_now != mode { last_fan_mode = Some(mode); continue; }
+                                                    bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
+                                                    last_manual_duty = Some(next);
+                                                    manual_ramp_current = Some(next);
+                                                }
+                                                Err(e) => warn!("Failed to set manual fan duty: {}", e),
+                                            },
+                                            Err(join_err) => {
+                                                warn!("EC spawn panicked (set_fan_duty): {}", join_err);
+                                                reset_ec_on_panic(&bg_state2);
+                                                continue;
                                             }
-                                            Err(e) => warn!("Failed to set manual fan duty: {}", e),
-                                        },
-                                        Err(join_err) => {
-                                            warn!("EC spawn panicked (set_fan_duty): {}", join_err);
-                                            reset_ec_on_panic(&bg_state2);
-                                            continue;
                                         }
+                                    } else {
+                                        let per_fan = read_lock(&bg_state2.fan.per_fan_duty);
+                                        for (idx, &duty) in per_fan.iter().enumerate() {
+                                            let ec_clone = Arc::clone(&ec);
+                                            let fan_idx = idx as u32;
+                                            match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(duty, Some(fan_idx))).await {
+                                                Ok(result) => {
+                                                    if let Err(e) = result {
+                                                        warn!("Failed to set fan {} duty: {}", fan_idx, e);
+                                                    }
+                                                }
+                                                Err(join_err) => {
+                                                    warn!("EC spawn panicked (set_fan_duty fan {}): {}", fan_idx, join_err);
+                                                    reset_ec_on_panic(&bg_state2);
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
+                                        last_manual_duty = Some(next);
+                                        manual_ramp_current = Some(next);
                                     }
                                 } else {
                                     manual_ramp_current = Some(next);
@@ -482,23 +508,45 @@ pub fn spawn(state: AppState) {
                                     let full_pts_arc = read_lock(&bg_state2.fan.curve_full_points);
                                     let full_pts: &[[u32; 2]] = &full_pts_arc;
                                     if let Some(next) = curve_stepper.next(max_temp, hyst, rate, curve_rate_limit_down, full_pts) {
-                                        let ec_clone = Arc::clone(&ec);
-                                        match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, None)).await {
-                                            Ok(result) => match result {
-                                                Ok(()) => {
-                                                        let mode_now = crate::types::FanControlMode::from_u8(
-                                                            bg_state2.fan.mode.load(Ordering::Acquire) as u8
+                                        let unified = bg_state2.fan.unified_duty.load(Ordering::Acquire);
+                                        if unified {
+                                            let ec_clone = Arc::clone(&ec);
+                                            match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, None)).await {
+                                                Ok(result) => match result {
+                                                    Ok(()) => {
+                                                            let mode_now = crate::types::FanControlMode::from_u8(
+                                                                bg_state2.fan.mode.load(Ordering::Acquire) as u8
                                                     );
-                                                    if mode_now != mode { last_fan_mode = Some(mode); continue; }
-                                                    bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
+                                                        if mode_now != mode { last_fan_mode = Some(mode); continue; }
+                                                        bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
+                                                    }
+                                                    Err(e) => warn!("Failed to set fan duty (curve): {}", e),
+                                                },
+                                                Err(join_err) => {
+                                                    warn!("EC spawn panicked (set_fan_duty curve): {}", join_err);
+                                                    reset_ec_on_panic(&bg_state2);
+                                                    continue;
                                                 }
-                                                Err(e) => warn!("Failed to set fan duty (curve): {}", e),
-                                            },
-                                            Err(join_err) => {
-                                                warn!("EC spawn panicked (set_fan_duty curve): {}", join_err);
-                                                reset_ec_on_panic(&bg_state2);
-                                                continue;
                                             }
+                                        } else {
+                                            let per_fan = read_lock(&bg_state2.fan.per_fan_duty);
+                                            for (idx, &duty) in per_fan.iter().enumerate() {
+                                                let ec_clone = Arc::clone(&ec);
+                                                let fan_idx = idx as u32;
+                                                match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(duty, Some(fan_idx))).await {
+                                                    Ok(result) => {
+                                                        if let Err(e) = result {
+                                                            warn!("Failed to set fan {} duty (curve): {}", fan_idx, e);
+                                                        }
+                                                    }
+                                                    Err(join_err) => {
+                                                        warn!("EC spawn panicked (set_fan_duty curve fan {}): {}", fan_idx, join_err);
+                                                        reset_ec_on_panic(&bg_state2);
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                            bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
                                         }
                                         curve_stepper.note_applied(next);
                                     }
