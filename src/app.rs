@@ -888,12 +888,7 @@ impl App {
                             port.port, port.power_role, port.data_role, port.dp_alt_mode, port.negotiated_watts));
                     }
                 }
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let filename = format!("framework_crate_debug_{}.txt", ts);
-                let path = std::env::temp_dir().join(&filename);
+                let path = std::env::temp_dir().join("framework_crate_debug.txt");
                 let _ = std::fs::write(&path, &report);
                 let _ = std::process::Command::new("notepad.exe")
                     .arg(&path)
