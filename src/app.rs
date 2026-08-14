@@ -488,6 +488,7 @@ impl App {
                     cfg.fan.manual = Some(crate::types::ManualConfig { duty_pct: duty });
                 });
                 self.state.fan.last_applied_duty.store(duty as u64, Ordering::Release);
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
             }
@@ -503,6 +504,7 @@ impl App {
                         duties[fan_idx] = duty;
                     }
                 });
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Some(Task::none())
             }
             Message::FanCurvePointTempChanged(idx, temp) => {
@@ -516,6 +518,7 @@ impl App {
                 });
                 self.pending_curve_update = true;
                 self.last_curve_edit_ts = Instant::now();
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
             }
@@ -530,6 +533,7 @@ impl App {
                 });
                 self.pending_curve_update = true;
                 self.last_curve_edit_ts = Instant::now();
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
             }
@@ -541,6 +545,7 @@ impl App {
                         curve.poll_ms = clamped;
                     }
                 });
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
             }
@@ -550,6 +555,7 @@ impl App {
                         curve.curve.hysteresis_c = h;
                     }
                 });
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
             }
@@ -559,6 +565,7 @@ impl App {
                         curve.curve.rate_limit_pct_per_step = r;
                     }
                 });
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
             }
@@ -578,6 +585,7 @@ impl App {
                     let limit = cfg.battery.charge_limit_max_pct.get_or_insert(crate::types::SettingU8 { enabled: false, value: CHARGE_LIMIT_MIN as u8 });
                     limit.value = value.min(CHARGE_LIMIT_MAX) as u8;
                 });
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
             }
@@ -814,7 +822,7 @@ impl App {
             }
             Message::KblightChanged(percent) => {
                 let kblight = Arc::clone(&self.state.peripherals.kblight);
-                run_ec_task(&self.state.system.ec_client, move |ec| {
+                let task = run_ec_task(&self.state.system.ec_client, move |ec| {
                     if let Err(e) = ec.kblight_set(percent) {
                         warn!("Failed to set keyboard backlight: {}", e);
                     }
@@ -823,7 +831,9 @@ impl App {
                             *guard = Arc::new(Some(kb));
                         });
                     }
-                })
+                });
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                task
             }
             Message::FpLedLevelChanged(level) => {
                 run_ec_task(&self.state.system.ec_client, move |ec| {

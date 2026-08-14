@@ -19,6 +19,31 @@ fn main() {
         res.set("FileVersion", env!("CARGO_PKG_VERSION"));
         res.set("OriginalFilename", "framework-crate.exe");
 
+        // Request administrator privileges via UAC manifest (release only).
+        // Debug builds use asInvoker so `cargo test` works without elevation.
+        let exec_level = if env::var("PROFILE").unwrap_or_default() == "release" {
+            "requireAdministrator"
+        } else {
+            "asInvoker"
+        };
+        let manifest = format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="{}" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}}"/>
+    </application>
+  </compatibility>
+</assembly>
+"#, exec_level);
+        res.set_manifest(&manifest);
+
         res.compile().expect("Failed to compile Windows resource");
     }
 
