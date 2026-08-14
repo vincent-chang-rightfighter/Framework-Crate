@@ -474,6 +474,14 @@ pub fn spawn(state: AppState) {
                                     } else {
                                         let per_fan = read_lock(&bg_state2.fan.per_fan_duty);
                                         for (idx, &duty) in per_fan.iter().enumerate() {
+                                            // Re-check mode between fans to avoid setting duties
+                                            // after the user has switched away from Manual mode.
+                                            let mode_check = crate::types::FanControlMode::from_u8(
+                                                bg_state2.fan.mode.load(Ordering::Acquire) as u8
+                                            );
+                                            if mode_check != mode {
+                                                break;
+                                            }
                                             let ec_clone = Arc::clone(&ec);
                                             let fan_idx = idx as u32;
                                             match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(duty, Some(fan_idx))).await {
@@ -531,6 +539,14 @@ pub fn spawn(state: AppState) {
                                         } else {
                                             let per_fan = read_lock(&bg_state2.fan.per_fan_duty);
                                             for (idx, &duty) in per_fan.iter().enumerate() {
+                                                // Re-check mode between fans to avoid setting duties
+                                                // after the user has switched away from Curve mode.
+                                                let mode_check = crate::types::FanControlMode::from_u8(
+                                                    bg_state2.fan.mode.load(Ordering::Acquire) as u8
+                                                );
+                                                if mode_check != mode {
+                                                    break;
+                                                }
                                                 let ec_clone = Arc::clone(&ec);
                                                 let fan_idx = idx as u32;
                                                 match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(duty, Some(fan_idx))).await {

@@ -460,8 +460,8 @@ impl App {
         tick_task(next_ms)
     }
 
-    fn handle_config_message(&mut self, message: Message) -> Option<Task<Message>> {
-        match message {
+    fn handle_config_message(&mut self, message: &Message) -> Option<Task<Message>> {
+        match *message {
             Message::FanModeChanged(mode) => {
                 self.state.fan.mode.store(mode.to_u8() as u64, Ordering::Release);
                 let curve_poll = {
@@ -629,8 +629,8 @@ impl App {
         }
     }
 
-    fn handle_tray_message(&mut self, message: Message) -> Option<Task<Message>> {
-        match message {
+    fn handle_tray_message(&mut self, message: &Message) -> Option<Task<Message>> {
+        match *message {
             Message::CloseRequested(id) => {
                 self.closing_window_id = Some(id);
                 Some(Task::perform(async {}, |_| Message::MinimizeToTray))
@@ -715,8 +715,8 @@ impl App {
         }
     }
 
-    fn handle_quit_message(&mut self, message: Message) -> Option<Task<Message>> {
-        match message {
+    fn handle_quit_message(&mut self, message: &Message) -> Option<Task<Message>> {
+        match *message {
             Message::QuitWithRestore => {
                 self.show_quit_warning = false;
                 self.state.lifecycle.shutdown.store(true, Ordering::Release);
@@ -776,13 +776,13 @@ impl App {
             }
         }
         self.maybe_rebuild_snapshot();
-        if let Some(task) = self.handle_config_message(message.clone()) {
+        if let Some(task) = self.handle_config_message(&message) {
             return task;
         }
-        if let Some(task) = self.handle_tray_message(message.clone()) {
+        if let Some(task) = self.handle_tray_message(&message) {
             return task;
         }
-        if let Some(task) = self.handle_quit_message(message.clone()) {
+        if let Some(task) = self.handle_quit_message(&message) {
             return task;
         }
         match message {
@@ -888,7 +888,11 @@ impl App {
                             port.port, port.power_role, port.data_role, port.dp_alt_mode, port.negotiated_watts));
                     }
                 }
-                let path = std::env::temp_dir().join("framework_crate_debug.txt");
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let path = std::env::temp_dir().join(format!("framework_crate_debug_{}.txt", ts));
                 let _ = std::fs::write(&path, &report);
                 let _ = std::process::Command::new("notepad.exe")
                     .arg(&path)

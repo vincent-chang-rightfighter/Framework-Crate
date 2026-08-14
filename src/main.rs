@@ -29,6 +29,12 @@ fn main() {
     // already owns a native thread; Tokio should not spin up a large worker pool.
     // Respect an explicit override from the environment but default to two workers.
     if std::env::var_os("TOKIO_WORKER_THREADS").is_none() {
+        // SAFETY: This is called at the very start of main(), before any user
+        // threads are created and before Tokio initializes its worker pool.
+        // The only code that has run is core_affinity::get_core_ids() which
+        // may create threads on Windows, but they complete before this line.
+        // No other thread can observe the environment change because Tokio
+        // has not started yet. After this point, set_var is never called again.
         unsafe {
             std::env::set_var("TOKIO_WORKER_THREADS", "2");
         }

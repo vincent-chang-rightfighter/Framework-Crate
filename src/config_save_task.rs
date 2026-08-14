@@ -25,6 +25,10 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) {
     if let Some(ref limit) = cfg.battery.charge_limit_max_pct {
         let pct = if limit.enabled { limit.value } else { 100 };
         let ec_clone = ec.clone();
+        // min_pct=0: Framework EC ignores the minimum charge limit parameter;
+        // it only enforces the max. Using 0 here (not CHARGE_LIMIT_MIN=25)
+        // because the EC's minimum is hardware-enforced at ~25%, and passing
+        // 0 tells the EC "no software minimum" — the hardware minimum still applies.
         if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.charge_limit_set(0, pct)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
             warn!("Failed to set charge limit: {}", e);
         }
