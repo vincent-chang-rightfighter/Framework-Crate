@@ -167,6 +167,7 @@ pub struct AppState {
     pub thermal: ThermalState,
     pub peripherals: PeripheralState,
     pub battery: BatteryState,
+    pub cpu_power: crate::cpu_power::CpuPowerState,
     pub lifecycle: LifecycleState,
 }
 
@@ -218,6 +219,7 @@ impl App {
             battery: BatteryState {
                 info: Arc::new(RwLock::new(Arc::new(None))),
             },
+            cpu_power: crate::cpu_power::CpuPowerState::default(),
             lifecycle: LifecycleState {
                 config: Arc::new(RwLock::new(Arc::new(loaded_config.clone()))),
                 poll_ms: Arc::new(AtomicU64::new(poll_ms)),

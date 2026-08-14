@@ -28,6 +28,7 @@ pub(crate) struct ViewSnapshot {
     pub unified_duty: bool,
     pub per_fan_duty: Arc<Vec<u32>>,
     pub expansion_card_debug: bool,
+    pub cpu_power: Arc<crate::cpu_power::CpuPowerInfo>,
 }
 
 impl ViewSnapshot {
@@ -39,6 +40,7 @@ impl ViewSnapshot {
         let fan_count = app.state.fan.fan_count.load(Ordering::Acquire);
         let unified_duty = app.state.fan.unified_duty.load(Ordering::Acquire);
         let per_fan_duty = Arc::clone(&read_lock(&app.state.fan.per_fan_duty));
+        let cpu_power = app.state.cpu_power.snapshot();
         Self {
             thermal: thermal_snap.data,
             config: Arc::clone(&read_lock(&app.state.lifecycle.config)),
@@ -55,6 +57,7 @@ impl ViewSnapshot {
             unified_duty,
             per_fan_duty,
             expansion_card_debug: app.expansion_card_debug,
+            cpu_power,
         }
     }
 }
@@ -865,6 +868,10 @@ fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
 
     content = content.push(ports_section(snap));
 
+    content = content.push(space::vertical().height(8));
+
+    content = content.push(cpu_power_section(snap));
+
     let right_pad = iced::Padding::ZERO.right(14.0);
     let max_h = if snap.expansion_card_debug { 500.0 } else { MISC_SECTION_MAX_HEIGHT };
     container(
@@ -981,6 +988,45 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             }
         }
     }
+
+    content.into()
+}
+
+fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
+    let info = &snap.cpu_power;
+    let mut content = column![text("CPU Power").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) })].spacing(2);
+
+    if !info.available {
+        let msg = info.error_msg.unwrap_or("PawnIO driver not available");
+        content = content.push(text(msg).size(FONT_BODY).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
+        return content.into();
+    }
+
+    // MSR (static) PL1/PL2
+    content = content.push(text("MSR (Static)").size(FONT_BODY));
+    content = content.push(row![
+        text(format!("  PL1: {:.1}W", info.pl1_msr)).size(FONT_BODY),
+        text(if info.pl1_msr_enabled { " [Enabled]" } else { " [Disabled]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl1_msr_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
+        text(if info.pl1_msr_clamped { " [Clamped]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+    ].spacing(4));
+    content = content.push(row![
+        text(format!("  PL2: {:.1}W", info.pl2_msr)).size(FONT_BODY),
+        text(if info.pl2_msr_enabled { " [Enabled]" } else { " [Disabled]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl2_msr_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
+        text(if info.pl2_msr_clamped { " [Clamped]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+    ].spacing(4));
+
+    // MMIO (dynamic) PL1/PL2
+    content = content.push(text("MMIO (Dynamic)").size(FONT_BODY));
+    content = content.push(row![
+        text(format!("  PL1: {:.1}W", info.pl1_mmio)).size(FONT_BODY),
+        text(if info.pl1_mmio_enabled { " [Enabled]" } else { " [Disabled]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl1_mmio_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
+        text(if info.pl1_mmio_clamped { " [Clamped]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+    ].spacing(4));
+    content = content.push(row![
+        text(format!("  PL2: {:.1}W", info.pl2_mmio)).size(FONT_BODY),
+        text(if info.pl2_mmio_enabled { " [Enabled]" } else { " [Disabled]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl2_mmio_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
+        text(if info.pl2_mmio_clamped { " [Clamped]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+    ].spacing(4));
 
     content.into()
 }

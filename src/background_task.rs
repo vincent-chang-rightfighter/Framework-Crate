@@ -393,6 +393,17 @@ pub fn spawn(state: AppState) {
                         }
                     }
 
+                    // CPU power (PL1/PL2) via PawnIO — poll every 5 seconds.
+                    // This is a slow operation (MSR + MMIO reads) so we keep
+                    // the interval long and only refresh when the UI is active.
+                    const CPU_POWER_POLL_MS: u64 = 5000;
+                    static LAST_CPU_POWER_POLL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    if !is_idle && now_ms.saturating_sub(LAST_CPU_POWER_POLL.load(Ordering::Relaxed)) >= CPU_POWER_POLL_MS {
+                        LAST_CPU_POWER_POLL.store(now_ms, Ordering::Relaxed);
+                        bg_state2.cpu_power.refresh();
+                        mark_view_dirty(&bg_state2);
+                    }
+
                     // Shutdown re-check after scans: a quit initiated during the
                     // async thermal/scan awaits must not be overwritten by fan
                     // control (restore or quit duty) below.

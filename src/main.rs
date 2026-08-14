@@ -3,6 +3,7 @@
 
 mod cli;
 mod config;
+mod cpu_power;
 mod types;
 mod curve_canvas;
 mod temp_chart;
