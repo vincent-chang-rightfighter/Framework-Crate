@@ -21,7 +21,7 @@ use crate::views;
 const AUTO_WIDTH: f32 = 900.0;
 /// Ceiling for the auto-resized window height (logical px), so the window
 /// never outgrows the screen work area (fan curve mode can be very tall).
-const AUTO_MAX_HEIGHT: f32 = 760.0;
+const AUTO_MAX_HEIGHT: f32 = 860.0;
 
 /// Execute a closure on the EC client via spawn_blocking. If the EC client
 /// is not available, the task completes silently. Errors from the closure
