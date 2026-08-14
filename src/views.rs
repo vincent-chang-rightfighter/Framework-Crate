@@ -174,6 +174,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
             ].width(Length::FillPortion(1)).spacing(8),
             column![
                 card(view_fan_control(snap)),
+                card(cpu_power_section(snap)),
                 card(view_misc(snap)),
             ].width(Length::FillPortion(1)).spacing(8),
         ].spacing(12)
@@ -867,10 +868,6 @@ fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
     content = content.push(space::vertical().height(8));
 
     content = content.push(ports_section(snap));
-
-    content = content.push(space::vertical().height(8));
-
-    content = content.push(cpu_power_section(snap));
 
     let right_pad = iced::Padding::ZERO.right(14.0);
     let max_h = if snap.expansion_card_debug { 500.0 } else { MISC_SECTION_MAX_HEIGHT };
