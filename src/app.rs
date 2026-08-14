@@ -137,10 +137,6 @@ pub struct App {
     pub window_id: Option<iced::window::Id>,
     /// Current window height (logical px), tracked via Resized events.
     pub window_height: Option<f32>,
-    /// Whether the window height has been fitted to content. Once set, the
-    /// window stays at that height even when the content grows (e.g. battery
-    /// details expanded, fan curve mode) — those sections scroll instead.
-    pub height_set: bool,
 }
 
 pub struct SystemInfo {
@@ -277,7 +273,6 @@ impl App {
             content_height: Arc::new(Mutex::new(None)),
             window_id: None,
             window_height: None,
-            height_set: false,
         };
 
         let init_task = Task::perform(async move {
@@ -332,7 +327,7 @@ impl App {
     /// settings / quit-warning screens), and only when the difference is
     /// larger than sub-pixel rounding, so it converges and stays quiet.
     fn autosize_task(&self) -> Option<Task<Message>> {
-        if !self.init_complete || self.show_settings || self.show_quit_warning || self.height_set {
+        if !self.init_complete || self.show_settings || self.show_quit_warning {
             return None;
         }
         let id = self.window_id?;
@@ -350,7 +345,6 @@ impl App {
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         let mut task = self.update_inner(message);
         if let Some(resize) = self.autosize_task() {
-            self.height_set = true;
             task = Task::batch([task, resize]);
         }
         task
