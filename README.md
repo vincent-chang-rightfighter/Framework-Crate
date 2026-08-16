@@ -14,7 +14,7 @@ Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-c
 - **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity
 - **Live Telemetry** — Real-time temperature chart (30s sliding window), per-sensor display with colored indicators, and fan RPM in the header
 - **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card, and USB-C / HDMI / DP port classification
-- **CPU Power** — Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download)
+- **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download). AMD and other vendors are not supported.
 - **About Page** — Hardware info (CPU, RAM, display, BIOS) and software settings (poll rate, refresh interval)
 - **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit)
 
@@ -145,7 +145,9 @@ selected_sensors = []
 
 ## Known Limitations
 
-- **Fan curve line rendering**: The fan curve canvas may display abnormal line segments when points are dragged or the window is resized. This is a known issue with the canvas cache invalidation logic and does not affect the actual fan control behavior.
+- **Fan curve coordinates**: Editing curve points with sliders can leave the canvas axes / line segments misaligned until the next full redraw. Fan duty still follows the numeric points, not the glitched drawing.
+- **AMD CPU Power**: CPU Power (PL1/PL2 via PawnIO) is Intel-only. On AMD and other CPUs the card stays visible and shows **Not Supported**; no RAPL / PawnIO access is attempted.
+- **USB expansion card classification**: Port type (USB-C / USB-A / HDMI / DP) is inferred from EC PD state. HDMI/DP cards that omit DP-alt may still be mislabeled, and USB-A vs USB-C can be wrong during enumeration. Enable Expansion Card Debug Mode on the About page to inspect raw role / watts.
 - **Sleep / hibernate**: Previously, the fan-speed control could stop responding correctly after the system resumed from sleep or hibernation. This has been addressed by detecting `WM_POWERBROADCAST` resume events, which reset the EC client, `CurveStepper` state, and thermal history so fan control recovers automatically on wake.
 - **Platform-specific**: This project has only been tested on Intel Core Ultra Series 1 (Meteor Lake) Framework laptops; broader support is not yet guaranteed.
 - **EC driver**: The Framework EC kernel driver must be installed for `framework_lib` to communicate with the hardware.
@@ -159,7 +161,9 @@ selected_sensors = []
 
 ## CPU Power Feature (PawnIO Modules)
 
-The CPU Power section reads and optionally writes PL1/PL2 via official PawnIO Modules. Those blobs are **not** in this repository and are **not** embedded in the EXE.
+The CPU Power section is **Intel-only** (CPUID vendor `GenuineIntel`). On AMD or other CPUs the card shows Not Supported and no PawnIO / MSR access is attempted.
+
+The section reads and optionally writes PL1/PL2 via official PawnIO Modules. Those blobs are **not** in this repository and are **not** embedded in the EXE.
 
 1. Install the PawnIO driver: `winget install namazso.PawnIO` (or use **Install PawnIO** in the app).
 2. Open **CPU Power** and click **Download Modules**.

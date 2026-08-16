@@ -338,6 +338,22 @@ pub fn cpu_name() -> String {
     String::from("Unknown CPU")
 }
 
+/// CPUID leaf 0 vendor string. Intel RAPL / PawnIO modules are Intel-only.
+#[cfg(target_arch = "x86_64")]
+pub fn is_intel_cpu() -> bool {
+    let r = core::arch::x86_64::__cpuid_count(0, 0);
+    let mut vendor = [0u8; 12];
+    vendor[0..4].copy_from_slice(&r.ebx.to_le_bytes());
+    vendor[4..8].copy_from_slice(&r.edx.to_le_bytes());
+    vendor[8..12].copy_from_slice(&r.ecx.to_le_bytes());
+    &vendor == b"GenuineIntel"
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn is_intel_cpu() -> bool {
+    false
+}
+
 pub fn total_memory_gb() -> String {
     let mut mem = MemoryStatusEx {
         dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
@@ -843,6 +859,11 @@ mod tests {
 
             DestroyWindow(hwnd);
         }
+    }
+
+    #[test]
+    fn is_intel_cpu_does_not_panic() {
+        let _ = super::is_intel_cpu();
     }
 }
 

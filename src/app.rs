@@ -219,6 +219,7 @@ impl App {
                 ec_client: Arc::new(RwLock::new(Arc::new(None))),
                 versions: Arc::new(RwLock::new(Arc::new(None))),
                 platform: Arc::new(RwLock::new(Arc::new(crate::cli::ec_wrapper::detect_platform()))),
+                intel_cpu: Arc::new(AtomicBool::new(system_info::is_intel_cpu())),
             },
             fan: FanState {
                 mode: Arc::new(AtomicU64::new(loaded_config.fan.mode.to_u8() as u64)),
@@ -355,7 +356,7 @@ impl App {
                     }
                     // Capture BIOS defaults from the first RAPL read. Do not write
                     // MSR here — the user has not asked to change power limits.
-                    {
+                    if state.system.intel_cpu.load(Ordering::Acquire) {
                         state.cpu_power.refresh();
                         state.cpu_power.init_bios_defaults();
                     }
@@ -439,7 +440,10 @@ impl App {
         self.config_save_failed = self.state.lifecycle.bg_config_save_failed.load(Ordering::Relaxed);
 
         // AC→battery: auto-reset PL1/PL2 to BIOS defaults
-        if self.state.lifecycle.pl_reset_pending.swap(false, Ordering::Acquire) && self.pl_custom_applied {
+        if self.cpu_power_supported()
+            && self.state.lifecycle.pl_reset_pending.swap(false, Ordering::Acquire)
+            && self.pl_custom_applied
+        {
             tracing::info!("AC→battery: resetting PL1/PL2 to BIOS defaults");
             return Task::batch([
                 self.handle_cpu_power_sync_reset(),
@@ -804,6 +808,9 @@ impl App {
                         let now = crate::util::current_time_ms();
                         self.state.lifecycle.last_resume_ts.store(now, Ordering::Release);
                         tracing::warn!("[RESUME] System resumed from sleep/hibernate at {}", now);
+                        if !self.cpu_power_supported() {
+                            return Some(Task::none());
+                        }
                         // Stop sync thread — hardware state is undefined after resume.
                         self.state.cpu_power.stop_sync();
                         self.pl_custom_applied = false;
@@ -1035,6 +1042,9 @@ impl App {
                 Task::none()
             }
             Message::InstallPawnIO => {
+                if !self.cpu_power_supported() {
+                    return Task::none();
+                }
                 Task::perform(
                     async { crate::cpu_power::install_pawnio().map_err(|e| e.to_string()) },
                     Message::PawnIOInstalled,
@@ -1055,6 +1065,9 @@ impl App {
                 Task::none()
             }
             Message::DownloadPawnIOModules => {
+                if !self.cpu_power_supported() {
+                    return Task::none();
+                }
                 Task::perform(
                     async { crate::cpu_power::download_and_extract_modules().map_err(|e| e.to_string()) },
                     Message::PawnIOModulesDownloaded,
@@ -1114,6 +1127,9 @@ impl App {
                 Task::none()
             }
             Message::CpuPowerApply => {
+                if !self.cpu_power_supported() {
+                    return Task::none();
+                }
                 let (pl1, pl2, pl1_time) = match self.validate_cpu_power_inputs() {
                     Ok(v) => v,
                     Err(e) => {
@@ -1181,6 +1197,9 @@ impl App {
                 Task::none()
             }
             Message::CpuPowerSyncStart => {
+                if !self.cpu_power_supported() {
+                    return Task::none();
+                }
                 let (pl1, pl2, pl1_time) = match self.validate_cpu_power_inputs() {
                     Ok(v) => v,
                     Err(e) => {
@@ -1229,6 +1248,9 @@ impl App {
                 Task::none()
             }
             Message::CpuPowerSyncStop => {
+                if !self.cpu_power_supported() {
+                    return Task::none();
+                }
                 self.state.cpu_power.stop_sync();
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
@@ -1288,7 +1310,14 @@ impl App {
         });
     }
 
+    fn cpu_power_supported(&self) -> bool {
+        self.state.system.intel_cpu.load(Ordering::Acquire)
+    }
+
     fn handle_cpu_power_sync_reset(&mut self) -> Task<Message> {
+        if !self.cpu_power_supported() {
+            return Task::none();
+        }
         self.state.cpu_power.stop_sync();
         self.pl_custom_applied = false;
         self.cpu_power_error = None;

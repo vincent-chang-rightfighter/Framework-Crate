@@ -439,7 +439,10 @@ pub fn spawn(state: AppState) {
                     // This is a slow operation (MSR + MMIO reads) so we keep
                     // the interval long and only refresh when the UI is active.
                     const CPU_POWER_POLL_MS: u64 = 5000;
-                    if !is_idle && now_ms.saturating_sub(last_cpu_power_poll) >= CPU_POWER_POLL_MS {
+                    if bg_state2.system.intel_cpu.load(Ordering::Acquire)
+                        && !is_idle
+                        && now_ms.saturating_sub(last_cpu_power_poll) >= CPU_POWER_POLL_MS
+                    {
                         last_cpu_power_poll = now_ms;
                         bg_state2.cpu_power.refresh();
                         mark_view_dirty(&bg_state2);

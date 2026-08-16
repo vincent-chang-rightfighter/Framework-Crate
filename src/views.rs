@@ -41,6 +41,7 @@ pub(crate) struct ViewSnapshot {
     pub pl1_clamped: bool,
     pub pl2_clamped: bool,
     pub cpu_power_error: Option<String>,
+    pub intel_cpu: bool,
 }
 
 impl ViewSnapshot {
@@ -83,6 +84,7 @@ impl ViewSnapshot {
             pl1_clamped: app.pl1_clamped,
             pl2_clamped: app.pl2_clamped,
             cpu_power_error: app.cpu_power_error.clone(),
+            intel_cpu: app.state.system.intel_cpu.load(Ordering::Acquire),
         }
     }
 }
@@ -1029,7 +1031,6 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
 }
 
 fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
-    let info = &snap.cpu_power;
     let mut content = column![].spacing(2);
 
     // Header with settings toggle
@@ -1038,11 +1039,27 @@ fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
         row![
             text("CPU Power").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
             space::horizontal(),
-            button(text(settings_label).size(FONT_SMALL))
-                .on_press(Message::ToggleCpuPowerSettings)
-                .style(btn_style),
+            if snap.intel_cpu {
+                button(text(settings_label).size(FONT_SMALL))
+                    .on_press(Message::ToggleCpuPowerSettings)
+                    .style(btn_style)
+            } else {
+                button(text(settings_label).size(FONT_SMALL)).style(btn_style)
+            },
         ]
     );
+
+    if !snap.intel_cpu {
+        content = content.push(
+            text("Not Supported").size(FONT_BODY).style(|_theme| iced::widget::text::Style { color: Some(COLOR_NOT_SUPPORTED_TEXT) })
+        );
+        content = content.push(
+            text("CPU Power is available on Intel CPUs only.").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+        );
+        return content.into();
+    }
+
+    let info = &snap.cpu_power;
 
     if !info.available {
         let msg = info.error_msg.unwrap_or("PawnIO driver not available");

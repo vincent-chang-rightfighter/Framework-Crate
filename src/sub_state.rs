@@ -165,6 +165,8 @@ pub struct SystemState {
     pub versions: Arc<RwLock<Arc<Option<cli::ec_wrapper::VersionsData>>>>,
     /// Detected platform family (for feature gating).
     pub platform: Arc<RwLock<Arc<cli::ec_wrapper::PlatformFamily>>>,
+    /// Intel CPU (GenuineIntel). CPU Power / PawnIO is Intel-only.
+    pub intel_cpu: Arc<AtomicBool>,
 }
 
 impl Default for SystemState {
@@ -174,6 +176,7 @@ impl Default for SystemState {
             ec_client: Arc::new(RwLock::new(Arc::new(None))),
             versions: Arc::new(RwLock::new(Arc::new(None))),
             platform: Arc::new(RwLock::new(Arc::new(cli::ec_wrapper::PlatformFamily::Unknown))),
+            intel_cpu: Arc::new(AtomicBool::new(false)),
         }
     }
 }
