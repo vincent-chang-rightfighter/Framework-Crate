@@ -151,6 +151,20 @@ selected_sensors = []
 
 - [`framework_lib`](https://github.com/FrameworkComputer/framework-system) — Framework EC hardware abstraction layer (from [framework-system](https://github.com/FrameworkComputer/framework-system))
 - [`iced`](https://crates.io/crates/iced) — Cross-platform GUI framework for Rust
+- [`PawnIO`](https://github.com/namazso/PawnIO) — Kernel-level hardware access driver (GPL-2.0), installed via `winget install namazso.PawnIO`
+- [`PawnIO Modules`](https://github.com/namazso/PawnIO.Modules) — Pre-compiled module blobs for MSR and MMIO access (LGPL-2.1)
+
+## CPU Power Feature (PawnIO Modules)
+
+The CPU Power section reads PL1/PL2 power limits via PawnIO Modules. On first use, the required module blobs (`IntelMSR.bin`, `IntelMCHBAR.bin`) are downloaded from [PawnIO Modules Releases](https://github.com/namazso/PawnIO.Modules/releases) and cached in `%APPDATA%/framework-crate/modules/`.
+
+**Requirements:**
+- PawnIO must be installed (`winget install namazso.PawnIO`)
+- Internet connection for first-time module download
+
+**LGPL-2.1 Compliance:**
+
+PawnIO Modules are licensed under LGPL-2.1. This project does not embed the module blobs — they are downloaded at runtime from the official repository. Source code for PawnIO Modules is available at: https://github.com/namazso/PawnIO.Modules (version 0.2.10)
 
 ## Icon Attribution
 
@@ -161,3 +175,5 @@ Rendering parameters: optical size 32, stroke weight 1.5, color `#7300ff` (R 115
 ## License
 
 MIT
+
+This project uses PawnIO (GPL-2.0) and PawnIO Modules (LGPL-2.1) at runtime. PawnIO is loaded as a dynamically installed driver. PawnIO Modules are downloaded at runtime from the official repository, not embedded in this binary. Source code for PawnIO Modules is available at https://github.com/namazso/PawnIO.Modules.

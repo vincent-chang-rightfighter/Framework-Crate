@@ -21,7 +21,7 @@ use crate::views;
 const AUTO_WIDTH: f32 = 900.0;
 /// Ceiling for the auto-resized window height (logical px), so the window
 /// never outgrows the screen work area (fan curve mode can be very tall).
-const AUTO_MAX_HEIGHT: f32 = 860.0;
+const AUTO_MAX_HEIGHT: f32 = 1100.0;
 
 /// Execute a closure on the EC client via spawn_blocking. If the EC client
 /// is not available, the task completes silently. Errors from the closure
@@ -97,6 +97,23 @@ pub enum Message {
     QuitCanceled,
     CollectDebugInfo,
     ToggleExpansionCardDebug,
+    InstallPawnIO,
+    PawnIOInstalled(Result<(), String>),
+    DownloadPawnIOModules,
+    PawnIOModulesDownloaded(Result<(), String>),
+    CpuPowerPl1Changed(String),
+    CpuPowerPl2Changed(String),
+    CpuPowerPl1TimeChanged(String),
+    CpuPowerPl1EnabledToggled(bool),
+    CpuPowerPl2EnabledToggled(bool),
+    CpuPowerPl1ClampedToggled(bool),
+    CpuPowerPl2ClampedToggled(bool),
+    CpuPowerApply,
+    CpuPowerApplied(Result<(), String>),
+    CpuPowerSyncStart,
+    CpuPowerSyncStarted(Result<(), String>),
+    CpuPowerSyncStop,
+    CpuPowerSyncReset,
 }
 
 pub struct App {
@@ -141,6 +158,14 @@ pub struct App {
     /// window stays at that height even when the content grows (e.g. battery
     /// details expanded).
     pub height_set: bool,
+    pub modules_download_error: Option<String>,
+    pub pl1_edit: String,
+    pub pl2_edit: String,
+    pub pl1_time_edit: String,
+    pub pl1_enabled: bool,
+    pub pl2_enabled: bool,
+    pub pl1_clamped: bool,
+    pub pl2_clamped: bool,
 }
 
 pub struct SystemInfo {
@@ -218,6 +243,7 @@ impl App {
             },
             battery: BatteryState {
                 info: Arc::new(RwLock::new(Arc::new(None))),
+                prev_ac_present: Arc::new(AtomicBool::new(true)),
             },
             cpu_power: crate::cpu_power::CpuPowerState::default(),
             lifecycle: LifecycleState {
@@ -278,9 +304,20 @@ impl App {
             window_id: None,
             window_height: None,
             height_set: false,
+            modules_download_error: None,
+            pl1_edit: String::new(),
+            pl2_edit: String::new(),
+            pl1_time_edit: "28.0".to_string(),
+            pl1_enabled: true,
+            pl2_enabled: true,
+            pl1_clamped: false,
+            pl2_clamped: false,
         };
 
         let init_task = Task::perform(async move {
+            // Pre-fetch PawnIO version at startup (blocking, but fast).
+            let _ = tokio::task::spawn_blocking(|| { crate::cpu_power::pawnio_version(); }).await;
+
             match tokio::task::spawn_blocking(cli::EcClient::new).await {
                 Ok(Ok(ec)) => {
                     state.system.cli_available.store(true, Ordering::Release);
@@ -300,6 +337,32 @@ impl App {
                         Err(e) => { warn!("versions spawn failed: {}", e); }
                     }
                     background_task::refresh_all_data(&state, &arc_ec).await;
+                    // Refresh CPU power info, capture BIOS defaults, then write
+                    // to MSR so subsequent Reset writes back the correct baseline.
+                    {
+                        state.cpu_power.refresh();
+                        state.cpu_power.init_bios_defaults();
+                        let info = state.cpu_power.snapshot();
+                        if info.available {
+                            let pl1 = info.pl1_msr;
+                            let pl1_en = info.pl1_msr_enabled;
+                            let pl1_cl = info.pl1_msr_clamped;
+                            let pl1_time = info.pl1_time_s;
+                            let pl2 = info.pl2_msr;
+                            let pl2_en = info.pl2_msr_enabled;
+                            let pl2_cl = info.pl2_msr_clamped;
+                            let pl2_time = info.pl2_time_s;
+                            let power_unit = info.power_unit;
+                            let time_unit = info.time_unit;
+                            let _ = tokio::task::spawn_blocking(move || {
+                                crate::cpu_power::write_msr_pl1_pl2_public(
+                                    pl1, pl1_en, pl1_cl, pl1_time,
+                                    pl2, pl2_en, pl2_cl, pl2_time,
+                                    power_unit, time_unit,
+                                )
+                            }).await;
+                        }
+                    }
                     Message::InitComplete
                 }
                 Ok(Err(e)) => {
@@ -717,7 +780,38 @@ impl App {
                         let now = crate::util::current_time_ms();
                         self.state.lifecycle.last_resume_ts.store(now, Ordering::Release);
                         tracing::warn!("[RESUME] System resumed from sleep/hibernate at {}", now);
-                        Some(Task::none())
+                        // Stop sync thread — hardware state is undefined after resume.
+                        self.state.cpu_power.stop_sync();
+                        // Re-read MSR/MMIO after resume and update edit fields.
+                        self.state.cpu_power.refresh();
+                        let info = self.state.cpu_power.snapshot();
+                        let (pl1, pl2, p1en, p2en, p1cl, p2cl, t1, _t2) = info.init_edit_fields();
+                        self.pl1_edit = pl1;
+                        self.pl2_edit = pl2;
+                        self.pl1_time_edit = t1;
+                        self.pl1_enabled = p1en;
+                        self.pl2_enabled = p2en;
+                        self.pl1_clamped = p1cl;
+                        self.pl2_clamped = p2cl;
+                        self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                        // Write BIOS defaults back to MSR — BIOS/EC may have reset them.
+                        if let Some(bios) = self.state.cpu_power.bios_defaults() {
+                            Some(Task::perform(
+                                async move {
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        crate::cpu_power::write_msr_pl1_pl2_public(
+                                            bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
+                                            bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
+                                            bios.power_unit, bios.time_unit,
+                                        )
+                                    }).await;
+                                    Message::Tick
+                                },
+                                |msg| msg,
+                            ))
+                        } else {
+                            Some(Task::none())
+                        }
                     }
                 }
             }
@@ -870,6 +964,11 @@ impl App {
                     report.push_str(&format!("BIOS: {:?}\n", v.uefi_version));
                     report.push_str(&format!("EC Firmware: {:?}\n", v.ec_build_version));
                 }
+                report.push_str("framework_lib: 0.6.5\n");
+                if let Some(ver) = crate::cpu_power::pawnio_version() {
+                    report.push_str(&format!("PawnIO: {}\n", ver));
+                }
+                report.push_str(&format!("PawnIO Modules: {}\n", crate::cpu_power::pawnio_modules_version()));
                 let config = read_lock(&self.state.lifecycle.config);
                 report.push_str(&format!("\nFan Mode: {:?}\n", config.fan.mode));
                 report.push_str(&format!("Fan Duty: {}\n", self.state.fan.last_applied_duty.load(Ordering::Acquire)));
@@ -910,6 +1009,211 @@ impl App {
                     .arg(&path)
                     .spawn();
                 Task::none()
+            }
+            Message::InstallPawnIO => {
+                Task::perform(
+                    async { crate::cpu_power::install_pawnio().map_err(|e| e.to_string()) },
+                    Message::PawnIOInstalled,
+                )
+            }
+            Message::PawnIOInstalled(result) => {
+                if let Err(e) = result {
+                    tracing::error!("PawnIO install failed: {}", e);
+                } else {
+                    crate::cpu_power::pawnio_version(); // refresh version cache
+                    self.state.cpu_power.refresh();
+                    let info = self.state.cpu_power.snapshot();
+                    let (pl1, pl2, p1en, p2en, p1cl, p2cl, t1, _t2) = info.init_edit_fields();
+                    self.pl1_edit = pl1;
+                    self.pl2_edit = pl2;
+                    self.pl1_time_edit = t1;
+                    self.pl1_enabled = p1en;
+                    self.pl2_enabled = p2en;
+                    self.pl1_clamped = p1cl;
+                    self.pl2_clamped = p2cl;
+                }
+                Task::none()
+            }
+            Message::DownloadPawnIOModules => {
+                Task::perform(
+                    async { crate::cpu_power::download_and_extract_modules().map_err(|e| e.to_string()) },
+                    Message::PawnIOModulesDownloaded,
+                )
+            }
+            Message::PawnIOModulesDownloaded(result) => {
+                match result {
+                    Ok(()) => {
+                        self.modules_download_error = None;
+                        self.state.cpu_power.refresh();
+                        let info = self.state.cpu_power.snapshot();
+                        let (pl1, pl2, p1en, p2en, p1cl, p2cl, t1, _t2) = info.init_edit_fields();
+                        self.pl1_edit = pl1;
+                        self.pl2_edit = pl2;
+                        self.pl1_time_edit = t1;
+                        self.pl1_enabled = p1en;
+                        self.pl2_enabled = p2en;
+                        self.pl1_clamped = p1cl;
+                        self.pl2_clamped = p2cl;
+                    }
+                    Err(e) => {
+                        tracing::error!("PawnIO Modules download failed: {}", e);
+                        self.modules_download_error = Some(e);
+                    }
+                }
+                Task::none()
+            }
+            Message::CpuPowerPl1Changed(val) => {
+                self.pl1_edit = val;
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
+            }
+            Message::CpuPowerPl2Changed(val) => {
+                self.pl2_edit = val;
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
+            }
+            Message::CpuPowerPl1TimeChanged(val) => {
+                self.pl1_time_edit = val;
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
+            }
+            Message::CpuPowerPl1EnabledToggled(v) => {
+                self.pl1_enabled = v;
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
+            }
+            Message::CpuPowerPl2EnabledToggled(v) => {
+                self.pl2_enabled = v;
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
+            }
+            Message::CpuPowerPl1ClampedToggled(v) => {
+                self.pl1_clamped = v;
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
+            }
+            Message::CpuPowerPl2ClampedToggled(v) => {
+                self.pl2_clamped = v;
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
+            }
+            Message::CpuPowerApply => {
+                let pl1: f64 = self.pl1_edit.parse().unwrap_or(0.0);
+                let pl2: f64 = self.pl2_edit.parse().unwrap_or(0.0);
+                let pl1_time: f64 = self.pl1_time_edit.parse().unwrap_or(28.0);
+                let pl1_en = self.pl1_enabled;
+                let pl2_en = self.pl2_enabled;
+                let pl1_cl = self.pl1_clamped;
+                let pl2_cl = self.pl2_clamped;
+                let info = self.state.cpu_power.snapshot();
+                let power_unit = info.power_unit;
+                let time_unit = info.time_unit;
+                let pl2_time = info.pl2_time_s;
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::cpu_power::write_msr_pl1_pl2_public(
+                                pl1, pl1_en, pl1_cl, pl1_time,
+                                pl2, pl2_en, pl2_cl, pl2_time,
+                                power_unit, time_unit,
+                            )
+                            .map_err(|e| e.to_string())
+                        }).await.unwrap_or_else(|e| Err(e.to_string()))
+                    },
+                    Message::CpuPowerApplied,
+                )
+            }
+            Message::CpuPowerApplied(result) => {
+                match result {
+                    Ok(()) => {
+                        self.state.cpu_power.refresh();
+                        let info = self.state.cpu_power.snapshot();
+                        let (pl1, pl2, p1en, p2en, p1cl, p2cl, t1, _t2) = info.init_edit_fields();
+                        self.pl1_edit = pl1;
+                        self.pl2_edit = pl2;
+                        self.pl1_time_edit = t1;
+                        self.pl1_enabled = p1en;
+                        self.pl2_enabled = p2en;
+                        self.pl1_clamped = p1cl;
+                        self.pl2_clamped = p2cl;
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to write PL1/PL2: {}", e);
+                    }
+                }
+                Task::none()
+            }
+            Message::CpuPowerSyncStart => {
+                let pl1: f64 = self.pl1_edit.parse().unwrap_or(0.0);
+                let pl2: f64 = self.pl2_edit.parse().unwrap_or(0.0);
+                let pl1_time: f64 = self.pl1_time_edit.parse().unwrap_or(28.0);
+                let pl1_en = self.pl1_enabled;
+                let pl2_en = self.pl2_enabled;
+                let pl1_cl = self.pl1_clamped;
+                let pl2_cl = self.pl2_clamped;
+                let info = self.state.cpu_power.snapshot();
+                let power_unit = info.power_unit;
+                let time_unit = info.time_unit;
+                let pl2_time = info.pl2_time_s;
+                let cpu_power = self.state.cpu_power.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            cpu_power.start_sync(
+                                pl1, pl1_en, pl1_cl, pl1_time,
+                                pl2, pl2_en, pl2_cl, pl2_time,
+                                power_unit, time_unit,
+                            )
+                            .map_err(|e| e.to_string())
+                        }).await.unwrap_or_else(|e| Err(e.to_string()))
+                    },
+                    Message::CpuPowerSyncStarted,
+                )
+            }
+            Message::CpuPowerSyncStarted(result) => {
+                match result {
+                    Ok(()) => {
+                        self.state.cpu_power.sync_enabled.store(true, Ordering::Release);
+                        tracing::info!("CPU power sync started");
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to start CPU power sync: {}", e);
+                    }
+                }
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
+            }
+            Message::CpuPowerSyncStop => {
+                self.state.cpu_power.stop_sync();
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
+            }
+            Message::CpuPowerSyncReset => {
+                self.state.cpu_power.stop_sync();
+                // Use BIOS defaults captured at startup (not current MSR values
+                // which may have been modified by EC or user).
+                let bios = match self.state.cpu_power.bios_defaults() {
+                    Some(b) => b,
+                    None => return Task::none(),
+                };
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::cpu_power::write_msr_pl1_pl2_public(
+                                bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
+                                bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
+                                bios.power_unit, bios.time_unit,
+                            )
+                            .map_err(|e| e.to_string())
+                        }).await.unwrap_or_else(|e| Err(e.to_string()))
+                    },
+                    |result| {
+                        if let Err(e) = result {
+                            tracing::error!("Failed to reset PL1/PL2: {}", e);
+                        }
+                        Message::Tick
+                    },
+                )
             }
             _ => Task::none(),
         }

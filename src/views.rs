@@ -4,7 +4,7 @@ use crate::cli;
 use crate::util::read_lock;
 use crate::style::*;
 use crate::types::FanControlMode;
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::widget::rule;
 use iced::widget::space;
 use iced::{Element, Length};
@@ -29,6 +29,15 @@ pub(crate) struct ViewSnapshot {
     pub per_fan_duty: Arc<Vec<u32>>,
     pub expansion_card_debug: bool,
     pub cpu_power: Arc<crate::cpu_power::CpuPowerInfo>,
+    pub sync_enabled: bool,
+    pub modules_download_error: Option<String>,
+    pub pl1_edit: String,
+    pub pl2_edit: String,
+    pub pl1_time_edit: String,
+    pub pl1_enabled: bool,
+    pub pl2_enabled: bool,
+    pub pl1_clamped: bool,
+    pub pl2_clamped: bool,
 }
 
 impl ViewSnapshot {
@@ -41,6 +50,7 @@ impl ViewSnapshot {
         let unified_duty = app.state.fan.unified_duty.load(Ordering::Acquire);
         let per_fan_duty = Arc::clone(&read_lock(&app.state.fan.per_fan_duty));
         let cpu_power = app.state.cpu_power.snapshot();
+        let sync_enabled = app.state.cpu_power.sync_enabled.load(Ordering::Acquire);
         Self {
             thermal: thermal_snap.data,
             config: Arc::clone(&read_lock(&app.state.lifecycle.config)),
@@ -58,6 +68,15 @@ impl ViewSnapshot {
             per_fan_duty,
             expansion_card_debug: app.expansion_card_debug,
             cpu_power,
+            sync_enabled,
+            modules_download_error: app.modules_download_error.clone(),
+            pl1_edit: app.pl1_edit.clone(),
+            pl2_edit: app.pl2_edit.clone(),
+            pl1_time_edit: app.pl1_time_edit.clone(),
+            pl1_enabled: app.pl1_enabled,
+            pl2_enabled: app.pl2_enabled,
+            pl1_clamped: app.pl1_clamped,
+            pl2_clamped: app.pl2_clamped,
         }
     }
 }
@@ -166,17 +185,23 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     } else {
         None
     };
+    let right_column = scrollable(
+        container(
+            column![
+                card(view_fan_control(snap)),
+                card(cpu_power_section(snap)),
+                card(view_misc(snap)),
+            ].spacing(8)
+        ).padding(iced::Padding::from([0, 8]))
+    ).height(Length::Fill);
+
     let content = container(
         row![
             column![
                 card(view_sensors(app, snap)),
                 card(view_battery(app, snap)),
             ].width(Length::FillPortion(1)).spacing(8),
-            column![
-                card(view_fan_control(snap)),
-                card(cpu_power_section(snap)),
-                card(view_misc(snap)),
-            ].width(Length::FillPortion(1)).spacing(8),
+            right_column.width(Length::FillPortion(1)),
         ].spacing(12)
     ).padding(12).width(Length::Fill);
 
@@ -243,6 +268,11 @@ fn view_settings(app: &App) -> Element<'_, Message> {
             sw_content = sw_content.push(info_row("EC Firmware", ec));
         }
     }
+    sw_content = sw_content.push(info_row("framework_lib", "0.6.5"));
+    if let Some(ver) = crate::cpu_power::pawnio_version() {
+        sw_content = sw_content.push(info_row("PawnIO", &ver));
+    }
+    sw_content = sw_content.push(info_row("PawnIO Modules", crate::cpu_power::pawnio_modules_version()));
     if !app.system_info.os.is_empty() {
         sw_content = sw_content.push(info_row("OS", &app.system_info.os));
     }
@@ -996,34 +1026,82 @@ fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     if !info.available {
         let msg = info.error_msg.unwrap_or("PawnIO driver not available");
         content = content.push(text(msg).size(FONT_BODY).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
+        if !crate::cpu_power::is_pawnio_installed() {
+            content = content.push(
+                button(text("Install PawnIO").size(FONT_BODY))
+                    .on_press(Message::InstallPawnIO)
+                    .style(btn_style)
+            );
+        } else if !crate::cpu_power::modules_downloaded() {
+            content = content.push(text("PawnIO Modules required").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
+            if let Some(ref err) = snap.modules_download_error {
+                content = content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)) }));
+            }
+            content = content.push(
+                button(text("Download PawnIO Modules").size(FONT_BODY))
+                    .on_press(Message::DownloadPawnIOModules)
+                    .style(btn_style)
+            );
+        }
         return content.into();
     }
 
     // MSR (static) PL1/PL2
     content = content.push(text("MSR (Static)").size(FONT_BODY));
     content = content.push(row![
-        text(format!("  PL1: {:.1}W", info.pl1_msr)).size(FONT_BODY),
-        text(if info.pl1_msr_enabled { " [Enabled]" } else { " [Disabled]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl1_msr_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
-        text(if info.pl1_msr_clamped { " [Clamped]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+        text(format!("  PL1: {:.1}W ({:.2}s)", info.pl1_msr, info.pl1_time_s)).size(FONT_BODY),
+        text(if info.pl1_msr_enabled { " [En]" } else { " [Dis]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl1_msr_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
+        text(if info.pl1_msr_clamped { " [Cl]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
     ].spacing(4));
     content = content.push(row![
-        text(format!("  PL2: {:.1}W", info.pl2_msr)).size(FONT_BODY),
-        text(if info.pl2_msr_enabled { " [Enabled]" } else { " [Disabled]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl2_msr_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
-        text(if info.pl2_msr_clamped { " [Clamped]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+        text(format!("  PL2: {:.1}W ({:.2}s)", info.pl2_msr, info.pl2_time_s)).size(FONT_BODY),
+        text(if info.pl2_msr_enabled { " [En]" } else { " [Dis]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl2_msr_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
+        text(if info.pl2_msr_clamped { " [Cl]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
     ].spacing(4));
 
-    // MMIO (dynamic) PL1/PL2
+    // MMIO (dynamic) PL1/PL2 — editable
     content = content.push(text("MMIO (Dynamic)").size(FONT_BODY));
     content = content.push(row![
-        text(format!("  PL1: {:.1}W", info.pl1_mmio)).size(FONT_BODY),
-        text(if info.pl1_mmio_enabled { " [Enabled]" } else { " [Disabled]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl1_mmio_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
-        text(if info.pl1_mmio_clamped { " [Clamped]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
-    ].spacing(4));
+        text("  PL1:").size(FONT_BODY),
+        text_input("W", &snap.pl1_edit)
+            .width(Length::Fixed(60.0))
+            .on_input(Message::CpuPowerPl1Changed),
+        iced::widget::checkbox(snap.pl1_enabled).on_toggle(Message::CpuPowerPl1EnabledToggled),
+        text("En").size(FONT_SMALL),
+        iced::widget::checkbox(snap.pl1_clamped).on_toggle(Message::CpuPowerPl1ClampedToggled),
+        text("Cl").size(FONT_SMALL),
+        text("T:").size(FONT_SMALL),
+        text_input("s", &snap.pl1_time_edit)
+            .width(Length::Fixed(50.0))
+            .on_input(Message::CpuPowerPl1TimeChanged),
+    ].spacing(4).align_y(iced::Alignment::Center));
     content = content.push(row![
-        text(format!("  PL2: {:.1}W", info.pl2_mmio)).size(FONT_BODY),
-        text(if info.pl2_mmio_enabled { " [Enabled]" } else { " [Disabled]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl2_mmio_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
-        text(if info.pl2_mmio_clamped { " [Clamped]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
-    ].spacing(4));
+        text("  PL2:").size(FONT_BODY),
+        text_input("W", &snap.pl2_edit)
+            .width(Length::Fixed(60.0))
+            .on_input(Message::CpuPowerPl2Changed),
+        iced::widget::checkbox(snap.pl2_enabled).on_toggle(Message::CpuPowerPl2EnabledToggled),
+        text("En").size(FONT_SMALL),
+        iced::widget::checkbox(snap.pl2_clamped).on_toggle(Message::CpuPowerPl2ClampedToggled),
+        text("Cl").size(FONT_SMALL),
+
+    ].spacing(4).align_y(iced::Alignment::Center));
+
+    // Sync status and controls
+    if snap.sync_enabled {
+        content = content.push(text("Syncing MSR 0x610 every 250ms")
+            .size(FONT_SMALL)
+            .style(|_theme| iced::widget::text::Style { color: Some(COLOR_GREEN) }));
+    }
+
+    content = content.push(row![
+        button(text(if snap.sync_enabled { "Stop Sync" } else { "Start Sync" }).size(FONT_BODY))
+            .on_press(if snap.sync_enabled { Message::CpuPowerSyncStop } else { Message::CpuPowerSyncStart })
+            .style(btn_style),
+        button(text("Reset").size(FONT_BODY))
+            .on_press(Message::CpuPowerSyncReset)
+            .style(btn_style),
+    ].spacing(8));
 
     content.into()
 }

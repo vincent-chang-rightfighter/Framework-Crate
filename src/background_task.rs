@@ -341,6 +341,9 @@ pub fn spawn(state: AppState) {
                     if !is_idle {
                         let ec_clone = Arc::clone(&ec);
                         if let Ok(Ok(bat)) = tokio::task::spawn_blocking(move || ec_clone.power()).await {
+                            let ac_now = bat.ac_present == Some(true);
+                            bg_state2.battery.prev_ac_present.store(ac_now, Ordering::Release);
+
                             with_write_lock(&bg_state2.battery.info, |guard| {
                                 let new_info = crate::types::BatteryInfo { power_info: bat };
                                 if guard.as_ref().as_ref() != Some(&new_info) {
