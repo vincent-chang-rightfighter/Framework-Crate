@@ -16,6 +16,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -40,9 +43,32 @@ jobs:
           name: framework-crate-windows-release
           path: target/release/framework-crate.exe
 
+      - name: Build release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $prev = git describe --tags --abbrev=0 "$tag^" 2>$null
+          $notes = New-Object System.Collections.Generic.List[string]
+          $notes.Add("## What's Changed")
+          $notes.Add("")
+          if ($prev) {
+            git log --pretty=format:"- %s (%h)" "$prev..$tag" | ForEach-Object { $notes.Add($_) }
+            $notes.Add("")
+            $notes.Add("**Full Changelog**: https://github.com/${env:GITHUB_REPOSITORY}/compare/${prev}...${tag}")
+          } else {
+            git log --pretty=format:"- %s (%h)" $tag | ForEach-Object { $notes.Add($_) }
+            $notes.Add("")
+            $notes.Add("**Full Changelog**: https://github.com/${env:GITHUB_REPOSITORY}/commits/${tag}")
+          }
+          $notes -join "`n" | Set-Content -Encoding utf8 release_notes.md
+          Get-Content release_notes.md
+
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: target/release/framework-crate.exe
-          generate_release_notes: true
+          body_path: release_notes.md
+          generate_release_notes: false
+          make_latest: true
