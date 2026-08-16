@@ -875,6 +875,7 @@ dependencies = [
  "parking_lot",
  "png",
  "serde",
+ "sha2",
  "tempfile",
  "tokio",
  "toml",

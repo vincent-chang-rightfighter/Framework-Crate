@@ -332,13 +332,17 @@ fn view_settings(app: &App) -> Element<'_, Message> {
 
 fn view_quit_warning(app: &App) -> Element<'_, Message> {
     let config = read_lock(&app.state.lifecycle.config);
-    let current_duty = config.fan.manual.as_ref().map(|m| m.duty_pct).unwrap_or(50);
+    let current_duty = app.state.fan.last_applied_duty.load(Ordering::Acquire) as u32;
     let set_duty = app.quit_duty_value;
 
     let mut content = column![].spacing(12).padding(20);
     content = content.push(text("Framework Crate").size(20));
     content = content.push(rule::horizontal(1));
-    content = content.push(text("Fan is in manual mode").size(FONT_BODY));
+    let mode_label = match config.fan.mode {
+        FanControlMode::Curve => "Fan is in curve mode",
+        _ => "Fan is in manual mode",
+    };
+    content = content.push(text(mode_label).size(FONT_BODY));
     content = content.push(text(format!("Current duty: {}%", current_duty)).size(FONT_BODY));
     content = content.push(space::horizontal().height(4));
     content = content.push(text("The fan will remain at its current speed after exiting.").size(FONT_BODY));
@@ -671,21 +675,20 @@ fn view_charge_limit_section(enabled: bool, value: u32) -> Element<'static, Mess
 fn view_battery_info(battery: &crate::cli::ec_wrapper::BatteryData, charging: bool) -> Element<'_, Message> {
     let mut rows = column![].spacing(4);
 
-    if let Some(v) = battery.remaining_capacity_mah {
-        if let Some(design) = battery.design_capacity_mah {
-            let health = (v as f32 / design as f32 * 100.0) as u32;
+    if let (Some(full), Some(design)) = (battery.last_full_charge_capacity_mah, battery.design_capacity_mah) {
+        if let Some(health) = crate::types::battery_health_pct(full, design) {
             rows = rows.push(row![
                 text("Battery Health:").size(FONT_BODY),
                 space::horizontal(),
-                text(format!("{}%  ({} / {} mAh)", health, v, design)).size(FONT_BODY),
-            ]);
-        } else {
-            rows = rows.push(row![
-                text("Remaining:").size(FONT_BODY),
-                space::horizontal(),
-                text(format!("{} mAh", v)).size(FONT_BODY),
+                text(format!("{}%  ({} / {} mAh)", health, full, design)).size(FONT_BODY),
             ]);
         }
+    } else if let Some(v) = battery.remaining_capacity_mah {
+        rows = rows.push(row![
+            text("Remaining:").size(FONT_BODY),
+            space::horizontal(),
+            text(format!("{} mAh", v)).size(FONT_BODY),
+        ]);
     }
     if let Some(cycles) = battery.cycle_count {
         rows = rows.push(row![
@@ -1187,7 +1190,7 @@ mod tests {
     #[test]
     fn view_battery_info_with_health() {
         let mut bat = default_battery_info();
-        bat.remaining_capacity_mah = Some(4500);
+        bat.last_full_charge_capacity_mah = Some(4500);
         bat.design_capacity_mah = Some(5000);
         let _el = view_battery_info(&bat, true);
     }
@@ -1242,26 +1245,17 @@ mod tests {
 
     #[test]
     fn battery_health_calculation() {
-        let remaining = 4500u32;
-        let design = 5000u32;
-        let health = (remaining as f32 / design as f32 * 100.0) as u32;
-        assert_eq!(health, 90);
+        assert_eq!(crate::types::battery_health_pct(4500, 5000), Some(90));
     }
 
     #[test]
     fn battery_health_full() {
-        let remaining = 5000u32;
-        let design = 5000u32;
-        let health = (remaining as f32 / design as f32 * 100.0) as u32;
-        assert_eq!(health, 100);
+        assert_eq!(crate::types::battery_health_pct(5000, 5000), Some(100));
     }
 
     #[test]
     fn battery_health_degraded() {
-        let remaining = 3000u32;
-        let design = 5000u32;
-        let health = (remaining as f32 / design as f32 * 100.0) as u32;
-        assert_eq!(health, 60);
+        assert_eq!(crate::types::battery_health_pct(3000, 5000), Some(60));
     }
 
     #[test]

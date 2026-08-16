@@ -19,6 +19,22 @@ fn battery_key(cfg: &Config) -> BatteryKey {
     cfg.battery.charge_limit_max_pct
 }
 
+async fn apply_battery_when_ready(cfg: &Config, state: &AppState) {
+    for _ in 0..50 {
+        if state.lifecycle.shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        {
+            let ec = read_lock(&state.system.ec_client);
+            if ec.as_ref().is_some() {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    apply_battery_settings(cfg, state).await;
+}
+
 async fn apply_battery_settings(cfg: &Config, state: &AppState) {
     let ec = { read_lock(&state.system.ec_client) };
     let Some(ref ec) = *ec else { return };
@@ -40,14 +56,15 @@ pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
         pin_to_slowest_core();
         let mut last_battery: Option<BatteryKey>;
 
-        // Record the initial battery key without applying — the EC client
-        // may not be ready yet (it is initialized asynchronously in init_task).
-        // Battery settings will be applied on the first config change that
-        // alters the charge limit key.
+        // Apply the persisted charge limit once EC is ready. The client is
+        // initialized asynchronously, so retry until it appears or shutdown.
         {
             let cfg = Arc::clone(&config_rx.borrow());
             let key = battery_key(&cfg);
             last_battery = Some(key);
+            if key.is_some() {
+                apply_battery_when_ready(&cfg, &state).await;
+            }
         }
 
         // Watch for changes — debounce: wait for the value to stabilise before saving.

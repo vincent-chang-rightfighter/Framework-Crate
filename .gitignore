@@ -15,3 +15,5 @@ DEPLOYMENT.md
 .opencode/
 PLAN_Intel_POWER_READ.md
 PLAN_Intel_POWER_EDIT_PL1PL2.md
+assets/IntelMSR.bin
+assets/IntelMCHBAR.bin

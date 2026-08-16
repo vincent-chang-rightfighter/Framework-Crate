@@ -17,6 +17,8 @@ type PawnioClose = unsafe extern "system" fn(HANDLE) -> i32;  // HRESULT
 
 const MODULES_DIR_NAME: &str = "modules";
 const PAWNIO_MODULES_VERSION: &str = "0.2.10";
+const INTEL_MSR_SHA256: &str = "d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a21cb48413c9b92e5f";
+const INTEL_MCHBAR_SHA256: &str = "3f82b832d99b4aac37d2a20fdb7c9baa2a3bc0488612c9019c9484eb0e8a6eae";
 
 /// Get the local modules directory path (%APPDATA%/framework-crate/modules/).
 fn modules_dir() -> std::path::PathBuf {
@@ -24,10 +26,30 @@ fn modules_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(appdata).join("framework-crate").join(MODULES_DIR_NAME)
 }
 
-/// Check if required module blobs are already cached locally.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn verify_module_hash(path: &std::path::Path, expected: &str) -> Result<(), &'static str> {
+    let bytes = std::fs::read(path).map_err(|_| "module blob missing")?;
+    if sha256_hex(&bytes) != expected {
+        warn!("PawnIO module hash mismatch: {}", path.display());
+        return Err("module hash mismatch");
+    }
+    Ok(())
+}
+
+fn verify_cached_modules(dir: &std::path::Path) -> Result<(), &'static str> {
+    verify_module_hash(&dir.join("IntelMSR.bin"), INTEL_MSR_SHA256)?;
+    verify_module_hash(&dir.join("IntelMCHBAR.bin"), INTEL_MCHBAR_SHA256)?;
+    Ok(())
+}
+
+/// Check if required module blobs are already cached locally and match the pinned hashes.
 pub fn modules_downloaded() -> bool {
-    let dir = modules_dir();
-    dir.join("IntelMSR.bin").exists() && dir.join("IntelMCHBAR.bin").exists()
+    verify_cached_modules(&modules_dir()).is_ok()
 }
 
 /// Download PawnIO Modules ZIP and extract blobs. Returns Ok or error.
@@ -85,15 +107,11 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
         return Err("download/extraction failed");
     }
 
-    // Verify required blobs exist and report which ones are missing.
-    let missing_msr = !dir.join("IntelMSR.bin").exists();
-    let missing_mchbar = !dir.join("IntelMCHBAR.bin").exists();
-    if missing_msr || missing_mchbar {
-        let mut missing = Vec::new();
-        if missing_msr { missing.push("IntelMSR.bin"); }
-        if missing_mchbar { missing.push("IntelMCHBAR.bin"); }
-        warn!("Extracted modules missing: {:?}", missing);
-        return Err("extracted modules missing");
+    if let Err(e) = verify_cached_modules(&dir) {
+        warn!("Downloaded PawnIO modules failed verification: {}", e);
+        let _ = std::fs::remove_file(dir.join("IntelMSR.bin"));
+        let _ = std::fs::remove_file(dir.join("IntelMCHBAR.bin"));
+        return Err(e);
     }
 
     debug!("PawnIO modules extracted successfully to {}", dir.display());
@@ -103,12 +121,14 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
 /// Load IntelMSR module blob.
 fn load_intel_msr_blob() -> Result<Vec<u8>, &'static str> {
     let path = modules_dir().join("IntelMSR.bin");
+    verify_module_hash(&path, INTEL_MSR_SHA256)?;
     std::fs::read(&path).map_err(|_| "IntelMSR module not found")
 }
 
 /// Load IntelMCHBAR module blob.
 fn load_intel_mchbar_blob() -> Result<Vec<u8>, &'static str> {
     let path = modules_dir().join("IntelMCHBAR.bin");
+    verify_module_hash(&path, INTEL_MCHBAR_SHA256)?;
     std::fs::read(&path).map_err(|_| "IntelMCHBAR module not found")
 }
 
@@ -246,7 +266,7 @@ fn write_msr_pl1_pl2(
     exec_ioctl(msr_handle, "ioctl_write_msr", &inp, &mut out2)
         .map_err(|_| "ioctl_write_msr failed — is IntelMSR module loaded?")?;
 
-    info!("MSR PL1/PL2 written: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) raw=0x{:016X}",
+    debug!("MSR PL1/PL2 written: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) raw=0x{:016X}",
         params.pl1_watts, params.pl1_time_s, params.pl2_watts, params.pl2_time_s, new_val);
     Ok(())
 }
@@ -850,4 +870,27 @@ pub fn pawnio_version() -> Option<String> {
 /// Get the embedded PawnIO Modules blob version.
 pub fn pawnio_modules_version() -> &'static str {
     "0.2.10"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_hex_empty() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn verify_module_hash_rejects_mismatch() {
+        let dir = std::env::temp_dir().join("framework-crate-hash-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("bad.bin");
+        std::fs::write(&path, b"not-a-module").unwrap();
+        assert!(verify_module_hash(&path, INTEL_MSR_SHA256).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
 }

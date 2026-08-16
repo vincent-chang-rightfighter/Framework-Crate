@@ -130,6 +130,7 @@ mod tests {
                 mode: FanControlMode::Manual,
                 manual: Some(types::ManualConfig { duty_pct: 60 }),
                 curve: None,
+                ..Default::default()
             },
             battery: types::BatteryConfig::default(),
             telemetry: types::TelemetryConfig::default(),
@@ -155,6 +156,7 @@ mod tests {
                         rate_limit_down_pct_per_step: None,
                     },
                 }),
+                ..Default::default()
             },
             battery: types::BatteryConfig::default(),
             telemetry: types::TelemetryConfig::default(),
@@ -174,6 +176,7 @@ mod tests {
                 mode: FanControlMode::Manual,
                 manual: Some(types::ManualConfig { duty_pct: 45 }),
                 curve: None,
+                ..Default::default()
             },
             battery: types::BatteryConfig {
                 charge_limit_max_pct: Some(types::SettingU8 { enabled: true, value: 80 }),

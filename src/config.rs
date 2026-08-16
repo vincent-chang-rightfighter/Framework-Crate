@@ -88,7 +88,7 @@ fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
          # [fan]\n\
          # mode = \"Disabled\" | \"Manual\" | \"Curve\"\n\
          # [fan.manual]\n\
-         # duty_pct = 10..100\n\
+         # duty_pct = 0..100\n\
          # [fan.curve]\n\
          # poll_ms = 500..10000            (fan curve step interval)\n\
          # hysteresis_c = 0..10            (temperature hysteresis)\n\

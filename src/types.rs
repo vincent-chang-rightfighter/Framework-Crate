@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
 // Validation constants for config values
@@ -8,7 +8,7 @@ const POLL_MS_MIN: u64 = crate::style::POLL_RATE_MIN_MS as u64;
 const POLL_MS_MAX: u64 = 2000;
 const UI_REFRESH_MS_MIN: u64 = 50;
 const UI_REFRESH_MS_MAX: u64 = 1000;
-const DUTY_PCT_MIN: u32 = 10;
+const DUTY_PCT_MIN: u32 = 0;
 const DUTY_PCT_MAX: u32 = 100;
 const CURVE_POLL_MS_MIN: u64 = 500;
 const CURVE_POLL_MS_MAX: u64 = 10000;
@@ -47,6 +47,13 @@ impl Config {
             if let Some(ref mut down) = curve.curve.rate_limit_down_pct_per_step {
                 *down = (*down).clamp(RATE_LIMIT_MIN, RATE_LIMIT_MAX);
             }
+            for point in &mut curve.curve.points {
+                point[0] = point[0].min(100);
+                point[1] = point[1].min(100);
+            }
+        }
+        for duty in &mut self.fan.per_fan_duty {
+            *duty = (*duty).clamp(DUTY_PCT_MIN, DUTY_PCT_MAX);
         }
 
         // Battery settings
@@ -87,7 +94,7 @@ impl FanControlMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FanControlConfig {
     #[serde(default)]
     pub mode: FanControlMode,
@@ -95,6 +102,26 @@ pub struct FanControlConfig {
     pub manual: Option<ManualConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub curve: Option<GlobalCurveConfig>,
+    #[serde(default = "default_true")]
+    pub unified_duty: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub per_fan_duty: Vec<u32>,
+}
+
+impl Default for FanControlConfig {
+    fn default() -> Self {
+        Self {
+            mode: FanControlMode::default(),
+            manual: None,
+            curve: None,
+            unified_duty: true,
+            per_fan_duty: Vec::new(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -190,6 +217,37 @@ pub struct BatteryInfo {
     pub power_info: crate::cli::ec_wrapper::BatteryData,
 }
 
+pub fn is_battery_sensor(name: &str) -> bool {
+    name.eq_ignore_ascii_case("battery")
+}
+
+/// Temperature that drives the fan curve: configured sensors if set,
+/// otherwise the hottest non-battery sensor.
+pub fn curve_control_temp(temps: &BTreeMap<String, i32>, sensors: &[String]) -> i32 {
+    let non_battery = || {
+        temps.iter()
+            .filter(|(name, _)| !is_battery_sensor(name))
+            .map(|(_, t)| *t)
+            .max()
+    };
+    if sensors.is_empty() {
+        return non_battery().or_else(|| temps.values().copied().max()).unwrap_or(0);
+    }
+    sensors.iter()
+        .filter_map(|s| temps.get(s).copied())
+        .max()
+        .or_else(non_battery)
+        .or_else(|| temps.values().copied().max())
+        .unwrap_or(0)
+}
+
+pub fn battery_health_pct(last_full_mah: u32, design_mah: u32) -> Option<u32> {
+    if design_mah == 0 {
+        return None;
+    }
+    Some(((last_full_mah as f32 / design_mah as f32) * 100.0).round() as u32)
+}
+
 pub fn sorted_sensor_list(selected: &[String], sensor_keys: &[String]) -> Vec<String> {
     let fallback = sensor_keys.len();
     let pos_map: HashMap<&str, usize> = sensor_keys.iter()
@@ -258,11 +316,36 @@ mod tests {
     }
 
     #[test]
-    fn validate_manual_duty_pct_below_10_clamps() {
+    fn validate_manual_duty_pct_zero_unchanged() {
         let mut c = Config::default();
-        c.fan.manual = Some(ManualConfig { duty_pct: 5 });
+        c.fan.manual = Some(ManualConfig { duty_pct: 0 });
         c.validate();
-        assert_eq!(c.fan.manual.as_ref().unwrap().duty_pct, 10);
+        assert_eq!(c.fan.manual.as_ref().unwrap().duty_pct, 0);
+    }
+
+    #[test]
+    fn curve_control_temp_skips_battery_by_default() {
+        let mut temps = BTreeMap::new();
+        temps.insert("F75303_CPU".into(), 55);
+        temps.insert("Battery".into(), 90);
+        temps.insert("PECI".into(), 48);
+        assert_eq!(curve_control_temp(&temps, &[]), 55);
+    }
+
+    #[test]
+    fn curve_control_temp_uses_configured_sensors() {
+        let mut temps = BTreeMap::new();
+        temps.insert("F75303_CPU".into(), 55);
+        temps.insert("PECI".into(), 70);
+        assert_eq!(curve_control_temp(&temps, &["PECI".into()]), 70);
+    }
+
+    #[test]
+    fn battery_health_pct_from_full_charge() {
+        assert_eq!(battery_health_pct(4500, 5000), Some(90));
+        assert_eq!(battery_health_pct(5000, 5000), Some(100));
+        assert_eq!(battery_health_pct(3000, 5000), Some(60));
+        assert_eq!(battery_health_pct(1000, 0), None);
     }
 
     #[test]
@@ -301,5 +384,24 @@ mod tests {
         c.validate();
         assert!(c.fan.manual.is_none());
         assert!(c.fan.curve.is_none());
+    }
+
+    #[test]
+    fn validate_curve_points_clamp() {
+        let mut c = Config::default();
+        c.fan.curve = Some(GlobalCurveConfig {
+            curve: CurveConfig {
+                sensors: vec![],
+                points: vec![[150, 200], [40, 10]],
+                hysteresis_c: 2,
+                rate_limit_pct_per_step: 10,
+                rate_limit_down_pct_per_step: None,
+            },
+            poll_ms: 1000,
+        });
+        c.validate();
+        let pts = &c.fan.curve.as_ref().unwrap().curve.points;
+        assert_eq!(pts[0], [100, 100]);
+        assert_eq!(pts[1], [40, 10]);
     }
 }

@@ -87,6 +87,37 @@ fn mark_view_dirty(state: &AppState) {
     state.lifecycle.view_dirty.store(true, Ordering::Release);
 }
 
+fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
+    if fan_count == 0 {
+        return;
+    }
+    let fill = {
+        let config = read_lock(&state.lifecycle.config);
+        config.fan.manual.as_ref().map(|m| m.duty_pct).unwrap_or(50)
+    };
+    let mut resized = false;
+    with_write_lock(&state.fan.per_fan_duty, |guard| {
+        let duties = Arc::make_mut(guard);
+        if duties.len() == fan_count {
+            return;
+        }
+        if duties.len() < fan_count {
+            duties.resize(fan_count, fill);
+        } else {
+            duties.truncate(fan_count);
+        }
+        resized = true;
+    });
+    if resized {
+        with_write_lock(&state.lifecycle.config, |guard| {
+            let cfg = Arc::make_mut(guard);
+            let live = read_lock(&state.fan.per_fan_duty);
+            cfg.fan.per_fan_duty = (*live).clone();
+        });
+        mark_view_dirty(state);
+    }
+}
+
 fn estimate_duty_from_thermal(state: &AppState) -> Option<u32> {
     let thermal_snap = read_lock(&state.thermal.data);
     if let Some(ref t) = *thermal_snap {
@@ -113,6 +144,7 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
     let now_ts = crate::util::current_time_ms();
     let fan_count = t.fans.len() as u64;
     state.fan.fan_count.store(fan_count, Ordering::Release);
+    ensure_per_fan_duty(state, t.fans.len());
     if let Some(max_rpm) = t.fans.iter().map(|f| f.rpm).max() {
         let prev = state.fan.fan_max_rpm.load(Ordering::Acquire) as u32;
         let last_reset = state.fan.last_fan_rpm_reset.load(Ordering::Acquire);
@@ -250,6 +282,7 @@ pub fn spawn(state: AppState) {
                 let start_ms = crate::util::current_time_ms();
                 let mut last_expansion_scan: u64 = start_ms;
                 let mut last_versions_scan: u64 = start_ms;
+                let mut last_cpu_power_poll: u64 = 0;
                 let mut last_resume_ts: u64 = 0;
                 loop {
                     let resume_ts = bg_state2.lifecycle.last_resume_ts.load(Ordering::Acquire);
@@ -406,9 +439,8 @@ pub fn spawn(state: AppState) {
                     // This is a slow operation (MSR + MMIO reads) so we keep
                     // the interval long and only refresh when the UI is active.
                     const CPU_POWER_POLL_MS: u64 = 5000;
-                    static LAST_CPU_POWER_POLL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    if !is_idle && now_ms.saturating_sub(LAST_CPU_POWER_POLL.load(Ordering::Relaxed)) >= CPU_POWER_POLL_MS {
-                        LAST_CPU_POWER_POLL.store(now_ms, Ordering::Relaxed);
+                    if !is_idle && now_ms.saturating_sub(last_cpu_power_poll) >= CPU_POWER_POLL_MS {
+                        last_cpu_power_poll = now_ms;
                         bg_state2.cpu_power.refresh();
                         mark_view_dirty(&bg_state2);
                     }
@@ -420,13 +452,14 @@ pub fn spawn(state: AppState) {
 
                     // Read only the fields we need, then drop the lock immediately.
                     // This avoids holding the config lock across ~100ms EC I/O.
-                    let (manual_duty, curve_hysteresis, curve_rate_limit, curve_rate_limit_down) = {
+                    let (manual_duty, curve_hysteresis, curve_rate_limit, curve_rate_limit_down, curve_sensors) = {
                         let config = read_lock(&bg_state2.lifecycle.config);
                         (
                             config.fan.manual.as_ref().map(|m| m.duty_pct),
                             config.fan.curve.as_ref().map(|c| c.curve.hysteresis_c),
                             config.fan.curve.as_ref().map(|c| c.curve.rate_limit_pct_per_step),
                             config.fan.curve.as_ref().and_then(|c| c.curve.rate_limit_down_pct_per_step),
+                            config.fan.curve.as_ref().map(|c| c.curve.sensors.clone()).unwrap_or_default(),
                         )
                     }; // config lock released here
 
@@ -532,35 +565,14 @@ pub fn spawn(state: AppState) {
                                 && let (Some(hyst), Some(rate)) =
                                     (curve_hysteresis, curve_rate_limit)
                             {
-                                    let max_temp = thermal.temps.values().copied().max().unwrap_or(0);
+                                    let control_temp = crate::types::curve_control_temp(&thermal.temps, &curve_sensors);
                                     let full_pts_arc = read_lock(&bg_state2.fan.curve_full_points);
                                     let full_pts: &[[u32; 2]] = &full_pts_arc;
-                                    if let Some(next) = curve_stepper.next(max_temp, hyst, rate, curve_rate_limit_down, full_pts) {
-                                        let unified = bg_state2.fan.unified_duty.load(Ordering::Acquire);
-                                        if unified {
-                                            let ec_clone = Arc::clone(&ec);
-                                            match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, None)).await {
-                                                Ok(result) => match result {
-                                                    Ok(()) => {
-                                                            let mode_now = crate::types::FanControlMode::from_u8(
-                                                                bg_state2.fan.mode.load(Ordering::Acquire) as u8
-                                                    );
-                                                        if mode_now != mode { last_fan_mode = Some(mode); continue; }
-                                                        bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
-                                                    }
-                                                    Err(e) => warn!("Failed to set fan duty (curve): {}", e),
-                                                },
-                                                Err(join_err) => {
-                                                    warn!("EC spawn panicked (set_fan_duty curve): {}", join_err);
-                                                    reset_ec_on_panic(&bg_state2);
-                                                    continue;
-                                                }
-                                            }
-                                        } else {
-                                            let per_fan = read_lock(&bg_state2.fan.per_fan_duty);
-                                            for (idx, &duty) in per_fan.iter().enumerate() {
-                                                // Re-check mode between fans to avoid setting duties
-                                                // after the user has switched away from Curve mode.
+                                    if let Some(next) = curve_stepper.next(control_temp, hyst, rate, curve_rate_limit_down, full_pts) {
+                                        let fan_count = bg_state2.fan.fan_count.load(Ordering::Acquire) as u32;
+                                        let write_each = !bg_state2.fan.unified_duty.load(Ordering::Acquire) && fan_count > 1;
+                                        if write_each {
+                                            for fan_idx in 0..fan_count {
                                                 let mode_check = crate::types::FanControlMode::from_u8(
                                                     bg_state2.fan.mode.load(Ordering::Acquire) as u8
                                                 );
@@ -568,8 +580,7 @@ pub fn spawn(state: AppState) {
                                                     break;
                                                 }
                                                 let ec_clone = Arc::clone(&ec);
-                                                let fan_idx = idx as u32;
-                                                match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(duty, Some(fan_idx))).await {
+                                                match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, Some(fan_idx))).await {
                                                     Ok(result) => {
                                                         if let Err(e) = result {
                                                             warn!("Failed to set fan {} duty (curve): {}", fan_idx, e);
@@ -583,6 +594,25 @@ pub fn spawn(state: AppState) {
                                                 }
                                             }
                                             bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
+                                        } else {
+                                            let ec_clone = Arc::clone(&ec);
+                                            match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, None)).await {
+                                                Ok(result) => match result {
+                                                    Ok(()) => {
+                                                        let mode_now = crate::types::FanControlMode::from_u8(
+                                                            bg_state2.fan.mode.load(Ordering::Acquire) as u8
+                                                        );
+                                                        if mode_now != mode { last_fan_mode = Some(mode); continue; }
+                                                        bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
+                                                    }
+                                                    Err(e) => warn!("Failed to set fan duty (curve): {}", e),
+                                                },
+                                                Err(join_err) => {
+                                                    warn!("EC spawn panicked (set_fan_duty curve): {}", join_err);
+                                                    reset_ec_on_panic(&bg_state2);
+                                                    continue;
+                                                }
+                                            }
                                         }
                                         curve_stepper.note_applied(next);
                                     }

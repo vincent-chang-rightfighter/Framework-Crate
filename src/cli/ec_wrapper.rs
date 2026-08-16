@@ -105,7 +105,23 @@ pub struct UsbCPort {
 // PD port classification helpers (ported from framework-control-windows-Iced)
 // ============================================================================
 
+/// Watts at or below this (with Source) are treated as DisplayPort.
 const DISPLAY_CARD_WATTS_THRESHOLD: f32 = 3.0;
+/// Watts at or below this (Source + PD, no DP alt) are treated as HDMI.
+/// USB-C default charging is 7.5W (5V/1.5A), so stay below that.
+const HDMI_SOURCE_WATTS_MAX: f32 = 6.0;
+
+fn is_low_power_display_source(watts: Option<f32>) -> bool {
+    matches!(watts, Some(w) if w > 0.0 && w <= HDMI_SOURCE_WATTS_MAX)
+}
+
+fn classify_display_source(watts: Option<f32>, _prefer_named: bool) -> &'static str {
+    match watts {
+        Some(w) if w <= DISPLAY_CARD_WATTS_THRESHOLD => "DisplayPort Expansion Card",
+        Some(_) => "HDMI Expansion Card",
+        None => "DP/HDMI Expansion Card",
+    }
+}
 
 fn role_is(port: &UsbCPort, role: &str) -> bool {
     port.power_role == Some(role)
@@ -173,17 +189,16 @@ pub fn classify_pd_port<'a>(
         return "USB-C Expansion Card";
     }
     if port.dp_alt_mode {
-        tracing::debug!("[classify] Port {} → DP/HDMI Expansion Card (dp_alt)", port.port);
-        return "DP/HDMI Expansion Card";
+        let result = classify_display_source(port.negotiated_watts, true);
+        tracing::debug!("[classify] Port {} → {} (dp_alt, watts={:?})", port.port, result, port.negotiated_watts);
+        return result;
     }
     if port.pd_contract && role_is(port, "Source") {
-        if port.dp_alt_mode {
-            let result = match port.negotiated_watts {
-                Some(w) if w <= DISPLAY_CARD_WATTS_THRESHOLD => "DisplayPort Expansion Card",
-                Some(_) => "HDMI Expansion Card",
-                None => "DP/HDMI Expansion Card",
-            };
-            tracing::debug!("[classify] Port {} → {} (Source+PD+dp_alt, watts={:?})", port.port, result, port.negotiated_watts);
+        // HDMI/DP cards often omit DP-alt in EC PD state but still draw a
+        // small Source contract (~3–5W). USB-C charging starts at 7.5W.
+        if display_card_installed || is_low_power_display_source(port.negotiated_watts) {
+            let result = classify_display_source(port.negotiated_watts, display_card_installed);
+            tracing::debug!("[classify] Port {} → {} (Source+PD, no dp_alt, watts={:?})", port.port, result, port.negotiated_watts);
             return result;
         }
         tracing::debug!("[classify] Port {} → USB-C Expansion Card (Source+PD, no dp_alt, watts={:?})", port.port, port.negotiated_watts);
@@ -459,7 +474,10 @@ impl EcClient {
 
     pub fn kblight_set(&self, percent: u32) -> Result<(), String> {
         self.ec.set_keyboard_backlight(percent as u8);
-        Ok(())
+        match self.ec.get_keyboard_backlight() {
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("Failed to set keyboard backlight: {:?}", e)),
+        }
     }
 
     pub fn fp_led_level_set(&self, level: &str) -> Result<(), String> {
@@ -561,5 +579,46 @@ impl EcClient {
             });
         }
         cards
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn port(role: &'static str, pd: bool, dp_alt: bool, watts: Option<f32>) -> UsbCPort {
+        UsbCPort {
+            port: 1,
+            pd_contract: pd,
+            power_role: Some(role),
+            negotiated_text: None,
+            negotiated_watts: watts,
+            data_role: Some("Dfp"),
+            dp_alt_mode: dp_alt,
+        }
+    }
+
+    #[test]
+    fn hdmi_source_without_dp_alt_is_hdmi() {
+        let p = port("Source", true, false, Some(3.4));
+        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false), "HDMI Expansion Card");
+    }
+
+    #[test]
+    fn displayport_low_watt_source() {
+        let p = port("Source", true, true, Some(2.5));
+        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false), "DisplayPort Expansion Card");
+    }
+
+    #[test]
+    fn usbc_default_source_stays_usbc() {
+        let p = port("Source", true, false, Some(7.5));
+        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false), "USB-C Expansion Card");
+    }
+
+    #[test]
+    fn sink_pd_is_usbc() {
+        let p = port("Sink", true, false, Some(65.0));
+        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false), "USB-C Expansion Card");
     }
 }

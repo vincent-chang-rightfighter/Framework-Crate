@@ -232,8 +232,8 @@ impl App {
                     loaded_config.fan.curve.as_ref().map(|c| c.curve.points.as_slice()).unwrap_or(&[]),
                 )))),
                 fan_count: Arc::new(AtomicU64::new(0)),
-                unified_duty: Arc::new(AtomicBool::new(true)),
-                per_fan_duty: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+                unified_duty: Arc::new(AtomicBool::new(loaded_config.fan.unified_duty)),
+                per_fan_duty: Arc::new(RwLock::new(Arc::new(loaded_config.fan.per_fan_duty.clone()))),
             },
             thermal: ThermalState {
                 data: Arc::new(RwLock::new(Arc::new(None))),
@@ -343,33 +343,21 @@ impl App {
                         Err(e) => { warn!("versions spawn failed: {}", e); }
                     }
                     background_task::refresh_all_data(&state, &arc_ec).await;
-                    // Refresh CPU power info, capture BIOS defaults, then write
-                    // to MSR so subsequent Reset writes back the correct baseline.
+                    {
+                        let cfg = read_lock(&state.lifecycle.config);
+                        if let Some(ref limit) = cfg.battery.charge_limit_max_pct {
+                            let pct = if limit.enabled { limit.value } else { 100 };
+                            let ec_clone = Arc::clone(&arc_ec);
+                            if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.charge_limit_set(0, pct)).await.unwrap_or_else(|e| Err(e.to_string())) {
+                                warn!("Failed to apply saved charge limit: {}", e);
+                            }
+                        }
+                    }
+                    // Capture BIOS defaults from the first RAPL read. Do not write
+                    // MSR here — the user has not asked to change power limits.
                     {
                         state.cpu_power.refresh();
                         state.cpu_power.init_bios_defaults();
-                        let info = state.cpu_power.snapshot();
-                        if info.available {
-                            let pl1 = info.pl1_msr;
-                            let pl1_en = info.pl1_msr_enabled;
-                            let pl1_cl = info.pl1_msr_clamped;
-                            let pl1_time = info.pl1_time_s;
-                            let pl2 = info.pl2_msr;
-                            let pl2_en = info.pl2_msr_enabled;
-                            let pl2_cl = info.pl2_msr_clamped;
-                            let pl2_time = info.pl2_time_s;
-                            let power_unit = info.power_unit;
-                            let time_unit = info.time_unit;
-                            let _ = tokio::task::spawn_blocking(move || {
-                                if let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
-                                    pl1, pl1_en, pl1_cl, pl1_time,
-                                    pl2, pl2_en, pl2_cl, pl2_time,
-                                    power_unit, time_unit,
-                                ) {
-                                    warn!("Init MSR write failed: {}", e);
-                                }
-                            }).await;
-                        }
                     }
                     Message::InitComplete
                 }
@@ -453,7 +441,10 @@ impl App {
         // AC→battery: auto-reset PL1/PL2 to BIOS defaults
         if self.state.lifecycle.pl_reset_pending.swap(false, Ordering::Acquire) && self.pl_custom_applied {
             tracing::info!("AC→battery: resetting PL1/PL2 to BIOS defaults");
-            let _ = self.update(Message::CpuPowerSyncReset);
+            return Task::batch([
+                self.handle_cpu_power_sync_reset(),
+                tick_task(self.tick_interval_ms),
+            ]);
         }
 
         let now_ms = crate::util::current_time_ms();
@@ -582,6 +573,10 @@ impl App {
             }
             Message::FanUnifiedDutyToggled(unified) => {
                 self.state.fan.unified_duty.store(unified, Ordering::Release);
+                self.mutate_config(|cfg| {
+                    cfg.fan.unified_duty = unified;
+                });
+                self.save_config();
                 Some(Task::none())
             }
             Message::FanPerDutyChanged(fan_idx, duty) => {
@@ -592,7 +587,13 @@ impl App {
                         duties[fan_idx] = duty;
                     }
                 });
+                self.mutate_config(|cfg| {
+                    if fan_idx < cfg.fan.per_fan_duty.len() {
+                        cfg.fan.per_fan_duty[fan_idx] = duty;
+                    }
+                });
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                self.save_config();
                 Some(Task::none())
             }
             Message::FanCurvePointTempChanged(idx, temp) => {
@@ -777,8 +778,8 @@ impl App {
                 self.tray.restore_window();
                 self.state.lifecycle.visible.store(true, Ordering::Release);
                 let config = read_lock(&self.state.lifecycle.config);
-                if config.fan.mode == FanControlMode::Manual {
-                    self.quit_duty_value = config.fan.manual.as_ref().map(|m| m.duty_pct).unwrap_or(45).clamp(10, 100);
+                if matches!(config.fan.mode, FanControlMode::Manual | FanControlMode::Curve) {
+                    self.quit_duty_value = config.fan.manual.as_ref().map(|m| m.duty_pct).unwrap_or(45).clamp(0, 100);
                     self.show_quit_warning = true;
                 } else {
                     self.tray.shutdown();
@@ -1232,36 +1233,7 @@ impl App {
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
-            Message::CpuPowerSyncReset => {
-                self.state.cpu_power.stop_sync();
-                self.pl_custom_applied = false;
-                self.cpu_power_error = None;
-                // Use BIOS defaults captured at startup (not current MSR values
-                // which may have been modified by EC or user).
-                let bios = match self.state.cpu_power.bios_defaults() {
-                    Some(b) => b,
-                    None => {
-                        self.cpu_power_error = Some("Cannot reset: BIOS defaults not available (PawnIO may not be running)".into());
-                        self.state.lifecycle.view_dirty.store(true, Ordering::Release);
-                        return Task::none();
-                    }
-                };
-                Task::perform(
-                    async move {
-                        let write_result = tokio::task::spawn_blocking(move || {
-                            if let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
-                                bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
-                                bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
-                                bios.power_unit, bios.time_unit,
-                            ) {
-                                warn!("Reset MSR write failed: {}", e);
-                            }
-                        }).await;
-                        Message::CpuPowerResetDone(write_result.is_ok())
-                    },
-                    |msg| msg,
-                )
-            }
+            Message::CpuPowerSyncReset => self.handle_cpu_power_sync_reset(),
             Message::CpuPowerResetDone(_ok) => {
                 // Refresh readback from hardware and update edit fields
                 // so the UI shows the BIOS defaults that were just written.
@@ -1314,6 +1286,35 @@ impl App {
         with_write_lock(&self.state.lifecycle.config, |guard| {
             f(Arc::make_mut(guard));
         });
+    }
+
+    fn handle_cpu_power_sync_reset(&mut self) -> Task<Message> {
+        self.state.cpu_power.stop_sync();
+        self.pl_custom_applied = false;
+        self.cpu_power_error = None;
+        let bios = match self.state.cpu_power.bios_defaults() {
+            Some(b) => b,
+            None => {
+                self.cpu_power_error = Some("Cannot reset: BIOS defaults not available (PawnIO may not be running)".into());
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                return Task::none();
+            }
+        };
+        Task::perform(
+            async move {
+                let write_result = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
+                        bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
+                        bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
+                        bios.power_unit, bios.time_unit,
+                    ) {
+                        warn!("Reset MSR write failed: {}", e);
+                    }
+                }).await;
+                Message::CpuPowerResetDone(write_result.is_ok())
+            },
+            |msg| msg,
+        )
     }
 
     /// Validate CPU power inputs. Returns Ok((pl1, pl2, pl1_time)) or Err(error message).

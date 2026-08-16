@@ -10,10 +10,11 @@ Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-c
 
 ## Features
 
-- **Fan Control** — Auto (firmware), manual (0–100% duty), and curve mode with an interactive editor (4 draggable points, hysteresis, and rate limiting)
-- **Battery Management** — Maximum charge limit (30–100%) with enable/disable toggle, health, voltage, and current display
+- **Fan Control** — Auto (firmware), manual (0–100% duty, optional per-fan), and curve mode with sliders (default 5 points, hysteresis, and rate limiting)
+- **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity
 - **Live Telemetry** — Real-time temperature chart (30s sliding window), per-sensor display with colored indicators, and fan RPM in the header
-- **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card, and USB-C port detection
+- **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card, and USB-C / HDMI / DP port classification
+- **CPU Power** — Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download)
 - **About Page** — Hardware info (CPU, RAM, display, BIOS) and software settings (poll rate, refresh interval)
 - **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit)
 
@@ -63,20 +64,21 @@ cargo run --release
 src/
   main.rs              — Iced 0.14 application entry point, boot function
   app.rs               — App struct, Message handlers, mutate_config helper
-  sub_state.rs         — AppState split into 6 grouped sub-state structs
+  sub_state.rs         — AppState groups (fan, thermal, peripherals, battery, system, lifecycle)
   views.rs             — UI layout (sensors, fan control, battery, misc, settings)
   types.rs             — Config structs, FanControlMode, CurveConfig, validation
   style.rs             — Colors, fonts, layout constants
   config.rs            — TOML config load/save (atomic write via tmp+rename)
   config_save_task.rs  — Debounced config save (100ms) with battery apply
   background_task.rs   — EC polling loop, fan control, expansion/PD scans
+  cpu_power.rs         — PawnIO RAPL read/write (PL1/PL2) and sync thread
   temp_chart.rs        — Canvas-based temperature line chart (30s history)
   curve_canvas.rs      — Canvas-based fan curve visualization
   fan_control.rs       — CurveStepper, rate limiting, duty calculation
   system_info.rs       — Windows API FFI (CPU, RAM, OS, display, tray)
   probe.rs             — HeightProbe widget for dynamic window sizing
   util.rs              — Time utilities, lock helpers (read_lock, with_write_lock)
-  cli/
+  cli/                 — EC wrapper only (not a command-line interface)
     ec_wrapper.rs      — EcClient wrapper around framework_lib's CrosEc
     mod.rs
   tray/
@@ -94,11 +96,11 @@ framework_lib (CrosEc) → background_task → Arc<RwLock> → UI (view reads)
 ```
 
 - **Hardware access**: `framework_lib` crate calls EC directly via kernel driver (no subprocess)
-- **Config**: `dirs::config_dir() / framework-control/config.toml`
+- **Config**: `dirs::config_dir() / framework-crate/config.toml`
 - **Background polling**: tokio task on LP-E core, 200ms–2s interval (idle slowdown)
-- **UI refresh**: self-rescheduling tick (50–1000ms), idle/hidden slows to 1s/5s
+- **UI refresh**: self-rescheduling tick (50–1000ms), idle 1s, hidden 500ms
 - **Lock strategy**: `Arc<RwLock<Arc<T>>>` for shared state, narrow lock scope (<1µs)
-- **State organization**: `AppState` split into `FanState`, `ThermalState`, `PeripheralState`, `BatteryState`, `SystemState`, `LifecycleState`
+- **State organization**: `AppState` split into `FanState`, `ThermalState`, `PeripheralState`, `BatteryState`, `SystemState`, `LifecycleState`, plus `CpuPowerState`
 
 ### Performance Optimizations
 
@@ -113,26 +115,27 @@ framework_lib (CrosEc) → background_task → Arc<RwLock> → UI (view reads)
 
 ## Configuration
 
-Config file location: `%APPDATA%/framework-control/config.toml`
+Config file location: `%APPDATA%/framework-crate/config.toml`
 
 ```toml
 [fan]
 mode = "curve"  # "disabled" | "manual" | "curve"
+unified_duty = true
+per_fan_duty = []
 
 [fan.manual]
 duty_pct = 50
 
 [fan.curve]
 poll_ms = 500
-  [fan.curve.curve]
-  points = [[40, 0], [60, 40], [75, 80], [85, 100]]
-  hysteresis_c = 2
-  rate_limit_pct_per_step = 10
+sensors = []                 # empty = hottest non-battery sensor
+points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]]
+hysteresis_c = 2
+rate_limit_pct_per_step = 10
 
-[battery]
-  [battery.charge_limit_max_pct]
-  enabled = true
-  value = 80
+[battery.charge_limit_max_pct]
+enabled = true
+value = 80
 
 [telemetry]
 poll_ms = 500
@@ -156,15 +159,21 @@ selected_sensors = []
 
 ## CPU Power Feature (PawnIO Modules)
 
-The CPU Power section reads PL1/PL2 power limits via PawnIO Modules. On first use, the required module blobs (`IntelMSR.bin`, `IntelMCHBAR.bin`) are downloaded from [PawnIO Modules Releases](https://github.com/namazso/PawnIO.Modules/releases) and cached in `%APPDATA%/framework-crate/modules/`.
+The CPU Power section reads and optionally writes PL1/PL2 via official PawnIO Modules. Those blobs are **not** in this repository and are **not** embedded in the EXE.
+
+1. Install the PawnIO driver: `winget install namazso.PawnIO` (or use **Install PawnIO** in the app).
+2. Open **CPU Power** and click **Download Modules**.
+3. The app fetches `IntelMSR.bin` and `IntelMCHBAR.bin` from [PawnIO Modules Releases](https://github.com/namazso/PawnIO.Modules/releases) (version 0.2.10), checks pinned SHA-256 hashes, and caches them in `%APPDATA%/framework-crate/modules/`.
+
+A mismatch or failed download is rejected; the files are deleted and CPU Power stays unavailable until you retry.
 
 **Requirements:**
-- PawnIO must be installed (`winget install namazso.PawnIO`)
-- Internet connection for first-time module download
+- PawnIO installed
+- Internet connection for the first download
 
 **LGPL-2.1 Compliance:**
 
-PawnIO Modules are licensed under LGPL-2.1. This project does not embed the module blobs — they are downloaded at runtime from the official repository. Source code for PawnIO Modules is available at: https://github.com/namazso/PawnIO.Modules (version 0.2.10)
+PawnIO Modules are LGPL-2.1. This project does not ship the blobs. Source: https://github.com/namazso/PawnIO.Modules (version 0.2.10)
 
 ## Icon Attribution
 
@@ -176,4 +185,4 @@ Rendering parameters: optical size 32, stroke weight 1.5, color `#7300ff` (R 115
 
 MIT
 
-This project uses PawnIO (GPL-2.0) and PawnIO Modules (LGPL-2.1) at runtime. PawnIO is loaded as a dynamically installed driver. PawnIO Modules are downloaded at runtime from the official repository, not embedded in this binary. Source code for PawnIO Modules is available at https://github.com/namazso/PawnIO.Modules.
+This project uses PawnIO (GPL-2.0) and PawnIO Modules (LGPL-2.1) at runtime. PawnIO is an optional, separately installed driver. PawnIO Modules are downloaded only when the user clicks **Download Modules** in the app; they are never stored in this repo or the EXE. `framework_lib` is BSD-3-Clause. PawnIO Modules source: https://github.com/namazso/PawnIO.Modules.
