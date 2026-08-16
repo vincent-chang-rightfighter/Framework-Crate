@@ -110,7 +110,7 @@ pub enum Message {
     CpuPowerPl1ClampedToggled(bool),
     CpuPowerPl2ClampedToggled(bool),
     CpuPowerApply,
-    CpuPowerApplied(Result<(), String>, Option<Result<(), String>>),
+    CpuPowerApplied(Result<(), String>),
     CpuPowerSyncStart,
     CpuPowerSyncStarted(Result<(), String>),
     CpuPowerSyncStop,
@@ -361,16 +361,12 @@ impl App {
                             let power_unit = info.power_unit;
                             let time_unit = info.time_unit;
                             let _ = tokio::task::spawn_blocking(move || {
-                                let (msr, mmio) = crate::cpu_power::write_msr_pl1_pl2_public(
+                                if let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
                                     pl1, pl1_en, pl1_cl, pl1_time,
                                     pl2, pl2_en, pl2_cl, pl2_time,
                                     power_unit, time_unit,
-                                );
-                                if let Err(e) = msr {
+                                ) {
                                     warn!("Init MSR write failed: {}", e);
-                                }
-                                if let Some(Err(e)) = mmio {
-                                    warn!("Init MMIO write failed: {}", e);
                                 }
                             }).await;
                         }
@@ -820,16 +816,12 @@ impl App {
                             Some(Task::perform(
                                 async move {
                                     let _ = tokio::task::spawn_blocking(move || {
-                                        let (msr, mmio) = crate::cpu_power::write_msr_pl1_pl2_public(
+                                        if let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
                                             bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
                                             bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
                                             bios.power_unit, bios.time_unit,
-                                        );
-                                        if let Err(e) = msr {
+                                        ) {
                                             warn!("Resume MSR write failed: {}", e);
-                                        }
-                                        if let Some(Err(e)) = mmio {
-                                            warn!("Resume MMIO write failed: {}", e);
                                         }
                                     }).await;
                                     Message::Tick
@@ -1141,32 +1133,26 @@ impl App {
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            let (msr, mmio) = crate::cpu_power::write_msr_pl1_pl2_public(
+                            crate::cpu_power::write_msr_pl1_pl2_public(
                                 pl1, pl1_en, pl1_cl, pl1_time,
                                 pl2, pl2_en, pl2_cl, pl2_time,
                                 power_unit, time_unit,
-                            );
-                            (msr.map_err(|e| e.to_string()), mmio.map(|r| r.map_err(|e| e.to_string())))
-                        }).await.unwrap_or_else(|e| (Err(e.to_string()), None))
+                            )
+                            .map_err(|e| e.to_string())
+                        }).await.unwrap_or_else(|e| Err(e.to_string()))
                     },
-                    |(msr, mmio)| Message::CpuPowerApplied(msr, mmio),
+                    Message::CpuPowerApplied,
                 )
             }
-            Message::CpuPowerApplied(msr_result, mmio_result) => {
-                match msr_result {
+            Message::CpuPowerApplied(result) => {
+                match result {
                     Ok(()) => {
                         self.state.cpu_power.refresh();
                         let info = self.state.cpu_power.snapshot();
                         self.apply_edit_fields_from_snapshot(&info);
-                        // Green indicator: only when MMIO also succeeded (or was skipped).
-                        let mmio_ok = mmio_result.as_ref().is_none_or(|r| r.is_ok());
-                        self.pl_custom_applied = mmio_ok;
-                        // Show MMIO warning if it failed (non-fatal).
-                        if let Some(Err(e)) = mmio_result {
-                            self.cpu_power_error = Some(format!("MMIO write skipped: {}", e));
-                        } else {
+                        self.pl_custom_applied = true;
+                        self.cpu_power_error = None;
                             self.cpu_power_error = None;
-                        }
                         // If sync was running, restart it with the newly applied values
                         // so the thread writes the updated params instead of stale ones.
                         if self.state.cpu_power.sync_enabled.load(Ordering::Acquire) {
@@ -1263,16 +1249,12 @@ impl App {
                 Task::perform(
                     async move {
                         let write_result = tokio::task::spawn_blocking(move || {
-                            let (msr, mmio) = crate::cpu_power::write_msr_pl1_pl2_public(
+                            if let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
                                 bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
                                 bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
                                 bios.power_unit, bios.time_unit,
-                            );
-                            if let Err(e) = msr {
+                            ) {
                                 warn!("Reset MSR write failed: {}", e);
-                            }
-                            if let Some(Err(e)) = mmio {
-                                warn!("Reset MMIO write failed: {}", e);
                             }
                         }).await;
                         Message::CpuPowerResetDone(write_result.is_ok())

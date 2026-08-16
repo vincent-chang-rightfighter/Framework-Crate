@@ -284,7 +284,6 @@ fn write_mmio_pl1_pl2(
 }
 
 /// Public wrapper: write MSR 0x610 (opens IntelMSR handle internally).
-/// Returns (msr_result, mmio_result).
 #[allow(clippy::too_many_arguments)]
 pub fn write_msr_pl1_pl2_public(
     pl1_watts: f64,
@@ -297,7 +296,7 @@ pub fn write_msr_pl1_pl2_public(
     pl2_time_s: f64,
     power_unit: f64,
     time_unit: f64,
-) -> (Result<(), &'static str>, Option<Result<(), &'static str>>) {
+) -> Result<(), &'static str> {
     let params = PowerLimitParams {
         pl1_watts,
         pl1_enabled,
@@ -310,22 +309,9 @@ pub fn write_msr_pl1_pl2_public(
         power_unit,
         time_unit,
     };
-    let msr_blob = match load_intel_msr_blob() {
-        Ok(b) => b,
-        Err(e) => return (Err(e), None),
-    };
-    let msr_handle = match open_handle(&msr_blob) {
-        Ok(h) => h,
-        Err(e) => return (Err(e), None),
-    };
-    let msr_result = write_msr_pl1_pl2(&msr_handle, &params);
-    // Best-effort MMIO write (official module may not support it).
-    let mmio_result = if let Ok(mchbar_handle) = load_intel_mchbar_blob().and_then(|b| open_handle(&b)) {
-        Some(write_mmio_pl1_pl2(&mchbar_handle, &params))
-    } else {
-        None
-    };
-    (msr_result, mmio_result)
+    let msr_blob = load_intel_msr_blob()?;
+    let msr_handle = open_handle(&msr_blob)?;
+    write_msr_pl1_pl2(&msr_handle, &params)
 }
 
 /// Loaded PawnIO handle with associated DLL functions.
