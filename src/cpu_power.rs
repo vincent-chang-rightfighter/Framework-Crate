@@ -1,4 +1,5 @@
 use std::ffi::CString;
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -65,6 +66,7 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
 
     let output = std::process::Command::new("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path.to_str().unwrap()])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .output()
         .map_err(|_| "failed to run powershell")?;
     let _ = std::fs::remove_file(&script_path);
@@ -151,7 +153,7 @@ impl CpuPowerInfo {
                 format!("{:.1}", self.pl2_time_s),
             )
         } else {
-            (String::new(), String::new(), true, true, false, false, "28.0".to_string(), "2.0".to_string())
+            (String::new(), String::new(), true, true, false, false, String::new(), String::new())
         }
     }
 }
@@ -193,7 +195,8 @@ fn encode_time_window(time_s: f64, time_unit: f64) -> (u32, u32) {
 /// Bits [14:0] = power limit, [15] = enable, [16] = clamp,
 /// [21:17] = time window Y (5 bits), [23:22] = time window Z (2 bits).
 fn encode_power_limit(watts: f64, enabled: bool, clamped: bool, unit: f64, time_y: u32, time_z: u32) -> u32 {
-    let raw = (watts / unit).round() as u32;
+    let max_raw = ((1u32 << 15) - 1) as f64; // 15-bit field: max 32767
+    let raw = (watts / unit).round().clamp(0.0, max_raw) as u32;
     let mut val = raw & 0x7FFF;
     if enabled { val |= 1 << 15; }
     if clamped { val |= 1 << 16; }
@@ -225,6 +228,9 @@ fn write_msr_pl1_pl2(
     msr_handle: &PawnioHandle,
     params: &PowerLimitParams,
 ) -> Result<(), &'static str> {
+    if params.power_unit <= 0.0 || params.time_unit <= 0.0 {
+        return Err("invalid RAPL units (power_unit or time_unit is zero)");
+    }
     let (pl1_y, pl1_z) = encode_time_window(params.pl1_time_s, params.time_unit);
     let (pl2_y, pl2_z) = encode_time_window(params.pl2_time_s, params.time_unit);
 
@@ -253,6 +259,9 @@ fn write_mmio_pl1_pl2(
     mchbar_handle: &PawnioHandle,
     params: &PowerLimitParams,
 ) -> Result<(), &'static str> {
+    if params.power_unit <= 0.0 || params.time_unit <= 0.0 {
+        return Err("invalid RAPL units (power_unit or time_unit is zero)");
+    }
     let (pl1_y, pl1_z) = encode_time_window(params.pl1_time_s, params.time_unit);
     let (pl2_y, pl2_z) = encode_time_window(params.pl2_time_s, params.time_unit);
 
@@ -275,6 +284,7 @@ fn write_mmio_pl1_pl2(
 }
 
 /// Public wrapper: write MSR 0x610 (opens IntelMSR handle internally).
+/// Returns (msr_result, mmio_result).
 #[allow(clippy::too_many_arguments)]
 pub fn write_msr_pl1_pl2_public(
     pl1_watts: f64,
@@ -287,7 +297,7 @@ pub fn write_msr_pl1_pl2_public(
     pl2_time_s: f64,
     power_unit: f64,
     time_unit: f64,
-) -> Result<(), &'static str> {
+) -> (Result<(), &'static str>, Option<Result<(), &'static str>>) {
     let params = PowerLimitParams {
         pl1_watts,
         pl1_enabled,
@@ -300,14 +310,22 @@ pub fn write_msr_pl1_pl2_public(
         power_unit,
         time_unit,
     };
-    let msr_blob = load_intel_msr_blob()?;
-    let msr_handle = open_handle(&msr_blob)?;
-    write_msr_pl1_pl2(&msr_handle, &params)?;
+    let msr_blob = match load_intel_msr_blob() {
+        Ok(b) => b,
+        Err(e) => return (Err(e), None),
+    };
+    let msr_handle = match open_handle(&msr_blob) {
+        Ok(h) => h,
+        Err(e) => return (Err(e), None),
+    };
+    let msr_result = write_msr_pl1_pl2(&msr_handle, &params);
     // Best-effort MMIO write (official module may not support it).
-    if let Ok(mchbar_handle) = load_intel_mchbar_blob().and_then(|b| open_handle(&b)) {
-        let _ = write_mmio_pl1_pl2(&mchbar_handle, &params);
-    }
-    Ok(())
+    let mmio_result = if let Ok(mchbar_handle) = load_intel_mchbar_blob().and_then(|b| open_handle(&b)) {
+        Some(write_mmio_pl1_pl2(&mchbar_handle, &params))
+    } else {
+        None
+    };
+    (msr_result, mmio_result)
 }
 
 /// Loaded PawnIO handle with associated DLL functions.
@@ -339,6 +357,7 @@ pub fn install_pawnio() -> Result<(), &'static str> {
     tracing::info!("Installing PawnIO via winget...");
     let status = Command::new("winget")
         .args(["install", "-e", "--id", "namazso.PawnIO", "--accept-package-agreements", "--accept-source-agreements"])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .status()
         .map_err(|_| "failed to run winget")?;
     if status.success() {
@@ -547,6 +566,7 @@ pub fn read_cpu_power() -> CpuPowerInfo {
 /// to counter EC overwriting.
 struct SyncThread {
     running: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -554,6 +574,7 @@ impl SyncThread {
     fn new() -> Self {
         Self {
             running: Arc::new(AtomicBool::new(false)),
+            alive: Arc::new(AtomicBool::new(false)),
             handle: None,
         }
     }
@@ -564,25 +585,30 @@ impl SyncThread {
 
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
+        let alive = Arc::new(AtomicBool::new(true));
+        let alive_clone = alive.clone();
 
         let handle = std::thread::Builder::new()
             .name("cpu-power-sync".to_string())
             .spawn(move || {
                 sync_thread_main(running_clone, params);
+                alive_clone.store(false, Ordering::Release);
             })
             .map_err(|_| "failed to spawn sync thread")?;
 
         self.running = running;
+        self.alive = alive;
         self.handle = Some(handle);
         Ok(())
     }
 
     /// Stop the sync thread.
     fn stop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
+        self.running.store(false, Ordering::Release);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+        self.alive.store(false, Ordering::Release);
     }
 }
 
@@ -746,6 +772,12 @@ impl CpuPowerState {
         Ok(())
     }
 
+    /// Check if the sync thread is still alive (hasn't exited on its own).
+    pub fn is_sync_alive(&self) -> bool {
+        let thread = self.sync_thread.lock();
+        thread.alive.load(Ordering::Acquire)
+    }
+
     /// Stop the sync thread.
     pub fn stop_sync(&self) {
         let mut thread = self.sync_thread.lock();
@@ -757,28 +789,62 @@ impl CpuPowerState {
 /// Cached PawnIO version.
 static PAWNIO_VERSION: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
 
-/// Fetch PawnIO version from winget list (internal).
-fn fetch_pawnio_version() -> Option<String> {
-    use std::process::Command;
-    let output = Command::new("winget")
-        .args(["list", "--id", "namazso.PawnIO", "--accept-source-agreements"])
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if line.contains("namazso.PawnIO") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            for part in &parts {
-                if part.chars().any(|c| c.is_ascii_digit()) && part.contains('.') {
-                    return Some(part.to_string());
-            }
+/// Read PawnIO version from DLL file metadata (no subprocess needed).
+fn fetch_pawnio_version_from_dll() -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
+
+    let path: Vec<u16> = std::ffi::OsStr::new(DLL_PATH)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mut dummy: u32 = 0;
+        let size = GetFileVersionInfoSizeW(path.as_ptr(), &mut dummy);
+        if size == 0 {
+            return None;
         }
+
+        let mut buf: Vec<u8> = vec![0; size as usize];
+        if GetFileVersionInfoW(path.as_ptr(), 0, size, buf.as_mut_ptr() as *mut _) == 0 {
+            return None;
+        }
+
+        // Query the root block to get fixed file info (contains product version).
+        let mut ffi_ptr: *mut std::ffi::c_void = ptr::null_mut();
+        let mut ffi_len: u32 = 0;
+        let root: Vec<u16> = std::ffi::OsStr::new("\\")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        if VerQueryValueW(
+            buf.as_ptr() as *const _,
+            root.as_ptr(),
+            &mut ffi_ptr,
+            &mut ffi_len,
+        ) == 0 || ffi_ptr.is_null()
+        {
+            return None;
+        }
+
+        // VS_FIXEDFILEINFO layout: first 2 u32 are Signature and StrucVersion,
+        // then dwFileVersionMS (offset 8), dwFileVersionLS (offset 12),
+        // then dwProductVersionMS (offset 16), dwProductVersionLS (offset 20).
+        let ffi = ffi_ptr as *const u8;
+        let ms = ptr::read_unaligned(ffi.add(16) as *const u32);
+        let ls = ptr::read_unaligned(ffi.add(20) as *const u32);
+
+        let major = (ms >> 16) & 0xFFFF;
+        let minor = ms & 0xFFFF;
+        let build = (ls >> 16) & 0xFFFF;
+        let patch = ls & 0xFFFF;
+        Some(format!("{}.{}.{}.{}", major, minor, build, patch))
     }
-    }
-    None
 }
 
-/// Get PawnIO version (cached). Call at startup and after install.
+/// Get PawnIO version (cached).
 pub fn pawnio_version() -> Option<String> {
     {
         let guard = PAWNIO_VERSION.read();
@@ -786,7 +852,11 @@ pub fn pawnio_version() -> Option<String> {
             return Some(v.clone());
         }
     }
-    let ver = fetch_pawnio_version();
+    let ver = if is_pawnio_installed() {
+        fetch_pawnio_version_from_dll().or_else(|| Some("installed".to_string()))
+    } else {
+        None
+    };
     *PAWNIO_VERSION.write() = ver.clone();
     ver
 }

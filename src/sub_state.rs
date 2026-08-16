@@ -200,6 +200,8 @@ pub struct LifecycleState {
     /// sleep/hibernate. The background task watches this and resets the
     /// EC client and fan state when it changes.
     pub last_resume_ts: Arc<AtomicU64>,
+    /// AC→battery transition detected: auto-reset PL1/PL2 on next tick.
+    pub pl_reset_pending: Arc<AtomicBool>,
 }
 
 impl Default for LifecycleState {
@@ -213,6 +215,7 @@ impl Default for LifecycleState {
             bg_config_save_failed: Arc::new(AtomicBool::new(false)),
             view_dirty: Arc::new(AtomicBool::new(true)),
             last_resume_ts: Arc::new(AtomicU64::new(0)),
+            pl_reset_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 }

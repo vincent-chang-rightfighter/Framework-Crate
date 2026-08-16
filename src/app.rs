@@ -74,6 +74,7 @@ pub enum Message {
     ChargeLimitToggled(bool),
     ChargeLimitChanged(u32),
     ToggleSensorSettings,
+    ToggleCpuPowerSettings,
     SensorToggled(usize, bool),
     PollRateChanged(u64),
     UiRefreshRateChanged(u64),
@@ -109,17 +110,19 @@ pub enum Message {
     CpuPowerPl1ClampedToggled(bool),
     CpuPowerPl2ClampedToggled(bool),
     CpuPowerApply,
-    CpuPowerApplied(Result<(), String>),
+    CpuPowerApplied(Result<(), String>, Option<Result<(), String>>),
     CpuPowerSyncStart,
     CpuPowerSyncStarted(Result<(), String>),
     CpuPowerSyncStop,
     CpuPowerSyncReset,
+    CpuPowerResetDone(bool),
 }
 
 pub struct App {
     pub cli_present: bool,
     pub startup_error: Option<String>,
     pub show_sensor_settings: bool,
+    pub show_cpu_power_settings: bool,
     pub show_battery_details: bool,
     pub show_settings: bool,
     pub init_complete: bool,
@@ -166,6 +169,8 @@ pub struct App {
     pub pl2_enabled: bool,
     pub pl1_clamped: bool,
     pub pl2_clamped: bool,
+    pub cpu_power_error: Option<String>,
+    pub pl_custom_applied: bool,
 }
 
 pub struct SystemInfo {
@@ -255,6 +260,7 @@ impl App {
                 bg_config_save_failed: Arc::new(AtomicBool::new(false)),
                 view_dirty: Arc::new(AtomicBool::new(true)),
                 last_resume_ts: Arc::new(AtomicU64::new(0)),
+                pl_reset_pending: Arc::new(AtomicBool::new(false)),
             },
         };
 
@@ -272,6 +278,7 @@ impl App {
             cli_present: false,
             startup_error: None,
             show_sensor_settings: false,
+            show_cpu_power_settings: false,
             show_battery_details: false,
             show_settings: false,
             init_complete: false,
@@ -307,17 +314,16 @@ impl App {
             modules_download_error: None,
             pl1_edit: String::new(),
             pl2_edit: String::new(),
-            pl1_time_edit: "28.0".to_string(),
+            pl1_time_edit: String::new(),
             pl1_enabled: true,
             pl2_enabled: true,
             pl1_clamped: false,
             pl2_clamped: false,
+            cpu_power_error: None,
+            pl_custom_applied: false,
         };
 
         let init_task = Task::perform(async move {
-            // Pre-fetch PawnIO version at startup (blocking, but fast).
-            let _ = tokio::task::spawn_blocking(|| { crate::cpu_power::pawnio_version(); }).await;
-
             match tokio::task::spawn_blocking(cli::EcClient::new).await {
                 Ok(Ok(ec)) => {
                     state.system.cli_available.store(true, Ordering::Release);
@@ -355,11 +361,17 @@ impl App {
                             let power_unit = info.power_unit;
                             let time_unit = info.time_unit;
                             let _ = tokio::task::spawn_blocking(move || {
-                                crate::cpu_power::write_msr_pl1_pl2_public(
+                                let (msr, mmio) = crate::cpu_power::write_msr_pl1_pl2_public(
                                     pl1, pl1_en, pl1_cl, pl1_time,
                                     pl2, pl2_en, pl2_cl, pl2_time,
                                     power_unit, time_unit,
-                                )
+                                );
+                                if let Err(e) = msr {
+                                    warn!("Init MSR write failed: {}", e);
+                                }
+                                if let Some(Err(e)) = mmio {
+                                    warn!("Init MMIO write failed: {}", e);
+                                }
                             }).await;
                         }
                     }
@@ -442,6 +454,12 @@ impl App {
         self.cli_present = self.state.system.cli_available.load(Ordering::Acquire);
         self.config_save_failed = self.state.lifecycle.bg_config_save_failed.load(Ordering::Relaxed);
 
+        // AC→battery: auto-reset PL1/PL2 to BIOS defaults
+        if self.state.lifecycle.pl_reset_pending.swap(false, Ordering::Acquire) && self.pl_custom_applied {
+            tracing::info!("AC→battery: resetting PL1/PL2 to BIOS defaults");
+            let _ = self.update(Message::CpuPowerSyncReset);
+        }
+
         let now_ms = crate::util::current_time_ms();
         let idle = now_ms.saturating_sub(self.state.lifecycle.last_interaction_ts.load(Ordering::Acquire)) > IDLE_THRESHOLD_MS;
         let visible = self.state.lifecycle.visible.load(Ordering::Acquire);
@@ -520,6 +538,15 @@ impl App {
                 self.icon_create_in_flight = false;
                 tracing::info!("Tray icon ready, window hidden");
             }
+        }
+
+        // Detect sync thread death (MSR write failure caused it to exit).
+        if self.state.cpu_power.sync_enabled.load(Ordering::Acquire)
+            && !self.state.cpu_power.is_sync_alive()
+        {
+            self.state.cpu_power.sync_enabled.store(false, Ordering::Release);
+            self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+            warn!("Sync thread exited unexpectedly");
         }
 
         tick_task(next_ms)
@@ -782,28 +809,28 @@ impl App {
                         tracing::warn!("[RESUME] System resumed from sleep/hibernate at {}", now);
                         // Stop sync thread — hardware state is undefined after resume.
                         self.state.cpu_power.stop_sync();
+                        self.pl_custom_applied = false;
                         // Re-read MSR/MMIO after resume and update edit fields.
                         self.state.cpu_power.refresh();
                         let info = self.state.cpu_power.snapshot();
-                        let (pl1, pl2, p1en, p2en, p1cl, p2cl, t1, _t2) = info.init_edit_fields();
-                        self.pl1_edit = pl1;
-                        self.pl2_edit = pl2;
-                        self.pl1_time_edit = t1;
-                        self.pl1_enabled = p1en;
-                        self.pl2_enabled = p2en;
-                        self.pl1_clamped = p1cl;
-                        self.pl2_clamped = p2cl;
+                        self.apply_edit_fields_from_snapshot(&info);
                         self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                         // Write BIOS defaults back to MSR — BIOS/EC may have reset them.
                         if let Some(bios) = self.state.cpu_power.bios_defaults() {
                             Some(Task::perform(
                                 async move {
                                     let _ = tokio::task::spawn_blocking(move || {
-                                        crate::cpu_power::write_msr_pl1_pl2_public(
+                                        let (msr, mmio) = crate::cpu_power::write_msr_pl1_pl2_public(
                                             bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
                                             bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
                                             bios.power_unit, bios.time_unit,
-                                        )
+                                        );
+                                        if let Err(e) = msr {
+                                            warn!("Resume MSR write failed: {}", e);
+                                        }
+                                        if let Some(Err(e)) = mmio {
+                                            warn!("Resume MMIO write failed: {}", e);
+                                        }
                                     }).await;
                                     Message::Tick
                                 },
@@ -910,6 +937,10 @@ impl App {
             }
             Message::ToggleSensorSettings => {
                 self.show_sensor_settings = !self.show_sensor_settings;
+                Task::none()
+            }
+            Message::ToggleCpuPowerSettings => {
+                self.show_cpu_power_settings = !self.show_cpu_power_settings;
                 Task::none()
             }
             Message::SettingsToggled => {
@@ -1019,19 +1050,15 @@ impl App {
             Message::PawnIOInstalled(result) => {
                 if let Err(e) = result {
                     tracing::error!("PawnIO install failed: {}", e);
+                    self.cpu_power_error = Some(format!("PawnIO install failed: {}", e));
                 } else {
                     crate::cpu_power::pawnio_version(); // refresh version cache
                     self.state.cpu_power.refresh();
                     let info = self.state.cpu_power.snapshot();
-                    let (pl1, pl2, p1en, p2en, p1cl, p2cl, t1, _t2) = info.init_edit_fields();
-                    self.pl1_edit = pl1;
-                    self.pl2_edit = pl2;
-                    self.pl1_time_edit = t1;
-                    self.pl1_enabled = p1en;
-                    self.pl2_enabled = p2en;
-                    self.pl1_clamped = p1cl;
-                    self.pl2_clamped = p2cl;
+                    self.apply_edit_fields_from_snapshot(&info);
+                    self.cpu_power_error = None;
                 }
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
             Message::DownloadPawnIOModules => {
@@ -1046,14 +1073,7 @@ impl App {
                         self.modules_download_error = None;
                         self.state.cpu_power.refresh();
                         let info = self.state.cpu_power.snapshot();
-                        let (pl1, pl2, p1en, p2en, p1cl, p2cl, t1, _t2) = info.init_edit_fields();
-                        self.pl1_edit = pl1;
-                        self.pl2_edit = pl2;
-                        self.pl1_time_edit = t1;
-                        self.pl1_enabled = p1en;
-                        self.pl2_enabled = p2en;
-                        self.pl1_clamped = p1cl;
-                        self.pl2_clamped = p2cl;
+                        self.apply_edit_fields_from_snapshot(&info);
                     }
                     Err(e) => {
                         tracing::error!("PawnIO Modules download failed: {}", e);
@@ -1064,16 +1084,19 @@ impl App {
             }
             Message::CpuPowerPl1Changed(val) => {
                 self.pl1_edit = val;
+                self.cpu_power_error = None;
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
             Message::CpuPowerPl2Changed(val) => {
                 self.pl2_edit = val;
+                self.cpu_power_error = None;
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
             Message::CpuPowerPl1TimeChanged(val) => {
                 self.pl1_time_edit = val;
+                self.cpu_power_error = None;
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
@@ -1098,9 +1121,15 @@ impl App {
                 Task::none()
             }
             Message::CpuPowerApply => {
-                let pl1: f64 = self.pl1_edit.parse().unwrap_or(0.0);
-                let pl2: f64 = self.pl2_edit.parse().unwrap_or(0.0);
-                let pl1_time: f64 = self.pl1_time_edit.parse().unwrap_or(28.0);
+                let (pl1, pl2, pl1_time) = match self.validate_cpu_power_inputs() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.cpu_power_error = Some(e);
+                        self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                        return Task::none();
+                    }
+                };
+                self.cpu_power_error = None;
                 let pl1_en = self.pl1_enabled;
                 let pl2_en = self.pl2_enabled;
                 let pl1_cl = self.pl1_clamped;
@@ -1112,41 +1141,68 @@ impl App {
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            crate::cpu_power::write_msr_pl1_pl2_public(
+                            let (msr, mmio) = crate::cpu_power::write_msr_pl1_pl2_public(
                                 pl1, pl1_en, pl1_cl, pl1_time,
                                 pl2, pl2_en, pl2_cl, pl2_time,
                                 power_unit, time_unit,
-                            )
-                            .map_err(|e| e.to_string())
-                        }).await.unwrap_or_else(|e| Err(e.to_string()))
+                            );
+                            (msr.map_err(|e| e.to_string()), mmio.map(|r| r.map_err(|e| e.to_string())))
+                        }).await.unwrap_or_else(|e| (Err(e.to_string()), None))
                     },
-                    Message::CpuPowerApplied,
+                    |(msr, mmio)| Message::CpuPowerApplied(msr, mmio),
                 )
             }
-            Message::CpuPowerApplied(result) => {
-                match result {
+            Message::CpuPowerApplied(msr_result, mmio_result) => {
+                match msr_result {
                     Ok(()) => {
                         self.state.cpu_power.refresh();
                         let info = self.state.cpu_power.snapshot();
-                        let (pl1, pl2, p1en, p2en, p1cl, p2cl, t1, _t2) = info.init_edit_fields();
-                        self.pl1_edit = pl1;
-                        self.pl2_edit = pl2;
-                        self.pl1_time_edit = t1;
-                        self.pl1_enabled = p1en;
-                        self.pl2_enabled = p2en;
-                        self.pl1_clamped = p1cl;
-                        self.pl2_clamped = p2cl;
+                        self.apply_edit_fields_from_snapshot(&info);
+                        // Green indicator: only when MMIO also succeeded (or was skipped).
+                        let mmio_ok = mmio_result.as_ref().is_none_or(|r| r.is_ok());
+                        self.pl_custom_applied = mmio_ok;
+                        // Show MMIO warning if it failed (non-fatal).
+                        if let Some(Err(e)) = mmio_result {
+                            self.cpu_power_error = Some(format!("MMIO write skipped: {}", e));
+                        } else {
+                            self.cpu_power_error = None;
+                        }
+                        // If sync was running, restart it with the newly applied values
+                        // so the thread writes the updated params instead of stale ones.
+                        if self.state.cpu_power.sync_enabled.load(Ordering::Acquire) {
+                            let info = self.state.cpu_power.snapshot();
+                            let _ = self.state.cpu_power.start_sync(
+                                self.pl1_edit.parse().unwrap_or(info.pl1_msr),
+                                self.pl1_enabled,
+                                self.pl1_clamped,
+                                self.pl1_time_edit.parse().unwrap_or(info.pl1_time_s),
+                                self.pl2_edit.parse().unwrap_or(info.pl2_msr),
+                                self.pl2_enabled,
+                                self.pl2_clamped,
+                                info.pl2_time_s,
+                                info.power_unit,
+                                info.time_unit,
+                            );
+                        }
                     }
                     Err(e) => {
                         tracing::error!("Failed to write PL1/PL2: {}", e);
+                        self.cpu_power_error = Some(e);
                     }
                 }
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
             Message::CpuPowerSyncStart => {
-                let pl1: f64 = self.pl1_edit.parse().unwrap_or(0.0);
-                let pl2: f64 = self.pl2_edit.parse().unwrap_or(0.0);
-                let pl1_time: f64 = self.pl1_time_edit.parse().unwrap_or(28.0);
+                let (pl1, pl2, pl1_time) = match self.validate_cpu_power_inputs() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.cpu_power_error = Some(e);
+                        self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                        return Task::none();
+                    }
+                };
+                self.cpu_power_error = None;
                 let pl1_en = self.pl1_enabled;
                 let pl2_en = self.pl2_enabled;
                 let pl1_cl = self.pl1_clamped;
@@ -1174,10 +1230,12 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.state.cpu_power.sync_enabled.store(true, Ordering::Release);
+                        self.cpu_power_error = None;
                         tracing::info!("CPU power sync started");
                     }
                     Err(e) => {
                         tracing::error!("Failed to start CPU power sync: {}", e);
+                        self.cpu_power_error = Some(format!("Sync start failed: {}", e));
                     }
                 }
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
@@ -1190,30 +1248,46 @@ impl App {
             }
             Message::CpuPowerSyncReset => {
                 self.state.cpu_power.stop_sync();
+                self.pl_custom_applied = false;
+                self.cpu_power_error = None;
                 // Use BIOS defaults captured at startup (not current MSR values
                 // which may have been modified by EC or user).
                 let bios = match self.state.cpu_power.bios_defaults() {
                     Some(b) => b,
-                    None => return Task::none(),
+                    None => {
+                        self.cpu_power_error = Some("Cannot reset: BIOS defaults not available (PawnIO may not be running)".into());
+                        self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                        return Task::none();
+                    }
                 };
                 Task::perform(
                     async move {
-                        tokio::task::spawn_blocking(move || {
-                            crate::cpu_power::write_msr_pl1_pl2_public(
+                        let write_result = tokio::task::spawn_blocking(move || {
+                            let (msr, mmio) = crate::cpu_power::write_msr_pl1_pl2_public(
                                 bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
                                 bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
                                 bios.power_unit, bios.time_unit,
-                            )
-                            .map_err(|e| e.to_string())
-                        }).await.unwrap_or_else(|e| Err(e.to_string()))
+                            );
+                            if let Err(e) = msr {
+                                warn!("Reset MSR write failed: {}", e);
+                            }
+                            if let Some(Err(e)) = mmio {
+                                warn!("Reset MMIO write failed: {}", e);
+                            }
+                        }).await;
+                        Message::CpuPowerResetDone(write_result.is_ok())
                     },
-                    |result| {
-                        if let Err(e) = result {
-                            tracing::error!("Failed to reset PL1/PL2: {}", e);
-                        }
-                        Message::Tick
-                    },
+                    |msg| msg,
                 )
+            }
+            Message::CpuPowerResetDone(_ok) => {
+                // Refresh readback from hardware and update edit fields
+                // so the UI shows the BIOS defaults that were just written.
+                self.state.cpu_power.refresh();
+                let info = self.state.cpu_power.snapshot();
+                self.apply_edit_fields_from_snapshot(&info);
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
             }
             _ => Task::none(),
         }
@@ -1258,6 +1332,38 @@ impl App {
         with_write_lock(&self.state.lifecycle.config, |guard| {
             f(Arc::make_mut(guard));
         });
+    }
+
+    /// Validate CPU power inputs. Returns Ok((pl1, pl2, pl1_time)) or Err(error message).
+    fn validate_cpu_power_inputs(&self) -> Result<(f64, f64, f64), String> {
+        let pl1: f64 = self.pl1_edit.parse().map_err(|_| "PL1 is not a valid number".to_string())?;
+        let pl2: f64 = self.pl2_edit.parse().map_err(|_| "PL2 is not a valid number".to_string())?;
+        let pl1_time: f64 = self.pl1_time_edit.parse().map_err(|_| "PL1 time is not a valid number".to_string())?;
+        if pl1 <= 0.0 {
+            return Err("PL1 must be greater than 0W".to_string());
+        }
+        if pl2 <= 0.0 {
+            return Err("PL2 must be greater than 0W".to_string());
+        }
+        if pl1_time <= 0.0 {
+            return Err("PL1 time must be greater than 0s".to_string());
+        }
+        if pl1 > pl2 {
+            return Err(format!("PL1 ({:.1}W) must not exceed PL2 ({:.1}W)", pl1, pl2));
+        }
+        Ok((pl1, pl2, pl1_time))
+    }
+
+    /// Populate edit fields from a CPU power snapshot.
+    fn apply_edit_fields_from_snapshot(&mut self, info: &crate::cpu_power::CpuPowerInfo) {
+        let (pl1, pl2, p1en, p2en, p1cl, p2cl, t1, _t2) = info.init_edit_fields();
+        self.pl1_edit = pl1;
+        self.pl2_edit = pl2;
+        self.pl1_time_edit = t1;
+        self.pl1_enabled = p1en;
+        self.pl2_enabled = p2en;
+        self.pl1_clamped = p1cl;
+        self.pl2_clamped = p2cl;
     }
 
     fn close_window(&self) -> Task<Message> {

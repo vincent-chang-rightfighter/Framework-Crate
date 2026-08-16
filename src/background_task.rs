@@ -342,6 +342,12 @@ pub fn spawn(state: AppState) {
                         let ec_clone = Arc::clone(&ec);
                         if let Ok(Ok(bat)) = tokio::task::spawn_blocking(move || ec_clone.power()).await {
                             let ac_now = bat.ac_present == Some(true);
+                            // Detect AC→battery transition: signal PL reset on next tick.
+                            let ac_was = bg_state2.battery.prev_ac_present.load(Ordering::Acquire);
+                            if ac_was && !ac_now {
+                                bg_state2.lifecycle.pl_reset_pending.store(true, Ordering::Release);
+                                tracing::info!("AC→battery transition detected, PL1/PL2 reset pending");
+                            }
                             bg_state2.battery.prev_ac_present.store(ac_now, Ordering::Release);
 
                             with_write_lock(&bg_state2.battery.info, |guard| {
