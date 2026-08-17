@@ -22,6 +22,36 @@ const AUTO_WIDTH: f32 = 900.0;
 /// Ceiling for the auto-resized window height (logical px), so the window
 /// never outgrows the screen work area (fan curve mode can be very tall).
 const AUTO_MAX_HEIGHT: f32 = 1100.0;
+/// Maximum number of debug report files kept in the temp directory.
+const MAX_DEBUG_REPORTS: usize = 5;
+
+/// Delete the oldest `framework_crate_debug_*.txt` files in `dir` until at
+/// most `keep` remain. Older reports are stale snapshots that only waste
+/// temp space, so each new report reaps the surplus.
+fn prune_debug_reports(dir: std::path::PathBuf, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut reports: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("framework_crate_debug_")
+                .then(|| e.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (t, e.path())))
+                .flatten()
+        })
+        .collect();
+    reports.sort_by_key(|(t, _)| *t);
+    while reports.len() > keep {
+        if let Some((_, oldest)) = reports.first() {
+            let _ = std::fs::remove_file(oldest);
+            reports.remove(0);
+        } else {
+            break;
+        }
+    }
+}
 
 /// Execute a closure on the EC client via spawn_blocking. If the EC client
 /// is not available, the task completes silently. Errors from the closure
@@ -1093,6 +1123,7 @@ impl App {
                     .as_secs();
                 let path = std::env::temp_dir().join(format!("framework_crate_debug_{}.txt", ts));
                 let _ = std::fs::write(&path, &report);
+                prune_debug_reports(std::env::temp_dir(), MAX_DEBUG_REPORTS);
                 let _ = std::process::Command::new("notepad.exe")
                     .arg(&path)
                     .spawn();
