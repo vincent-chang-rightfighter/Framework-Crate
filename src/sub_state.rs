@@ -103,6 +103,11 @@ pub struct PeripheralState {
     pub pd_ports: Arc<RwLock<Arc<Vec<cli::ec_wrapper::UsbCPort>>>>,
     /// History of PD port snapshots (for stability classification).
     pub pd_ports_history: Arc<RwLock<Arc<PdPortsHistory>>>,
+    /// Ports that have ever reported a Sink power role (index = port number).
+    /// Only USB-C ports can sink, so once seen these ports are permanently
+    /// USB-C and must never be reclassified as USB-A even if the short
+    /// history window no longer contains the Sink samples.
+    pub pd_usb_c_seen: Arc<RwLock<Arc<Vec<bool>>>>,
 }
 
 impl Default for PeripheralState {
@@ -112,6 +117,7 @@ impl Default for PeripheralState {
             expansion_cards: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             pd_ports: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             pd_ports_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
+            pd_usb_c_seen: Arc::new(RwLock::new(Arc::new(Vec::new()))),
         }
     }
 }
@@ -122,6 +128,7 @@ pub struct PeripheralSnapshot {
     pub expansion_cards: Arc<Vec<cli::ec_wrapper::ExpansionCard>>,
     pub pd_ports: Arc<Vec<cli::ec_wrapper::UsbCPort>>,
     pub pd_ports_history: Arc<PdPortsHistory>,
+    pub pd_usb_c_seen: Arc<Vec<bool>>,
 }
 
 impl PeripheralState {
@@ -132,6 +139,7 @@ impl PeripheralState {
             expansion_cards: Arc::clone(&read_lock(&self.expansion_cards)),
             pd_ports: Arc::clone(&read_lock(&self.pd_ports)),
             pd_ports_history: Arc::clone(&read_lock(&self.pd_ports_history)),
+            pd_usb_c_seen: Arc::clone(&read_lock(&self.pd_usb_c_seen)),
         }
     }
 }

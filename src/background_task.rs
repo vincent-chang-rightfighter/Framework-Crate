@@ -16,11 +16,27 @@ use crate::temp_chart;
 /// the fixed 10s expansion scan interval gives ~20-30s of history.
 const MAX_PD_HISTORY: usize = 3;
 
+/// Consecutive EC read failures tolerated before forcing a client
+/// reinitialization. Recovers from a dead EC driver after sleep/resume
+/// even if the tray's PowerResumed event was missed.
+const MAX_EC_IO_FAILURES: u32 = 5;
+
 /// Reset the EC client and mark it unavailable so the next loop iteration
 /// will reinitialize it. Called when a spawn_blocking panics, indicating
 /// the EC may be in a bad state.
 fn reset_ec_on_panic(state: &AppState) {
     warn!("Resetting EC client after spawn panic");
+    state.system.cli_available.store(false, Ordering::Release);
+    with_write_lock(&state.system.ec_client, |guard| {
+        *guard = Arc::new(None);
+    });
+}
+
+/// Force EC client reinitialization after consecutive I/O failures. The
+/// driver can go stale after sleep/resume (or any missed PowerResumed
+/// event); recreating the client and reopening the device recovers it.
+fn reset_ec_after_failures(state: &AppState, failures: u32) {
+    warn!("EC unresponsive after {} consecutive read failures, reinitializing client", failures);
     state.system.cli_available.store(false, Ordering::Release);
     with_write_lock(&state.system.ec_client, |guard| {
         *guard = Arc::new(None);
@@ -80,6 +96,31 @@ fn push_pd_ports_history(
             h.pop_front();
         }
         *hist = Arc::new(h);
+    });
+}
+
+/// Permanently mark any port seen reporting a Sink power role as USB-C.
+/// Only USB-C ports can sink, so the marker never expires — this keeps a
+/// USB-C expansion-card port from being reclassified as USB-A once its
+/// short history window no longer contains the idle Sink samples.
+fn mark_pd_usb_c_seen(
+    ports: &[cli::ec_wrapper::UsbCPort],
+    seen_ref: &Arc<RwLock<Arc<Vec<bool>>>>,
+) {
+    if !ports.iter().any(|p| p.power_role == Some("Sink")) {
+        return;
+    }
+    with_write_lock(seen_ref, |guard| {
+        let mut seen = (**guard).clone();
+        if seen.len() < ports.len() {
+            seen.resize(ports.len(), false);
+        }
+        for p in ports {
+            if p.power_role == Some("Sink") {
+                seen[p.port as usize] = true;
+            }
+        }
+        *guard = Arc::new(seen);
     });
 }
 
@@ -245,6 +286,7 @@ pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<cli::
         with_write_lock(&pd_ports_ref, |guard| {
             *guard = Arc::new(ports);
         });
+        mark_pd_usb_c_seen(&read_lock(&pd_ports_ref), &state.peripherals.pd_usb_c_seen);
         push_pd_ports_history(&pd_ports_ref, &pd_history_ref);
     }
     if let Ok(cards) = exp_result {
@@ -269,8 +311,28 @@ pub fn spawn(state: AppState) {
                     let init_config = read_lock(&bg_state2.lifecycle.config);
                     (init_config.fan.mode, matches!(init_config.fan.mode, crate::types::FanControlMode::Manual))
                 };
-                let mut last_fan_mode: Option<crate::types::FanControlMode> = Some(init_fan_mode);
+                // Startup in Disabled (Auto) mode must still restore firmware
+                // fan control: the EC may hold a stale manual duty from a
+                // previous session (crash or "quit without restore"). Seed
+                // last_fan_mode as None so the Disabled branch's "entered
+                // Disabled" action runs once on the first iteration. Other
+                // modes keep Some(init) so their first iteration is not
+                // treated as a mode change (which would discard the
+                // saved-duty ramp seed).
+                let mut last_fan_mode: Option<crate::types::FanControlMode> =
+                    if init_fan_mode == crate::types::FanControlMode::Disabled {
+                        None
+                    } else {
+                        Some(init_fan_mode)
+                    };
                 let mut last_manual_duty: Option<u32> = None;
+                let mut consecutive_ec_failures: u32 = 0;
+                // True on the iteration right after a resume was detected.
+                // Manual control then re-asserts itself with at least one
+                // duty write even when the ramp estimate already equals the
+                // target, since the EC reverted to firmware control during
+                // sleep and needs an explicit write to hand control back.
+                let mut just_resumed = false;
                 let mut manual_ramp_current: Option<u32> = if saved_duty > 0 {
                     Some(saved_duty)
                 } else if init_is_manual {
@@ -298,12 +360,26 @@ pub fn spawn(state: AppState) {
                         last_manual_duty = None;
                         manual_ramp_current = None;
                         manual_per_fan_ramp = None;
+                        // Also forget the last seen mode: the EC may have
+                        // reverted to firmware fan control during sleep, so
+                        // the next iteration must re-assert the selected mode
+                        // (Disabled → run autofanctrl once; Manual/Curve →
+                        // re-seed the ramp states and write again).
+                        last_fan_mode = None;
+                        just_resumed = true;
                         bg_state2.system.cli_available.store(false, Ordering::Release);
                         with_write_lock(&bg_state2.system.ec_client, |guard| {
                             *guard = Arc::new(None);
                         });
-                        bg_state2.fan.fan_max_rpm.store(0, Ordering::Release);
                         bg_state2.fan.last_fan_rpm_reset.store(resume_ts, Ordering::Release);
+                        // Keep fan_max_rpm from before sleep: it is the fan's
+                        // real max-RPM baseline, so estimate_duty_from_thermal
+                        // still computes the actual current duty after resume
+                        // and the ramp starts from the real fan speed. Only
+                        // last_fan_rpm_reset moves forward so the rolling
+                        // re-baseline is deferred by 60s past resume. Resetting
+                        // fan_max_rpm here made the estimate read ~100% (the
+                        // first post-resume rpm would become the new max).
                         bg_state2.fan.last_applied_duty.store(0, Ordering::Release);
                         with_write_lock(&bg_state2.thermal.data, |guard| {
                             *guard = Arc::new(None);
@@ -371,10 +447,31 @@ pub fn spawn(state: AppState) {
                     };
 
                     let ec_clone = Arc::clone(&ec);
-                    if let Ok(Ok(t)) = tokio::task::spawn_blocking(move || ec_clone.thermal()).await
-                        && record_thermal_sample(&bg_state2, t)
-                    {
-                        mark_view_dirty(&bg_state2);
+                    match tokio::task::spawn_blocking(move || ec_clone.thermal()).await {
+                        Ok(Ok(t)) => {
+                            consecutive_ec_failures = 0;
+                            if record_thermal_sample(&bg_state2, t) {
+                                mark_view_dirty(&bg_state2);
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            warn!("Thermal read failed: {}", e);
+                            consecutive_ec_failures += 1;
+                            if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
+                                reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                continue;
+                            }
+                        }
+                        Err(join_err) => {
+                            warn!("EC thermal spawn panicked: {}", join_err);
+                            consecutive_ec_failures += 1;
+                            if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
+                                reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                continue;
+                            }
+                        }
                     }
                     // While the user is idle, skip the per-cycle UI-only reads (battery) to
                     // save subprocess spawns; thermal still feeds the fan curve.
@@ -417,6 +514,7 @@ pub fn spawn(state: AppState) {
                                 });
                                 mark_view_dirty(&bg_state2);
                             }
+                            mark_pd_usb_c_seen(&read_lock(&bg_state2.peripherals.pd_ports), &bg_state2.peripherals.pd_usb_c_seen);
                             push_pd_ports_history(&bg_state2.peripherals.pd_ports, &bg_state2.peripherals.pd_ports_history);
                         }
                         let ec_clone = Arc::clone(&ec);
@@ -451,7 +549,10 @@ pub fn spawn(state: AppState) {
                         && now_ms.saturating_sub(last_cpu_power_poll) >= CPU_POWER_POLL_MS
                     {
                         last_cpu_power_poll = now_ms;
-                        bg_state2.cpu_power.refresh();
+                        // refresh() runs PawnIO ioctls; keep it off the async
+                        // worker like the other EC I/O in this loop.
+                        let cpu_power = bg_state2.cpu_power.clone();
+                        let _ = tokio::task::spawn_blocking(move || cpu_power.refresh()).await;
                         mark_view_dirty(&bg_state2);
                     }
 
@@ -488,7 +589,9 @@ pub fn spawn(state: AppState) {
                     }
                     match &mode {
                         crate::types::FanControlMode::Disabled => {
-                            if last_fan_mode.as_ref().map(|m| m != &crate::types::FanControlMode::Disabled).unwrap_or(false) {
+                            // None (startup in Auto mode) counts as "entered
+                            // Disabled": restore firmware fan control once.
+                            if last_fan_mode.as_ref().is_none_or(|m| m != &crate::types::FanControlMode::Disabled) {
                                 let ec_clone = Arc::clone(&ec);
                                 match tokio::task::spawn_blocking(move || ec_clone.autofanctrl()).await {
                                     Ok(result) => {
@@ -557,7 +660,12 @@ pub fn spawn(state: AppState) {
                                     for (idx, &target) in per_fan.iter().enumerate() {
                                         let current = ramp.get(idx).copied().unwrap_or(target);
                                         let next_i = crate::fan_control::apply_rate_limit(current, target, 10);
-                                        if next_i == current {
+                                        // On the resume cycle, still write when the
+                                        // estimate already equals the target: the EC
+                                        // reverted to firmware control during sleep
+                                        // and needs one explicit duty write to hand
+                                        // control back.
+                                        if next_i == current && !just_resumed {
                                             continue;
                                         }
                                         // Re-check mode between fans to avoid setting duties
@@ -586,6 +694,11 @@ pub fn spawn(state: AppState) {
                                     if max_applied > 0 {
                                         bg_state2.fan.last_applied_duty.store(max_applied as u64, Ordering::Release);
                                     }
+                                    // Keep the unified ramp seed in sync with the per-fan
+                                    // duties so switching back to the unified slider starts
+                                    // from the level the fans are actually at, not a stale
+                                    // pre-per-fan value.
+                                    manual_ramp_current = ramp.iter().copied().max();
                                 }
                             }
                         }
@@ -601,6 +714,11 @@ pub fn spawn(state: AppState) {
                                     if let Some(next) = curve_stepper.next(control_temp, hyst, rate, curve_rate_limit_down, full_pts) {
                                         let fan_count = bg_state2.fan.fan_count.load(Ordering::Acquire) as u32;
                                         let write_each = !bg_state2.fan.unified_duty.load(Ordering::Acquire) && fan_count > 1;
+                                        // Only advance the stepper when at least one fan
+                                        // actually received the new duty; failed writes
+                                        // must not distort the rate-limit basis (the next
+                                        // step would be computed from an unapplied value).
+                                        let mut applied = false;
                                         if write_each {
                                             for fan_idx in 0..fan_count {
                                                 let mode_check = crate::types::FanControlMode::from_u8(
@@ -614,16 +732,20 @@ pub fn spawn(state: AppState) {
                                                     Ok(result) => {
                                                         if let Err(e) = result {
                                                             warn!("Failed to set fan {} duty (curve): {}", fan_idx, e);
+                                                        } else {
+                                                            applied = true;
                                                         }
                                                     }
                                                     Err(join_err) => {
                                                         warn!("EC spawn panicked (set_fan_duty curve fan {}): {}", fan_idx, join_err);
                                                         reset_ec_on_panic(&bg_state2);
-                                                        continue;
+                                                        break;
                                                     }
                                                 }
                                             }
-                                            bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
+                                            if applied {
+                                                bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
+                                            }
                                         } else {
                                             let ec_clone = Arc::clone(&ec);
                                             match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, None)).await {
@@ -634,6 +756,7 @@ pub fn spawn(state: AppState) {
                                                         );
                                                         if mode_now != mode { last_fan_mode = Some(mode); continue; }
                                                         bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
+                                                        applied = true;
                                                     }
                                                     Err(e) => warn!("Failed to set fan duty (curve): {}", e),
                                                 },
@@ -644,12 +767,15 @@ pub fn spawn(state: AppState) {
                                                 }
                                             }
                                         }
-                                        curve_stepper.note_applied(next);
+                                        if applied {
+                                            curve_stepper.note_applied(next);
+                                        }
                                     }
                             }
                         }
                     }
                     last_fan_mode = Some(mode);
+                    just_resumed = false;
                 }
             });
             if let Err(e) = handle.await {

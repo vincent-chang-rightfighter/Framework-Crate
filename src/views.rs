@@ -22,6 +22,7 @@ pub(crate) struct ViewSnapshot {
     pub expansion_cards: Arc<Vec<cli::ec_wrapper::ExpansionCard>>,
     pub pd_ports: Arc<Vec<cli::ec_wrapper::UsbCPort>>,
     pub pd_ports_history: Arc<crate::sub_state::PdPortsHistory>,
+    pub pd_usb_c_seen: Arc<Vec<bool>>,
     pub curve_full_points: Arc<Vec<[u32; 2]>>,
     pub platform: cli::ec_wrapper::PlatformFamily,
     pub fan_count: u64,
@@ -65,6 +66,7 @@ impl ViewSnapshot {
             expansion_cards: peripheral_snap.expansion_cards,
             pd_ports: peripheral_snap.pd_ports,
             pd_ports_history: peripheral_snap.pd_ports_history,
+            pd_usb_c_seen: peripheral_snap.pd_usb_c_seen,
             curve_full_points: Arc::clone(&read_lock(&app.state.fan.curve_full_points)),
             platform,
             fan_count,
@@ -956,7 +958,11 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     } else {
         let dp_card = cards.iter().find(|c| c.name.contains("DisplayPort") || c.name.contains("HDMI"));
         for port in ports.iter() {
-            let card_type = crate::cli::ec_wrapper::classify_pd_port(port, history.iter().map(|a| a.as_ref()), STABLE_THRESHOLD, dp_card.is_some());
+            let ever_seen_sink = snap.pd_usb_c_seen
+                .get(port.port as usize)
+                .copied()
+                .unwrap_or(false);
+            let card_type = crate::cli::ec_wrapper::classify_pd_port(port, history.iter().map(|a| a.as_ref()), STABLE_THRESHOLD, dp_card.is_some(), ever_seen_sink);
             let is_display_card = card_type == "DisplayPort Expansion Card"
                 || card_type == "HDMI Expansion Card"
                 || card_type == "DP/HDMI Expansion Card";

@@ -157,6 +157,7 @@ pub fn classify_pd_port<'a>(
     history: impl IntoIterator<Item = &'a Vec<UsbCPort>>,
     stable_threshold: usize,
     display_card_installed: bool,
+    ever_seen_sink: bool,
 ) -> &'static str {
     /// Maximum number of history samples used for classification.
     /// Callers should pass exactly 3 samples (from `PdPortsHistory`); extras
@@ -207,7 +208,7 @@ pub fn classify_pd_port<'a>(
     if is_source_no_pd(port) {
         let has_seen_sink = history_has_role(history, port.port, "Sink", false)
             || history_has_role(history, port.port, "Sink", true);
-        if has_seen_sink {
+        if has_seen_sink || ever_seen_sink {
             tracing::debug!("[classify] Port {} → USB-C Expansion Card (Source+noPD, seen Sink)", port.port);
             return "USB-C Expansion Card";
         }
@@ -601,24 +602,50 @@ mod tests {
     #[test]
     fn hdmi_source_without_dp_alt_is_hdmi() {
         let p = port("Source", true, false, Some(3.4));
-        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false), "HDMI Expansion Card");
+        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false, false), "HDMI Expansion Card");
     }
 
     #[test]
     fn displayport_low_watt_source() {
         let p = port("Source", true, true, Some(2.5));
-        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false), "DisplayPort Expansion Card");
+        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false, false), "DisplayPort Expansion Card");
     }
 
     #[test]
     fn usbc_default_source_stays_usbc() {
         let p = port("Source", true, false, Some(7.5));
-        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false), "USB-C Expansion Card");
+        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false, false), "USB-C Expansion Card");
     }
 
     #[test]
     fn sink_pd_is_usbc() {
         let p = port("Sink", true, false, Some(65.0));
-        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false), "USB-C Expansion Card");
+        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false, false), "USB-C Expansion Card");
+    }
+
+    #[test]
+    fn usbc_that_was_sink_is_never_usba() {
+        // Port reported Sink (idle USB-C expansion-card port) in an old
+        // sample, now hosts a USB-C device and looks exactly like a USB-A
+        // port (Source+noPD, stable). The permanent marker must win.
+        let p = port("Source", false, false, Some(7.5));
+        let hist = [vec![port("Sink", false, false, None)]];
+        assert_eq!(
+            classify_pd_port(&p, hist.iter(), 2, false, true),
+            "USB-C Expansion Card"
+        );
+    }
+
+    #[test]
+    fn stable_source_without_sink_history_is_usba() {
+        let p = port("Source", false, false, Some(7.5));
+        let hist = [
+            vec![port("Source", false, false, Some(7.5))],
+            vec![port("Source", false, false, Some(7.5))],
+        ];
+        assert_eq!(
+            classify_pd_port(&p, hist.iter(), 2, false, false),
+            "USB-A Expansion Card"
+        );
     }
 }

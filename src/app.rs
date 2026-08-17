@@ -59,6 +59,44 @@ fn tick_task(ms: u64) -> Task<Message> {
     )
 }
 
+/// Refresh CPU power data (MSR/MMIO via PawnIO ioctls) off the UI thread.
+/// `after` runs in the same blocking task once the refresh completes (e.g.
+/// restarting the sync thread or writing BIOS defaults after resume).
+/// Completion arrives as `Message::CpuPowerDataRefreshed`, whose handler
+/// re-applies the edit fields from the fresh snapshot.
+fn refresh_cpu_power_task(
+    state: crate::cpu_power::CpuPowerState,
+    after: impl FnOnce() + Send + 'static,
+) -> Task<Message> {
+    let task_state = state.clone();
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                task_state.refresh();
+                after();
+            })
+            .await
+            .ok();
+            Message::CpuPowerDataRefreshed
+        },
+        |msg| msg,
+    )
+}
+
+/// Stop the CPU power sync thread off the UI thread — the join can block
+/// up to the 250ms sync interval.
+fn stop_sync_task(state: crate::cpu_power::CpuPowerState) -> Task<Message> {
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || state.stop_sync())
+                .await
+                .ok();
+            Message::CpuPowerSyncStopped
+        },
+        |msg| msg,
+    )
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick,
@@ -112,6 +150,8 @@ pub enum Message {
     CpuPowerPl2ClampedToggled(bool),
     CpuPowerApply,
     CpuPowerApplied(Result<(), String>),
+    CpuPowerDataRefreshed,
+    CpuPowerSyncStopped,
     CpuPowerSyncStart,
     CpuPowerSyncStarted(Result<(), String>),
     CpuPowerSyncStop,
@@ -247,6 +287,7 @@ impl App {
                 expansion_cards: Arc::new(RwLock::new(Arc::new(Vec::new()))),
                 pd_ports: Arc::new(RwLock::new(Arc::new(Vec::new()))),
                 pd_ports_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
+                pd_usb_c_seen: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             },
             battery: BatteryState {
                 info: Arc::new(RwLock::new(Arc::new(None))),
@@ -812,34 +853,30 @@ impl App {
                         if !self.cpu_power_supported() {
                             return Some(Task::none());
                         }
-                        // Stop sync thread — hardware state is undefined after resume.
-                        self.state.cpu_power.stop_sync();
+                        // Stop sync thread and re-read MSR/MMIO off the UI
+                        // thread — the thread join and PawnIO ioctls are both
+                        // slow, and hardware state is undefined after resume.
                         self.pl_custom_applied = false;
-                        // Re-read MSR/MMIO after resume and update edit fields.
-                        self.state.cpu_power.refresh();
-                        let info = self.state.cpu_power.snapshot();
-                        self.apply_edit_fields_from_snapshot(&info);
-                        self.state.lifecycle.view_dirty.store(true, Ordering::Release);
-                        // Write BIOS defaults back to MSR — BIOS/EC may have reset them.
-                        if let Some(bios) = self.state.cpu_power.bios_defaults() {
-                            Some(Task::perform(
-                                async move {
-                                    let _ = tokio::task::spawn_blocking(move || {
-                                        if let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
-                                            bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
-                                            bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
-                                            bios.power_unit, bios.time_unit,
-                                        ) {
-                                            warn!("Resume MSR write failed: {}", e);
-                                        }
-                                    }).await;
-                                    Message::Tick
-                                },
-                                |msg| msg,
-                            ))
-                        } else {
-                            Some(Task::none())
-                        }
+                        let cpu_power = self.state.cpu_power.clone();
+                        let bios = cpu_power.bios_defaults();
+                        let after = {
+                            let cpu_power = cpu_power.clone();
+                            move || {
+                                cpu_power.stop_sync();
+                                // Write BIOS defaults back to MSR — BIOS/EC may
+                                // have reset them.
+                                if let Some(bios) = bios
+                                    && let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
+                                        bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
+                                        bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
+                                        bios.power_unit, bios.time_unit,
+                                    )
+                                {
+                                    warn!("Resume MSR write failed: {}", e);
+                                }
+                            }
+                        };
+                        Some(refresh_cpu_power_task(cpu_power, after))
                     }
                 }
             }
@@ -899,7 +936,8 @@ impl App {
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         match &message {
-            Message::Tick | Message::InitComplete | Message::StartupError(_) | Message::WindowResized(..) => {}
+            Message::Tick | Message::InitComplete | Message::StartupError(_) | Message::WindowResized(..)
+            | Message::CpuPowerDataRefreshed | Message::CpuPowerSyncStopped => {}
             _ => {
                 let now_ms = crate::util::current_time_ms();
                 self.state.lifecycle.last_interaction_ts.store(now_ms, Ordering::Release);
@@ -1028,10 +1066,25 @@ impl App {
                 }
                 let pd_ports = read_lock(&self.state.peripherals.pd_ports);
                 if !pd_ports.is_empty() {
+                    let history = read_lock(&self.state.peripherals.pd_ports_history);
+                    let seen = read_lock(&self.state.peripherals.pd_usb_c_seen);
+                    let cards = read_lock(&self.state.peripherals.expansion_cards);
+                    let dp_card = cards.iter().find(|c| c.name.contains("DisplayPort") || c.name.contains("HDMI"));
                     report.push_str("\n=== PD Ports ===\n");
                     for port in pd_ports.iter() {
-                        report.push_str(&format!("  Port {}: role={:?}, data={:?}, dp_alt={}, watts={:?}\n",
-                            port.port, port.power_role, port.data_role, port.dp_alt_mode, port.negotiated_watts));
+                        let ever_seen_sink = seen
+                            .get(port.port as usize)
+                            .copied()
+                            .unwrap_or(false);
+                        let card_type = crate::cli::ec_wrapper::classify_pd_port(
+                            port,
+                            history.iter().map(|a| a.as_ref()),
+                            crate::style::STABLE_THRESHOLD,
+                            dp_card.is_some(),
+                            ever_seen_sink,
+                        );
+                        report.push_str(&format!("  Port {}: role={:?}, data={:?}, dp_alt={}, watts={:?}, type=\"{}\", ever_sink={}\n",
+                            port.port, port.power_role, port.data_role, port.dp_alt_mode, port.negotiated_watts, card_type, ever_seen_sink));
                     }
                 }
                 let ts = std::time::SystemTime::now()
@@ -1058,15 +1111,17 @@ impl App {
                 if let Err(e) = result {
                     tracing::error!("PawnIO install failed: {}", e);
                     self.cpu_power_error = Some(format!("PawnIO install failed: {}", e));
+                    self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                    Task::none()
                 } else {
-                    crate::cpu_power::pawnio_version(); // refresh version cache
-                    self.state.cpu_power.refresh();
-                    let info = self.state.cpu_power.snapshot();
-                    self.apply_edit_fields_from_snapshot(&info);
+                    // Refresh the PawnIO version cache and re-read MSR/MMIO off
+                    // the UI thread; the fresh readback re-populates the edit
+                    // fields via Message::CpuPowerDataRefreshed.
                     self.cpu_power_error = None;
+                    refresh_cpu_power_task(self.state.cpu_power.clone(), || {
+                        crate::cpu_power::pawnio_version();
+                    })
                 }
-                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
-                Task::none()
             }
             Message::DownloadPawnIOModules => {
                 if !self.cpu_power_supported() {
@@ -1081,16 +1136,15 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.modules_download_error = None;
-                        self.state.cpu_power.refresh();
-                        let info = self.state.cpu_power.snapshot();
-                        self.apply_edit_fields_from_snapshot(&info);
+                        refresh_cpu_power_task(self.state.cpu_power.clone(), || {})
                     }
                     Err(e) => {
                         tracing::error!("PawnIO Modules download failed: {}", e);
                         self.modules_download_error = Some(e);
+                        self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                        Task::none()
                     }
                 }
-                Task::none()
             }
             Message::CpuPowerPl1Changed(val) => {
                 self.pl1_edit = val;
@@ -1168,28 +1222,43 @@ impl App {
             Message::CpuPowerApplied(result) => {
                 match result {
                     Ok(()) => {
-                        self.state.cpu_power.refresh();
-                        let info = self.state.cpu_power.snapshot();
-                        self.apply_edit_fields_from_snapshot(&info);
                         self.pl_custom_applied = true;
                         self.cpu_power_error = None;
-                        // If sync was running, restart it with the newly applied values
-                        // so the thread writes the updated params instead of stale ones.
-                        if self.state.cpu_power.sync_enabled.load(Ordering::Acquire) {
-                            let info = self.state.cpu_power.snapshot();
-                            let _ = self.state.cpu_power.start_sync(
-                                self.pl1_edit.parse().unwrap_or(info.pl1_msr),
-                                self.pl1_enabled,
-                                self.pl1_clamped,
-                                self.pl1_time_edit.parse().unwrap_or(info.pl1_time_s),
-                                self.pl2_edit.parse().unwrap_or(info.pl2_msr),
-                                self.pl2_enabled,
-                                self.pl2_clamped,
-                                info.pl2_time_s,
-                                info.power_unit,
-                                info.time_unit,
-                            );
-                        }
+                        // Refresh readback and, if sync was running, restart it
+                        // with the newly applied values — both off the UI thread
+                        // (refresh does PawnIO ioctls, start_sync joins the old
+                        // sync thread).
+                        let cpu_power = self.state.cpu_power.clone();
+                        let restart_sync = cpu_power.sync_enabled.load(Ordering::Acquire);
+                        let pl1 = self.pl1_edit.parse().unwrap_or_default();
+                        let pl1_en = self.pl1_enabled;
+                        let pl1_cl = self.pl1_clamped;
+                        let pl1_time = self.pl1_time_edit.parse().unwrap_or_default();
+                        let pl2 = self.pl2_edit.parse().unwrap_or_default();
+                        let pl2_en = self.pl2_enabled;
+                        let pl2_cl = self.pl2_clamped;
+                        let after = {
+                            let cpu_power = cpu_power.clone();
+                            move || {
+                                if !restart_sync {
+                                    return;
+                                }
+                                let info = cpu_power.snapshot();
+                                let _ = cpu_power.start_sync(
+                                    if pl1 > 0.0 { pl1 } else { info.pl1_msr },
+                                    pl1_en,
+                                    pl1_cl,
+                                    if pl1_time > 0.0 { pl1_time } else { info.pl1_time_s },
+                                    if pl2 > 0.0 { pl2 } else { info.pl2_msr },
+                                    pl2_en,
+                                    pl2_cl,
+                                    info.pl2_time_s,
+                                    info.power_unit,
+                                    info.time_unit,
+                                );
+                            }
+                        };
+                        return refresh_cpu_power_task(cpu_power, after);
                     }
                     Err(e) => {
                         tracing::error!("Failed to write PL1/PL2: {}", e);
@@ -1254,17 +1323,21 @@ impl App {
                 if !self.cpu_power_supported() {
                     return Task::none();
                 }
-                self.state.cpu_power.stop_sync();
-                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
-                Task::none()
+                stop_sync_task(self.state.cpu_power.clone())
             }
             Message::CpuPowerSyncReset => self.handle_cpu_power_sync_reset(),
             Message::CpuPowerResetDone(_ok) => {
                 // Refresh readback from hardware and update edit fields
                 // so the UI shows the BIOS defaults that were just written.
-                self.state.cpu_power.refresh();
+                refresh_cpu_power_task(self.state.cpu_power.clone(), || {})
+            }
+            Message::CpuPowerDataRefreshed => {
                 let info = self.state.cpu_power.snapshot();
                 self.apply_edit_fields_from_snapshot(&info);
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
+            }
+            Message::CpuPowerSyncStopped => {
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
@@ -1321,7 +1394,6 @@ impl App {
         if !self.cpu_power_supported() {
             return Task::none();
         }
-        self.state.cpu_power.stop_sync();
         self.pl_custom_applied = false;
         self.cpu_power_error = None;
         let bios = match self.state.cpu_power.bios_defaults() {
@@ -1332,9 +1404,14 @@ impl App {
                 return Task::none();
             }
         };
+        let cpu_power = self.state.cpu_power.clone();
         Task::perform(
             async move {
                 let write_result = tokio::task::spawn_blocking(move || {
+                    // Stop the sync thread first (its join can block up to the
+                    // 250ms sync interval) — off the UI thread — then write the
+                    // BIOS defaults so the thread cannot race the reset.
+                    cpu_power.stop_sync();
                     if let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
                         bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
                         bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
