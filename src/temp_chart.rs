@@ -316,6 +316,15 @@ fn draw_temp_chart_contents(
                     .with_color(color)
                     .with_width(1.5),
             );
+        } else if points_buf.len() == 1 {
+            // A single sample cannot form a line; draw a dot so the first
+            // reading is visible immediately.
+            let pt = &points_buf[0];
+            let center = Point::new(
+                origin.x + pt.0 * plot_w,
+                origin.y + plot_h - ((pt.1 - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h,
+            );
+            frame.fill(&iced::widget::canvas::Path::circle(center, 2.0), color);
         }
     }
 }

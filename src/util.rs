@@ -32,14 +32,18 @@ pub fn current_time_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Get current time in milliseconds since UNIX epoch as i64.
+/// Monotonic millisecond ticker since process start.
 ///
-/// Useful for temp_chart::TempSample which uses i64 timestamps.
-pub fn current_time_ms_i64() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+/// Use for every interval / idle / re-assert computation. Wall-clock time
+/// (current_time_ms) is fine for absolute timestamps, but system clock
+/// adjustments (NTP sync, manual changes, resume drift) stretch or compress
+/// wall-clock deltas — a backward jump can defer a 60 s fan re-baseline, a
+/// resume without the PBT event can miss the re-assert, and a forward jump
+/// can prune the whole temp history. Instant is immune to all of that.
+pub fn monotonic_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let start = *START.get_or_init(std::time::Instant::now);
+    start.elapsed().as_millis() as u64
 }
 
 #[cfg(test)]
@@ -53,16 +57,9 @@ mod tests {
     }
 
     #[test]
-    fn current_time_ms_i64_returns_positive_value() {
-        let ts = current_time_ms_i64();
-        assert!(ts > 0);
-    }
-
-    #[test]
-    fn current_time_ms_and_i64_are_consistent() {
-        let ts_u64 = current_time_ms();
-        let ts_i64 = current_time_ms_i64();
-        // They might differ by a few ms due to timing, so just check same order of magnitude
-        assert!((ts_u64 as i64 - ts_i64).abs() < 100);
+    fn monotonic_ms_is_monotonic() {
+        let a = monotonic_ms();
+        let b = monotonic_ms();
+        assert!(b >= a);
     }
 }

@@ -175,7 +175,11 @@ pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
     if !has_hundred { full.push([100, 100]); }
     full.sort_by_key(|p| p[0]);
     let before = full.len();
+    // dedup_by_key keeps the first of equal keys; reverse first so the
+    // LAST point of a duplicate temperature wins ("later overrides earlier").
+    full.reverse();
     full.dedup_by_key(|p| p[0]);
+    full.reverse();
     if full.len() < before {
         debug!("Curve has duplicate temperatures — later points override earlier ones");
     }

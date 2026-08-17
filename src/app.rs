@@ -25,6 +25,16 @@ const AUTO_MAX_HEIGHT: f32 = 1100.0;
 /// Maximum number of debug report files kept in the temp directory.
 const MAX_DEBUG_REPORTS: usize = 5;
 
+/// Monotonic per-process version assigned to each config snapshot at save
+/// time. Used to order concurrent config writes: config::save_versioned
+/// skips a write whose version is older than the newest one on disk, so the
+/// debounced background save can never roll the file back past a newer
+/// shutdown-time save.
+fn next_config_version() -> u64 {
+    static CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
+    CONFIG_VERSION.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 /// Delete the oldest `framework_crate_debug_*.txt` files in `dir` until at
 /// most `keep` remain. Older reports are stale snapshots that only waste
 /// temp space, so each new report reaps the surplus.
@@ -152,6 +162,7 @@ pub enum Message {
     DismissConfigWarning,
     KblightChanged(u32),
     FpLedLevelChanged(&'static str),
+    EcOpDone,
     ToggleBatteryDetails,
     CloseRequested(iced::window::Id),
     WindowResized(iced::window::Id, iced::Size),
@@ -210,7 +221,7 @@ pub struct App {
     pub tray: crate::tray::TrayManager,
     pub tray_initialized: bool,
     pub pending_minimize_to_tray: bool,
-    pub config_tx: tokio::sync::watch::Sender<Arc<Config>>,
+    pub config_tx: tokio::sync::watch::Sender<(Arc<Config>, u64)>,
     pub last_hwnd_check_ts: u64,
     pub pending_curve_update: bool,
     pub last_curve_edit_ts: Instant,
@@ -299,7 +310,7 @@ impl App {
                 )),
                 last_applied_duty: Arc::new(AtomicU64::new(0)),
                 fan_max_rpm: Arc::new(AtomicU64::new(0)),
-                last_fan_rpm_reset: Arc::new(AtomicU64::new(crate::util::current_time_ms())),
+                last_fan_rpm_reset: Arc::new(AtomicU64::new(crate::util::monotonic_ms())),
                 curve_full_points: Arc::new(RwLock::new(Arc::new(crate::types::curve_full_points(
                     loaded_config.fan.curve.as_ref().map(|c| c.curve.points.as_slice()).unwrap_or(&[]),
                 )))),
@@ -329,7 +340,7 @@ impl App {
                 poll_ms: Arc::new(AtomicU64::new(poll_ms)),
                 shutdown: Arc::new(AtomicBool::new(false)),
                 visible: Arc::new(AtomicBool::new(true)),
-                last_interaction_ts: Arc::new(AtomicU64::new(crate::util::current_time_ms())),
+                last_interaction_ts: Arc::new(AtomicU64::new(crate::util::monotonic_ms())),
                 bg_config_save_failed: Arc::new(AtomicBool::new(false)),
                 view_dirty: Arc::new(AtomicBool::new(true)),
                 last_resume_ts: Arc::new(AtomicU64::new(0)),
@@ -343,7 +354,7 @@ impl App {
         let screen = system_info::display_resolution();
         let refresh_rate = system_info::display_refresh_rate();
 
-        let (config_tx, config_rx) = tokio::sync::watch::channel(Arc::new(loaded_config.clone()));
+        let (config_tx, config_rx) = tokio::sync::watch::channel((Arc::new(loaded_config.clone()), 0));
         let state_for_save = state.clone();
         config_save_task::spawn(config_rx, state_for_save);
 
@@ -523,7 +534,7 @@ impl App {
             ]);
         }
 
-        let now_ms = crate::util::current_time_ms();
+        let now_ms = crate::util::monotonic_ms();
         let idle = now_ms.saturating_sub(self.state.lifecycle.last_interaction_ts.load(Ordering::Acquire)) > IDLE_THRESHOLD_MS;
         let visible = self.state.lifecycle.visible.load(Ordering::Acquire);
         let next_ms = if !visible {
@@ -544,6 +555,10 @@ impl App {
         }
 
         if self.tray_initialized {
+            // Complete a pending two-phase reinit before checking liveness:
+            // the old pump may have just exited, and poll_reinit() must
+            // respawn the fresh pump before is_alive() is consulted.
+            self.tray.poll_reinit();
             if !self.tray.is_alive() {
                 // Message pump thread died (crash or stuck shutdown): drop the
                 // dead state so the next tick spawns a fresh pump, and cancel
@@ -563,7 +578,7 @@ impl App {
                     if !system_info::is_window(self.tray.hwnd()) {
                         tracing::warn!("HWND {} invalid, reinitializing tray", self.tray.hwnd());
                         if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
-                            self.tray.reinit(hwnd);
+                            self.tray.request_reinit(hwnd);
                             self.tray.show_icon_async();
                         } else {
                             self.tray_initialized = false;
@@ -655,7 +670,11 @@ impl App {
                 self.mutate_config(|cfg| {
                     cfg.fan.manual = Some(crate::types::ManualConfig { duty_pct: duty });
                 });
-                self.state.fan.last_applied_duty.store(duty as u64, Ordering::Release);
+                // last_applied_duty is NOT updated here: it tracks the duty
+                // actually written by the background task (which stores it on
+                // a successful EC write). The slider position reads the config
+                // value above, so the quit warning only ever shows a duty the
+                // fans are really at.
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
@@ -677,9 +696,11 @@ impl App {
                     }
                 });
                 self.mutate_config(|cfg| {
-                    if fan_idx < cfg.fan.per_fan_duty.len() {
-                        cfg.fan.per_fan_duty[fan_idx] = duty;
-                    }
+                    // Copy the live vector so edits on slots the config does
+                    // not know about yet (added by ensure_per_fan_duty after
+                    // a hardware fan-count change) persist too.
+                    let live = read_lock(&self.state.fan.per_fan_duty);
+                    cfg.fan.per_fan_duty = (*live).clone();
                 });
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
@@ -860,6 +881,9 @@ impl App {
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.icon_create_in_flight = false;
                 self.iconic_check_count = 0;
+                // Clear any pending hide: the window is now visible again
+                // and a deferred minimize must not re-hide it on the next tick.
+                self.pending_minimize_to_tray = false;
                 Some(Task::none())
             }
             Message::TrayQuit => {
@@ -890,32 +914,51 @@ impl App {
                         Some(Task::perform(async {}, |_| Message::TrayQuit))
                     }
                     crate::tray::TrayEvent::PowerResumed => {
-                        let now = crate::util::current_time_ms();
+                        let now = crate::util::monotonic_ms();
                         self.state.lifecycle.last_resume_ts.store(now, Ordering::Release);
-                        tracing::warn!("[RESUME] System resumed from sleep/hibernate at {}", now);
+                        tracing::warn!("[RESUME] System resumed from sleep/hibernate at monotonic tick {}", now);
                         if !self.cpu_power_supported() {
                             return Some(Task::none());
                         }
-                        // Stop sync thread and re-read MSR/MMIO off the UI
-                        // thread — the thread join and PawnIO ioctls are both
-                        // slow, and hardware state is undefined after resume.
-                        self.pl_custom_applied = false;
+                        // Re-read MSR/MMIO off the UI thread — the thread
+                        // join and PawnIO ioctls are both slow, and hardware
+                        // state is undefined after resume.
+                        let was_sync = self.state.cpu_power.sync_enabled.load(Ordering::Acquire);
+                        // Keep pl_custom_applied when the sync was running:
+                        // the custom limits are still in force (we restart
+                        // the sync below), and the flag also gates the
+                        // AC→battery PL reset — clearing it would silently
+                        // disable that reset for sync users.
+                        if !was_sync {
+                            self.pl_custom_applied = false;
+                        }
                         let cpu_power = self.state.cpu_power.clone();
                         let bios = cpu_power.bios_defaults();
                         let after = {
                             let cpu_power = cpu_power.clone();
                             move || {
-                                cpu_power.stop_sync();
-                                // Write BIOS defaults back to MSR — BIOS/EC may
-                                // have reset them.
-                                if let Some(bios) = bios
-                                    && let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
-                                        bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
-                                        bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
-                                        bios.power_unit, bios.time_unit,
-                                    )
-                                {
-                                    warn!("Resume MSR write failed: {}", e);
+                                // Re-read the flag inside the closure: the refresh
+                                // window is several hundred ms and the user may have
+                                // toggled sync since `was_sync` was captured — never
+                                // undo a newer choice.
+                                if cpu_power.sync_enabled.load(Ordering::Acquire) {
+                                    let info = cpu_power.snapshot();
+                                    let _ = cpu_power.start_sync(
+                                        info.pl1_msr, info.pl1_msr_enabled, info.pl1_msr_clamped, info.pl1_time_s,
+                                        info.pl2_msr, info.pl2_msr_enabled, info.pl2_msr_clamped, info.pl2_time_s,
+                                        info.power_unit, info.time_unit,
+                                    );
+                                } else {
+                                    cpu_power.stop_sync();
+                                    if let Some(bios) = bios
+                                        && let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
+                                            bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
+                                            bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
+                                            bios.power_unit, bios.time_unit,
+                                        )
+                                    {
+                                        warn!("Resume MSR write failed: {}", e);
+                                    }
                                 }
                             }
                         };
@@ -982,7 +1025,7 @@ impl App {
             Message::Tick | Message::InitComplete | Message::StartupError(_) | Message::WindowResized(..)
             | Message::CpuPowerDataRefreshed | Message::CpuPowerSyncStopped => {}
             _ => {
-                let now_ms = crate::util::current_time_ms();
+                let now_ms = crate::util::monotonic_ms();
                 self.state.lifecycle.last_interaction_ts.store(now_ms, Ordering::Release);
             }
         }
@@ -1032,7 +1075,7 @@ impl App {
             }
             Message::KblightChanged(percent) => {
                 let kblight = Arc::clone(&self.state.peripherals.kblight);
-                let task = run_ec_task(&self.state.system.ec_client, Message::Tick, move |ec| {
+                let task = run_ec_task(&self.state.system.ec_client, Message::EcOpDone, move |ec| {
                     if let Err(e) = ec.kblight_set(percent) {
                         warn!("Failed to set keyboard backlight: {}", e);
                     }
@@ -1046,11 +1089,19 @@ impl App {
                 task
             }
             Message::FpLedLevelChanged(level) => {
-                run_ec_task(&self.state.system.ec_client, Message::Tick, move |ec| {
+                run_ec_task(&self.state.system.ec_client, Message::EcOpDone, move |ec| {
                     if let Err(e) = ec.fp_led_level_set(level) {
                         warn!("Failed to set fingerprint LED: {}", e);
                     }
                 })
+            }
+            Message::EcOpDone => {
+                // EC operation finished (kblight/fp-led write). Deliberately
+                // does NOT reschedule a tick: the tick_task chain already
+                // pending would otherwise grow by one task per EC op,
+                // doubling the per-interval work over a session.
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
             }
             Message::ToggleBatteryDetails => {
                 self.show_battery_details = !self.show_battery_details;
@@ -1137,9 +1188,12 @@ impl App {
                 let path = std::env::temp_dir().join(format!("framework_crate_debug_{}.txt", ts));
                 let _ = std::fs::write(&path, &report);
                 prune_debug_reports(std::env::temp_dir(), MAX_DEBUG_REPORTS);
-                let _ = std::process::Command::new("notepad.exe")
+                if let Err(e) = std::process::Command::new("notepad.exe")
                     .arg(&path)
-                    .spawn();
+                    .spawn()
+                {
+                    tracing::error!("Failed to open debug report {} in notepad: {}", path.display(), e);
+                }
                 Task::none()
             }
             Message::InstallPawnIO => {
@@ -1162,6 +1216,7 @@ impl App {
                     // the UI thread; the fresh readback re-populates the edit
                     // fields via Message::CpuPowerDataRefreshed.
                     self.cpu_power_error = None;
+                    crate::cpu_power::invalidate_pawnio_version();
                     refresh_cpu_power_task(self.state.cpu_power.clone(), || {
                         crate::cpu_power::pawnio_version();
                     })
@@ -1269,18 +1324,14 @@ impl App {
                         self.pl_custom_applied = true;
                         self.cpu_power_error = None;
                         // Refresh readback and, if sync was running, restart it
-                        // with the newly applied values — both off the UI thread
-                        // (refresh does PawnIO ioctls, start_sync joins the old
-                        // sync thread).
+                        // with the values just read back from hardware — both
+                        // off the UI thread (refresh does PawnIO ioctls,
+                        // start_sync joins the old sync thread). Using the
+                        // post-refresh snapshot instead of re-parsing the edit
+                        // fields avoids racing the user typing during the
+                        // ~100ms MSR write.
                         let cpu_power = self.state.cpu_power.clone();
                         let restart_sync = cpu_power.sync_enabled.load(Ordering::Acquire);
-                        let pl1 = self.pl1_edit.parse().unwrap_or_default();
-                        let pl1_en = self.pl1_enabled;
-                        let pl1_cl = self.pl1_clamped;
-                        let pl1_time = self.pl1_time_edit.parse().unwrap_or_default();
-                        let pl2 = self.pl2_edit.parse().unwrap_or_default();
-                        let pl2_en = self.pl2_enabled;
-                        let pl2_cl = self.pl2_clamped;
                         let after = {
                             let cpu_power = cpu_power.clone();
                             move || {
@@ -1289,16 +1340,9 @@ impl App {
                                 }
                                 let info = cpu_power.snapshot();
                                 let _ = cpu_power.start_sync(
-                                    if pl1 > 0.0 { pl1 } else { info.pl1_msr },
-                                    pl1_en,
-                                    pl1_cl,
-                                    if pl1_time > 0.0 { pl1_time } else { info.pl1_time_s },
-                                    if pl2 > 0.0 { pl2 } else { info.pl2_msr },
-                                    pl2_en,
-                                    pl2_cl,
-                                    info.pl2_time_s,
-                                    info.power_unit,
-                                    info.time_unit,
+                                    info.pl1_msr, info.pl1_msr_enabled, info.pl1_msr_clamped, info.pl1_time_s,
+                                    info.pl2_msr, info.pl2_msr_enabled, info.pl2_msr_clamped, info.pl2_time_s,
+                                    info.power_unit, info.time_unit,
                                 );
                             }
                         };
@@ -1352,6 +1396,10 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.state.cpu_power.sync_enabled.store(true, Ordering::Release);
+                        // Sync enforces custom limits every 250ms, so the
+                        // AC→battery PL reset (gated on pl_custom_applied in
+                        // handle_tick_message) must trigger for sync users too.
+                        self.pl_custom_applied = true;
                         self.cpu_power_error = None;
                         tracing::info!("CPU power sync started");
                     }
@@ -1392,7 +1440,8 @@ impl App {
     fn save_config(&mut self) {
         self.state.lifecycle.view_dirty.store(true, Ordering::Release);
         let cfg = read_lock(&self.state.lifecycle.config);
-        if self.config_tx.send(Arc::clone(&cfg)).is_ok() {
+        let ver = next_config_version();
+        if self.config_tx.send((Arc::clone(&cfg), ver)).is_ok() {
             self.config_save_failed = false;
         } else {
             debug!("Config save channel dropped — falling back to sync save");
@@ -1401,7 +1450,7 @@ impl App {
             // during normal operation the channel-based path is used.
             let cfg_owned: Config = (*cfg).clone();
             drop(cfg);
-            if let Err(e) = crate::config::save(&cfg_owned) {
+            if let Err(e) = crate::config::save_versioned(&cfg_owned, ver, true) {
                 warn!("Fallback sync config save failed: {}", e);
                 self.config_save_failed = true;
                 self.state.lifecycle.bg_config_save_failed.store(true, Ordering::Relaxed);
@@ -1415,9 +1464,12 @@ impl App {
     /// Synchronous config save — called only during shutdown paths
     /// (QuitWithoutRestore / CloseRequested). Using spawn_blocking here risks
     /// the write not completing before process::exit, so sync I/O is acceptable.
+    /// Versioned so a slower debounced background save of an older snapshot
+    /// cannot overwrite this newer one.
     fn save_config_now(&mut self) {
         let cfg = read_lock(&self.state.lifecycle.config);
-        if let Err(e) = crate::config::save(&cfg) {
+        let ver = next_config_version();
+        if let Err(e) = crate::config::save_versioned(&cfg, ver, true) {
             warn!("Failed to save config: {}", e);
         }
     }

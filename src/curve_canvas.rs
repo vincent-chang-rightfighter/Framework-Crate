@@ -6,9 +6,6 @@ use iced::widget::canvas::Cache;
 const AXIS_LABELS: [&str; 6] = ["0", "20", "40", "60", "80", "100"];
 
 pub fn view_curve(points: &[[u32; 2]], all_pts: &Arc<Vec<[u32; 2]>>) -> Element<'static, crate::Message> {
-    // A fresh Arc per frame is fine: CurveState's `points_changed` check
-    // compares slice *content*, so the canvas cache is only invalidated when
-    // the points actually change.
     let points_arc: Arc<[[u32; 2]]> = Arc::from(points);
     iced::widget::canvas(CurveRenderer {
         all_pts: Arc::clone(all_pts),
@@ -67,6 +64,12 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
             Arc::as_ptr(&self.all_pts) as *const (),
             self.all_pts.len(),
         );
+        // Always compare points CONTENT, not just pointers: a rebuilt
+        // snapshot's Vec can be allocated at the same address as the
+        // previous one (same-size allocation, just freed), so an address
+        // key alone would miss the change and draw a stale curve. The
+        // vectors hold at most a handful of points, so the per-frame
+        // comparison is negligible.
         let points_changed = state.last_points.borrow().as_deref() != Some(self.points.as_ref());
         if state.cached_key.get() != key || points_changed {
             state.cached_key.set(key);
@@ -169,7 +172,13 @@ fn draw_curve_contents(
         });
     }
 
-    for p in points.iter() {
+    // Draw the editor squares in temperature order, matching the sorted
+    // curve — the config keeps the user's entry order, and drawing squares
+    // in that order would make P0/P1 appear to swap after the user drags
+    // one past the other.
+    let mut sorted_points: Vec<[u32; 2]> = points.to_vec();
+    sorted_points.sort_by_key(|p| p[0]);
+    for p in sorted_points.iter() {
         let center = to_screen(p[0] as f32, p[1] as f32);
         let r = 6.0f32;
         let sq = iced::widget::canvas::Path::new(|b| {

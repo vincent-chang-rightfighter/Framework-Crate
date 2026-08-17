@@ -41,6 +41,20 @@ fn verify_module_hash(path: &std::path::Path, expected: &str) -> Result<(), &'st
     Ok(())
 }
 
+/// Read a module blob once and verify its hash on the in-memory bytes.
+///
+/// Do NOT verify-then-re-read: between the two reads an attacker (or a
+/// concurrent modules update) could swap the file — the hash would pass on
+/// version A while the handle loads version B.
+fn read_verified_module(path: &std::path::Path, expected: &str) -> Result<Vec<u8>, &'static str> {
+    let bytes = std::fs::read(path).map_err(|_| "module blob missing")?;
+    if sha256_hex(&bytes) != expected {
+        warn!("PawnIO module hash mismatch: {}", path.display());
+        return Err("module hash mismatch");
+    }
+    Ok(bytes)
+}
+
 fn verify_cached_modules(dir: &std::path::Path) -> Result<(), &'static str> {
     verify_module_hash(&dir.join("IntelMSR.bin"), INTEL_MSR_SHA256)?;
     verify_module_hash(&dir.join("IntelMCHBAR.bin"), INTEL_MCHBAR_SHA256)?;
@@ -74,8 +88,13 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
         let _ = std::fs::remove_file(&zip_path);
     }
 
-    // Write PowerShell script to temp file (avoids all escaping issues).
-    let script_path = std::env::temp_dir().join("pawnio_download.ps1");
+    // Write PowerShell script to a unique temp file (avoids all escaping
+    // issues, and concurrent downloads never collide on the same path).
+    let script_path = std::env::temp_dir().join(format!(
+        "pawnio_download_{}_{}.ps1",
+        std::process::id(),
+        crate::util::monotonic_ms(),
+    ));
     let script = format!(
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n\
          Invoke-WebRequest -Uri '{url}' -OutFile '{zip}'\n\
@@ -87,8 +106,11 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
     );
     std::fs::write(&script_path, &script).map_err(|_| "failed to write script")?;
 
+    let script_str = script_path
+        .to_str()
+        .ok_or("temp path is not valid UTF-8")?;
     let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path.to_str().unwrap()])
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_str])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .output()
         .map_err(|_| "failed to run powershell")?;
@@ -121,16 +143,12 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
 
 /// Load IntelMSR module blob.
 fn load_intel_msr_blob() -> Result<Vec<u8>, &'static str> {
-    let path = modules_dir().join("IntelMSR.bin");
-    verify_module_hash(&path, INTEL_MSR_SHA256)?;
-    std::fs::read(&path).map_err(|_| "IntelMSR module not found")
+    read_verified_module(&modules_dir().join("IntelMSR.bin"), INTEL_MSR_SHA256)
 }
 
 /// Load IntelMCHBAR module blob.
 fn load_intel_mchbar_blob() -> Result<Vec<u8>, &'static str> {
-    let path = modules_dir().join("IntelMCHBAR.bin");
-    verify_module_hash(&path, INTEL_MCHBAR_SHA256)?;
-    std::fs::read(&path).map_err(|_| "IntelMCHBAR module not found")
+    read_verified_module(&modules_dir().join("IntelMCHBAR.bin"), INTEL_MCHBAR_SHA256)
 }
 
 /// CPU power limit information.
@@ -289,6 +307,37 @@ fn write_msr_pl1_pl2(
     let mut out2 = [0u64; 1];
     exec_ioctl(msr_handle, "ioctl_write_msr", &inp, &mut out2)
         .map_err(|_| "ioctl_write_msr failed — is IntelMSR module loaded?")?;
+
+    // Verify the write actually landed: re-read 0x610 and compare the
+    // decoded limits within encoding tolerance. The CPU silently drops
+    // the write when the register is BIOS-locked (bit 63); without this
+    // check the UI would report success for a limit that was never
+    // applied. The clamp bit is a hint that BIOS/EC may rewrite, so it
+    // is not compared.
+    let tolerance = params.power_unit.max(0.25);
+    let mut rb_out = [0u64; 1];
+    if exec_ioctl(msr_handle, "ioctl_read_msr", &[0x610], &mut rb_out).is_err() {
+        return Err("MSR write succeeded but read-back failed");
+    }
+    let rb_raw = rb_out[0];
+    let (rb_pl1, rb_pl1_en, ..) = decode_power_limit(rb_raw, params.power_unit);
+    let (rb_pl2, rb_pl2_en, ..) = decode_power_limit(rb_raw >> 32, params.power_unit);
+    // Compare against the clamped/encoded target, not the raw request:
+    // encode_power_limit clamps to the 15-bit field, so an out-of-range
+    // request decodes back to the clamp point and comparing against the
+    // requested watts would falsely report the register as locked.
+    let expected_pl1 = ((pl1_enc & 0x7FFF) as f64) * params.power_unit;
+    let expected_pl2 = ((pl2_enc & 0x7FFF) as f64) * params.power_unit;
+    if (rb_pl1 - expected_pl1).abs() > tolerance
+        || (rb_pl2 - expected_pl2).abs() > tolerance
+        || rb_pl1_en != params.pl1_enabled
+        || rb_pl2_en != params.pl2_enabled
+    {
+        debug!("MSR read-back mismatch: wrote PL1={:.2}W(en={}) PL2={:.2}W(en={}), read PL1={:.2}W(en={}) PL2={:.2}W(en={})",
+            expected_pl1, params.pl1_enabled, expected_pl2, params.pl2_enabled,
+            rb_pl1, rb_pl1_en, rb_pl2, rb_pl2_en);
+        return Err("MSR write not reflected in read-back — register may be locked");
+    }
 
     debug!("MSR PL1/PL2 written: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) raw=0x{:016X}",
         params.pl1_watts, params.pl1_time_s, params.pl2_watts, params.pl2_time_s, new_val);
@@ -493,7 +542,7 @@ fn exec_ioctl(
         )
     };
 
-    if hr < 0 {
+    if hr != 0 {
         return Err("ioctl failed");
     }
     Ok(return_size)
@@ -503,103 +552,102 @@ fn exec_ioctl(
 pub fn read_cpu_power() -> CpuPowerInfo {
     let mut info = CpuPowerInfo::default();
 
-    // Download IntelMCHBAR module if not cached.
-    let mchbar_blob = match load_intel_mchbar_blob() {
-        Ok(b) => b,
+    // Load the two module handles independently: a missing MCHBAR module
+    // must not discard the MSR data (and vice versa). Each failure is
+    // recorded but only reported if neither source ends up working.
+    let msr_handle = match load_intel_msr_blob().and_then(|b| open_handle(&b)) {
+        Ok(h) => Some(h),
         Err(e) => {
             info.error_msg = Some(e);
-            return info;
+            None
+        }
+    };
+    let mchbar_handle = match load_intel_mchbar_blob().and_then(|b| open_handle(&b)) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            if info.error_msg.is_none() {
+                info.error_msg = Some(e);
+            }
+            None
         }
     };
 
-    // Load IntelMCHBAR module to read MMIO.
-    let mchbar_handle = match open_handle(&mchbar_blob) {
-        Ok(h) => h,
-        Err(e) => {
-            info.error_msg = Some(e);
-            return info;
+    // Read MSR 0x606 (MSR_RAPL_POWER_UNIT) — required to decode any limit.
+    let mut units_ok = false;
+    if let Some(ref handle) = msr_handle {
+        let mut out = [0u64; 1];
+        if exec_ioctl(handle, "ioctl_read_msr", &[0x606], &mut out).is_ok() {
+            let raw = out[0];
+            let unit_bits = (raw & 0xF) as u32;
+            info.power_unit = 1.0 / (1u32 << unit_bits) as f64;
+            let time_bits = ((raw >> 16) & 0xF) as u32;
+            info.time_unit = 1.0 / (1u32 << time_bits) as f64;
+            debug!("Power unit: {} W/unit (bits={}), time unit: {} s/unit (bits={})",
+                info.power_unit, unit_bits, info.time_unit, time_bits);
+            units_ok = true;
         }
-    };
-
-    // Download IntelMSR module if not cached.
-    let msr_blob = match load_intel_msr_blob() {
-        Ok(b) => b,
-        Err(e) => {
-            info.error_msg = Some(e);
-            return info;
+    }
+    if !units_ok {
+        // Keep any earlier root-cause message (e.g. IntelMSR module load
+        // failure) instead of masking it with this generic one.
+        if info.error_msg.is_none() {
+            info.error_msg = Some("Failed to read MSR 0x606");
         }
-    };
-
-    // Load IntelMSR module to read MSRs.
-    let msr_handle = match open_handle(&msr_blob) {
-        Ok(h) => h,
-        Err(e) => {
-            info.error_msg = Some(e);
-            return info;
-        }
-    };
-
-    // Read MSR 0x606 (MSR_RAPL_POWER_UNIT).
-    let mut out = [0u64; 1];
-    if exec_ioctl(&msr_handle, "ioctl_read_msr", &[0x606], &mut out).is_ok() {
-        let raw = out[0];
-        let unit_bits = (raw & 0xF) as u32;
-        info.power_unit = 1.0 / (1u32 << unit_bits) as f64;
-        let time_bits = ((raw >> 16) & 0xF) as u32;
-        info.time_unit = 1.0 / (1u32 << time_bits) as f64;
-        debug!("Power unit: {} W/unit (bits={}), time unit: {} s/unit (bits={})",
-            info.power_unit, unit_bits, info.time_unit, time_bits);
-    } else {
-        info.error_msg = Some("Failed to read MSR 0x606");
         return info;
     }
 
     // Read MSR 0x610 (MSR_PKG_POWER_LIMIT) for static PL1/PL2.
     let mut msr610_ok = false;
-    let mut out = [0u64; 1];
-    if exec_ioctl(&msr_handle, "ioctl_read_msr", &[0x610], &mut out).is_ok() {
-        msr610_ok = true;
-        let raw = out[0];
-        debug!("MSR 0x610 raw: 0x{:016X}", raw);
-        let (pl1, pl1_en, pl1_cl, pl1_y, pl1_z) = decode_power_limit(raw, info.power_unit);
-        let (pl2, pl2_en, pl2_cl, pl2_y, pl2_z) = decode_power_limit(raw >> 32, info.power_unit);
-        info.pl1_msr = pl1;
-        info.pl1_msr_enabled = pl1_en;
-        info.pl1_msr_clamped = pl1_cl;
-        info.pl1_time_s = decode_time_window(pl1_y, pl1_z, info.time_unit);
-        info.pl2_msr = pl2;
-        info.pl2_msr_enabled = pl2_en;
-        info.pl2_msr_clamped = pl2_cl;
-        info.pl2_time_s = decode_time_window(pl2_y, pl2_z, info.time_unit);
-        debug!("MSR PL1: {:.1}W (en={} clamp={}) Y={} Z={} time={:.1}s", pl1, pl1_en, pl1_cl, pl1_y, pl1_z, info.pl1_time_s);
-        debug!("MSR PL2: {:.1}W (en={} clamp={}) Y={} Z={} time={:.1}s", pl2, pl2_en, pl2_cl, pl2_y, pl2_z, info.pl2_time_s);
+    if let Some(ref handle) = msr_handle {
+        let mut out = [0u64; 1];
+        if exec_ioctl(handle, "ioctl_read_msr", &[0x610], &mut out).is_ok() {
+            msr610_ok = true;
+            let raw = out[0];
+            debug!("MSR 0x610 raw: 0x{:016X}", raw);
+            let (pl1, pl1_en, pl1_cl, pl1_y, pl1_z) = decode_power_limit(raw, info.power_unit);
+            let (pl2, pl2_en, pl2_cl, pl2_y, pl2_z) = decode_power_limit(raw >> 32, info.power_unit);
+            info.pl1_msr = pl1;
+            info.pl1_msr_enabled = pl1_en;
+            info.pl1_msr_clamped = pl1_cl;
+            info.pl1_time_s = decode_time_window(pl1_y, pl1_z, info.time_unit);
+            info.pl2_msr = pl2;
+            info.pl2_msr_enabled = pl2_en;
+            info.pl2_msr_clamped = pl2_cl;
+            info.pl2_time_s = decode_time_window(pl2_y, pl2_z, info.time_unit);
+            debug!("MSR PL1: {:.1}W (en={} clamp={}) Y={} Z={} time={:.1}s", pl1, pl1_en, pl1_cl, pl1_y, pl1_z, info.pl1_time_s);
+            debug!("MSR PL2: {:.1}W (en={} clamp={}) Y={} Z={} time={:.1}s", pl2, pl2_en, pl2_cl, pl2_y, pl2_z, info.pl2_time_s);
+        }
     }
 
     // Read MMIO at MCHBAR + 0x59A0 (PACKAGE_POWER_LIMIT_MMIO) via IntelMCHBAR.
     let mmio_offset = 0x59A0u64;
     let mut mmio_ok = false;
-    let mut out = [0u64; 1];
-    if exec_ioctl(&mchbar_handle, "ioctl_read_qword", &[mmio_offset], &mut out).is_ok() {
-        mmio_ok = true;
-        let raw = out[0];
-        let (pl1, pl1_en, pl1_cl, pl1_y, pl1_z) = decode_power_limit(raw, info.power_unit);
-        let (pl2, pl2_en, pl2_cl, pl2_y, pl2_z) = decode_power_limit(raw >> 32, info.power_unit);
-        info.pl1_mmio = pl1;
-        info.pl1_mmio_enabled = pl1_en;
-        info.pl1_mmio_clamped = pl1_cl;
-        info.pl1_mmio_time_s = decode_time_window(pl1_y, pl1_z, info.time_unit);
-        info.pl2_mmio = pl2;
-        info.pl2_mmio_enabled = pl2_en;
-        info.pl2_mmio_clamped = pl2_cl;
-        info.pl2_mmio_time_s = decode_time_window(pl2_y, pl2_z, info.time_unit);
-        debug!("MMIO PL1: {:.1}W (en={} clamp={}) time={:.1}s", pl1, pl1_en, pl1_cl, info.pl1_mmio_time_s);
-        debug!("MMIO PL2: {:.1}W (en={} clamp={}) time={:.1}s", pl2, pl2_en, pl2_cl, info.pl2_mmio_time_s);
+    if let Some(ref handle) = mchbar_handle {
+        let mut out = [0u64; 1];
+        if exec_ioctl(handle, "ioctl_read_qword", &[mmio_offset], &mut out).is_ok() {
+            mmio_ok = true;
+            let raw = out[0];
+            let (pl1, pl1_en, pl1_cl, pl1_y, pl1_z) = decode_power_limit(raw, info.power_unit);
+            let (pl2, pl2_en, pl2_cl, pl2_y, pl2_z) = decode_power_limit(raw >> 32, info.power_unit);
+            info.pl1_mmio = pl1;
+            info.pl1_mmio_enabled = pl1_en;
+            info.pl1_mmio_clamped = pl1_cl;
+            info.pl1_mmio_time_s = decode_time_window(pl1_y, pl1_z, info.time_unit);
+            info.pl2_mmio = pl2;
+            info.pl2_mmio_enabled = pl2_en;
+            info.pl2_mmio_clamped = pl2_cl;
+            info.pl2_mmio_time_s = decode_time_window(pl2_y, pl2_z, info.time_unit);
+            debug!("MMIO PL1: {:.1}W (en={} clamp={}) time={:.1}s", pl1, pl1_en, pl1_cl, info.pl1_mmio_time_s);
+            debug!("MMIO PL2: {:.1}W (en={} clamp={}) time={:.1}s", pl2, pl2_en, pl2_cl, info.pl2_mmio_time_s);
+        }
     }
 
     // Both limit registers unreadable: report unavailable instead of
     // presenting all-zero limits as valid data.
     if !msr610_ok && !mmio_ok {
-        info.error_msg = Some("Failed to read MSR 0x610 and MMIO power limits");
+        if info.error_msg.is_none() {
+            info.error_msg = Some("Failed to read MSR 0x610 and MMIO power limits");
+        }
         return info;
     }
     info.available = true;
@@ -688,10 +736,24 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
         params.pl1_watts, params.pl1_time_s, params.pl2_watts, params.pl2_time_s,
         mchbar_handle.is_some());
 
+    // Consecutive write failures. An EC/firmware override makes the read-back
+    // verification fail, but the sync must survive it: keep retrying (the
+    // override ends when the user or firmware stops fighting) instead of
+    // dying on the first error.
+    let mut write_failures: u32 = 0;
     while running.load(Ordering::Relaxed) {
-        if let Err(e) = write_msr_pl1_pl2(&msr_handle, &params) {
-            warn!("Sync thread MSR write failed: {}", e);
-            break;
+        match write_msr_pl1_pl2(&msr_handle, &params) {
+            Ok(()) => {
+                write_failures = 0;
+            }
+            Err(e) => {
+                write_failures += 1;
+                if write_failures <= 5 {
+                    warn!("Sync thread MSR write failed: {}", e);
+                } else if write_failures == 6 {
+                    warn!("Sync thread MSR write keeps failing ({}), suppressing further warnings", e);
+                }
+            }
         }
         if let Some(ref mchbar) = mchbar_handle
             && let Err(e) = write_mmio_pl1_pl2(mchbar, &params)
@@ -903,6 +965,13 @@ pub fn pawnio_version() -> Option<String> {
     };
     *PAWNIO_VERSION.write() = ver.clone();
     ver
+}
+
+/// Clear the cached PawnIO version so the next pawnio_version() re-reads
+/// the DLL metadata. Call after installing or upgrading PawnIO — the cache
+/// would otherwise report the old version for the rest of the process.
+pub fn invalidate_pawnio_version() {
+    *PAWNIO_VERSION.write() = None;
 }
 
 /// Get the embedded PawnIO Modules blob version.

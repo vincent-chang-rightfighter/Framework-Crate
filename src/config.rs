@@ -11,11 +11,20 @@ static CONFIG_SAVE_LOCK: Mutex<()> = Mutex::new(());
 /// exit-time sync save) never collide on the same temp file.
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Generate a full temp file extension (e.g. "toml.12345.0.tmp") in one allocation.
+/// Version of the newest config snapshot written to disk. Writers bump and
+/// compare versions (see save_versioned) so a slow debounced background save
+/// can never overwrite a newer shutdown-time save with stale data.
+static LAST_SAVED_VERSION: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a full temp file extension (e.g. "toml.12345.0.42.tmp") in one
+/// allocation. The process id makes the name unique across concurrently
+/// running instances (each starts its counter at 0, so timestamp+counter
+/// alone can collide when two instances save in the same millisecond).
 fn unique_tmp_extension() -> String {
     let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let timestamp = crate::util::current_time_ms();
-    format!("toml.{}.{}.tmp", timestamp, counter)
+    let pid = std::process::id();
+    format!("toml.{}.{}.{}.tmp", timestamp, pid, counter)
 }
 
 pub fn config_path() -> Result<PathBuf, String> {
@@ -42,31 +51,76 @@ fn default_config_dir() -> PathBuf {
     }
 }
 
+/// Preserve a corrupt config file before it is overwritten by the next
+/// save.  Called on both read errors (IO / non-UTF-8) and parse errors
+/// (invalid TOML).
+fn backup_corrupt_config(path: &std::path::Path) {
+    let backup = path.with_extension(format!(
+        "toml.corrupt-{}",
+        crate::util::current_time_ms()
+    ));
+    match std::fs::copy(path, &backup) {
+        Ok(_) => tracing::warn!(
+            "Backed up corrupt config to {} before falling back to defaults",
+            backup.display()
+        ),
+        Err(be) => tracing::warn!(
+            "Failed to back up corrupt config {}: {}",
+            path.display(),
+            be
+        ),
+    }
+}
+
 pub fn load() -> Result<Config, String> {
     let path = config_path()?;
     tracing::debug!("Loading config from: {}", path.display());
     if path.exists() {
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-        let mut config: Config = toml::from_str(&content)
-            .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                // An IO error or non-UTF-8 byte sequence also means the
+                // file is corrupt and would be silently overwritten by the
+                // next save — preserve it the same way we do for parse
+                // errors.
+                backup_corrupt_config(&path);
+                return Err(format!("Failed to read {}: {}", path.display(), e));
+            }
+        };
+        let mut config: Config = match toml::from_str(&content) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                // The app falls back to defaults and continues on load error,
+                // and the next save overwrites the file — so preserve the
+                // corrupt file first, otherwise the user's configuration is
+                // silently lost.
+                backup_corrupt_config(&path);
+                return Err(format!("Failed to parse {}: {}", path.display(), e));
+            }
+        };
         config.validate();
         return Ok(config);
     }
     Ok(Config::default())
 }
 
-pub fn save(config: &Config) -> Result<(), String> {
+/// Versioned write: skips the write entirely when a NEWER version has
+/// already landed on disk. The version check happens under CONFIG_SAVE_LOCK
+/// so it is atomic with respect to concurrent writers — this closes the
+/// shutdown race where a stale debounced background save lands after the
+/// newer shutdown-time save_config_now() and rolls the file back.
+pub fn save_versioned(config: &Config, ver: u64, sync: bool) -> Result<(), String> {
     let _guard = CONFIG_SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    save_impl(config, true)
-}
-
-/// Like `save`, but skips `sync_all` (fsync). Used on the debounced hot path
-/// where writes are frequent and a crash losing the latest tweak is
-/// acceptable; shutdown paths use `save` for full durability.
-pub fn save_fast(config: &Config) -> Result<(), String> {
-    let _guard = CONFIG_SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    save_impl(config, false)
+    let newest = LAST_SAVED_VERSION.load(Ordering::Relaxed);
+    if ver < newest {
+        tracing::debug!("Skipping config save v{} (v{} already on disk)", ver, newest);
+        return Ok(());
+    }
+    let result = save_impl(config, sync);
+    if result.is_ok() {
+        LAST_SAVED_VERSION.store(ver, Ordering::Relaxed);
+    }
+    result
 }
 
 fn save_impl(config: &Config, sync: bool) -> Result<(), String> {

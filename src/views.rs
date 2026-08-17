@@ -47,7 +47,7 @@ pub(crate) struct ViewSnapshot {
 
 impl ViewSnapshot {
     pub fn from_app(app: &App) -> Self {
-        let now_ms = crate::util::current_time_ms_i64();
+        let now_ms = crate::util::monotonic_ms() as i64;
         let thermal_snap = app.state.thermal.snapshot(now_ms);
         let peripheral_snap = app.state.peripherals.snapshot();
         let platform = *read_lock(&app.state.system.platform);

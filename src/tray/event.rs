@@ -9,7 +9,6 @@ pub enum TrayEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
     CreateIcon,
-    RemoveIcon,
     Shutdown,
 }
 
@@ -40,11 +39,8 @@ mod tests {
     #[test]
     fn tray_command_equality() {
         assert_eq!(TrayCommand::CreateIcon, TrayCommand::CreateIcon);
-        assert_eq!(TrayCommand::RemoveIcon, TrayCommand::RemoveIcon);
         assert_eq!(TrayCommand::Shutdown, TrayCommand::Shutdown);
-        assert_ne!(TrayCommand::CreateIcon, TrayCommand::RemoveIcon);
         assert_ne!(TrayCommand::CreateIcon, TrayCommand::Shutdown);
-        assert_ne!(TrayCommand::RemoveIcon, TrayCommand::Shutdown);
     }
 
     #[test]

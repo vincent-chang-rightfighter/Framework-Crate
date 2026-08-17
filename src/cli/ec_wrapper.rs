@@ -444,7 +444,10 @@ impl EcClient {
                     (entry.fw_version >> 8) & 0xFF,
                     entry.fw_version & 0xFF
                 );
-                if entry.fw_type == 1 {
+                // Keep the FIRST fw_type == 1 entry. Later entries would
+                // overwrite it with the last UEFI payload's version, which
+                // is not the system BIOS version the UI labels it as.
+                if entry.fw_type == 1 && data.uefi_version.is_none() {
                     data.uefi_version = Some(version);
                 }
             }

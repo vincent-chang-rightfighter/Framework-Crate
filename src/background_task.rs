@@ -33,6 +33,13 @@ const MAX_EC_WRITE_FAILURES: u32 = 5;
 /// them back. This window bounds that recovery to 30s.
 const FAN_REASSERT_INTERVAL_MS: u64 = 30_000;
 
+/// Rate-limit for the curve-mode fail-safe: when the EC temperature read
+/// fails (empty temps map), hand fan control back to the firmware with
+/// autofanctrl() at most once per interval. The EC firmware has its own
+/// thermal protection; writing 0% duty from a 0°C control temp would
+/// otherwise leave the fans off with no protection.
+const CURVE_TEMP_FAILOVER_MS: u64 = 30_000;
+
 /// Reset the EC client and mark it unavailable so the next loop iteration
 /// will reinitialize it. Called when a spawn_blocking panics, indicating
 /// the EC may be in a bad state.
@@ -124,8 +131,12 @@ fn mark_pd_usb_c_seen(
     }
     with_write_lock(seen_ref, |guard| {
         let mut seen = (**guard).clone();
-        if seen.len() < ports.len() {
-            seen.resize(ports.len(), false);
+        // pd_ports() skips ports whose EC read failed, so the port index is
+        // not a contiguous 0..len sequence — size the vec for the highest
+        // seen port to avoid indexing out of bounds.
+        let need = ports.iter().map(|p| p.port as usize + 1).max().unwrap_or(0);
+        if seen.len() < need {
+            seen.resize(need, false);
         }
         for p in ports {
             if p.power_role == Some("Sink") {
@@ -161,12 +172,12 @@ fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
         }
         resized = true;
     });
+    // Note: the resize is deliberately NOT written back to config. It only
+    // tracks hardware fan-count changes (docking, module swaps); persisting
+    // it would overwrite the user's saved per-fan values with fill values
+    // derived from the current manual duty. The config is updated only when
+    // the user explicitly edits a per-fan duty (FanPerDutyChanged).
     if resized {
-        with_write_lock(&state.lifecycle.config, |guard| {
-            let cfg = Arc::make_mut(guard);
-            let live = read_lock(&state.fan.per_fan_duty);
-            cfg.fan.per_fan_duty = (*live).clone();
-        });
         mark_view_dirty(state);
     }
 }
@@ -176,7 +187,10 @@ fn estimate_duty_from_thermal(state: &AppState) -> Option<u32> {
     if let Some(ref t) = *thermal_snap {
         t.fans.iter().map(|f| f.rpm).max().map(|rpm| {
             let max_rpm = state.fan.fan_max_rpm.load(Ordering::Acquire) as u32;
-            if let Some(pct) = (rpm * 100).checked_div(max_rpm) {
+            if rpm == 0 {
+                // Stopped fans: seed the ramp at 0, not the 10% floor.
+                0
+            } else if let Some(pct) = (rpm * 100).checked_div(max_rpm) {
                 pct.clamp(10, 100)
             } else {
                 // When max RPM is unknown, use minimum duty to avoid a
@@ -194,7 +208,7 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
     // Periodically reset fan_max_rpm to avoid stale readings from hardware changes.
     // Reset every 60 seconds so the max adapts to the actual current fan capability.
     const FAN_MAX_RPM_RESET_INTERVAL_MS: u64 = 60_000;
-    let now_ts = crate::util::current_time_ms();
+    let now_ts = crate::util::monotonic_ms();
     let fan_count = t.fans.len() as u64;
     state.fan.fan_count.store(fan_count, Ordering::Release);
     ensure_per_fan_duty(state, t.fans.len());
@@ -202,14 +216,24 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
         let prev = state.fan.fan_max_rpm.load(Ordering::Acquire) as u32;
         let last_reset = state.fan.last_fan_rpm_reset.load(Ordering::Acquire);
         if now_ts.saturating_sub(last_reset) >= FAN_MAX_RPM_RESET_INTERVAL_MS {
-            // Reset: use the current max as the new baseline
-            state.fan.fan_max_rpm.store(max_rpm as u64, Ordering::Release);
+            // Rolling re-baseline: only ever RAISE the max-RPM baseline,
+            // never lower it. Lowering it while the fans idle (e.g. 800 RPM)
+            // makes estimate_duty_from_thermal read ~100%, so the next
+            // Manual-mode entry would seed the ramp at ~90% duty — the exact
+            // failure the resume path avoids by keeping fan_max_rpm across
+            // sleep. The seed only affects the ramp start, never the final
+            // converged duty, so a high baseline is always safe.
+            state.fan.fan_max_rpm.store(max_rpm.max(prev) as u64, Ordering::Release);
             state.fan.last_fan_rpm_reset.store(now_ts, Ordering::Release);
         } else if max_rpm > prev {
             state.fan.fan_max_rpm.store(max_rpm as u64, Ordering::Release);
         }
     }
-    let now = crate::util::current_time_ms_i64();
+    // Monotonic timestamp: the sample ts is only used for relative window
+    // pruning and chart ratios, never displayed as absolute time — using the
+    // wall clock here would let a system clock jump prune or freeze the
+    // history.
+    let now = crate::util::monotonic_ms() as i64;
 
     // Read-only comparison first to avoid cloning when unchanged.
     // Compare the whole payload: fan RPM can change while temperatures stay
@@ -342,10 +366,13 @@ pub fn spawn(state: AppState) {
                 let mut last_manual_duty: Option<u32> = None;
                 let mut consecutive_ec_failures: u32 = 0;
                 let mut consecutive_ec_write_failures: u32 = 0;
-                // Wall-clock time of the last successful fan duty write.
+                // Monotonic time of the last successful fan duty write.
                 // Drives the periodic re-assert that recovers the fans when
                 // a sleep/resume cycle was not detected (missed event).
                 let mut last_duty_write_ms: u64 = 0;
+                // Monotonic time of the last curve fail-safe autofanctrl()
+                // handover (see CURVE_TEMP_FAILOVER_MS).
+                let mut last_curve_failover_ms: u64 = 0;
                 // True on the iteration right after a resume was detected.
                 // Manual control then re-asserts itself with at least one
                 // duty write even when the ramp estimate already equals the
@@ -366,7 +393,7 @@ pub fn spawn(state: AppState) {
                 // jumping straight to the target duty.
                 let mut manual_per_fan_ramp: Option<Vec<u32>> = None;
                 let mut curve_stepper = if saved_duty > 0 { CurveStepper::with_last_duty(saved_duty) } else { CurveStepper::new() };
-                let start_ms = crate::util::current_time_ms();
+                let start_ms = crate::util::monotonic_ms();
                 let mut last_expansion_scan: u64 = start_ms;
                 let mut last_versions_scan: u64 = start_ms;
                 let mut last_cpu_power_poll: u64 = 0;
@@ -422,7 +449,7 @@ pub fn spawn(state: AppState) {
                         }
                         _ => bg_state2.lifecycle.poll_ms.load(Ordering::Acquire).max(POLL_RATE_MIN_MS as u64),
                     };
-                    let mut now_ms = crate::util::current_time_ms();
+                    let mut now_ms = crate::util::monotonic_ms();
                     let last_interaction = bg_state2.lifecycle.last_interaction_ts.load(Ordering::Acquire);
                     let is_idle = now_ms.saturating_sub(last_interaction) > IDLE_THRESHOLD_MS;
                     let effective_interval = match fan_mode {
@@ -518,7 +545,7 @@ pub fn spawn(state: AppState) {
 
                     // Expansion / PD scans run on fixed wall-clock intervals
                     // so hotplug is always detectable.
-                    now_ms = crate::util::current_time_ms();
+                    now_ms = crate::util::monotonic_ms();
                     if now_ms.saturating_sub(last_expansion_scan) >= EXPANSION_SCAN_MS {
                         last_expansion_scan = now_ms;
                         let ec_clone = Arc::clone(&ec);
@@ -601,7 +628,17 @@ pub fn spawn(state: AppState) {
                         last_manual_duty = None;
                         manual_per_fan_ramp = None;
                         if matches!(mode, crate::types::FanControlMode::Manual) {
-                            manual_ramp_current = estimate_duty_from_thermal(&bg_state2);
+                            // Prefer the last duty actually written (most
+                            // reliable seed); fall back to the RPM estimate
+                            // only when nothing was written yet (fresh boot,
+                            // or after resume where last_applied_duty is 0
+                            // and the EC reset fan control during sleep).
+                            let last_duty = bg_state2.fan.last_applied_duty.load(Ordering::Acquire) as u32;
+                            manual_ramp_current = if last_duty > 0 {
+                                Some(last_duty)
+                            } else {
+                                estimate_duty_from_thermal(&bg_state2)
+                            };
                         } else {
                             manual_ramp_current = None;
                         }
@@ -697,11 +734,16 @@ pub fn spawn(state: AppState) {
                                 let per_fan = read_lock(&bg_state2.fan.per_fan_duty);
                                 if !per_fan.is_empty() {
                                     let ramp = manual_per_fan_ramp.get_or_insert_with(|| {
-                                        let est = estimate_duty_from_thermal(&bg_state2)
-                                            .unwrap_or_else(|| per_fan[0]);
-                                        vec![est; per_fan.len()]
+                                        let last_duty = bg_state2.fan.last_applied_duty.load(Ordering::Acquire) as u32;
+                                        let seed = if last_duty > 0 {
+                                            last_duty
+                                        } else {
+                                            estimate_duty_from_thermal(&bg_state2)
+                                                .unwrap_or_else(|| per_fan[0])
+                                        };
+                                        vec![seed; per_fan.len()]
                                     });
-                                    let mut max_applied: u32 = 0;
+                                    let mut wrote_any = false;
                                     for (idx, &target) in per_fan.iter().enumerate() {
                                         let current = ramp.get(idx).copied().unwrap_or(target);
                                         let next_i = crate::fan_control::apply_rate_limit(current, target, 10);
@@ -732,7 +774,7 @@ pub fn spawn(state: AppState) {
                                         match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next_i, Some(fan_idx))).await {
                                             Ok(Ok(())) => {
                                                 ramp[idx] = next_i;
-                                                max_applied = max_applied.max(next_i);
+                                                wrote_any = true;
                                                 consecutive_ec_write_failures = 0;
                                                 last_duty_write_ms = now_ms;
                                             }
@@ -752,7 +794,11 @@ pub fn spawn(state: AppState) {
                                             }
                                         }
                                     }
-                                    if max_applied > 0 {
+                                    // Update on any successful write, including convergence at 0% —
+                                    // otherwise the quit warning and ramp seed
+                                    // would keep a stale pre-per-fan value.
+                                    if wrote_any {
+                                        let max_applied = ramp.iter().copied().max().unwrap_or(0);
                                         bg_state2.fan.last_applied_duty.store(max_applied as u64, Ordering::Release);
                                     }
                                     // Keep the unified ramp seed in sync with the per-fan
@@ -769,6 +815,45 @@ pub fn spawn(state: AppState) {
                                 && let (Some(hyst), Some(rate)) =
                                     (curve_hysteresis, curve_rate_limit)
                             {
+                                    // Fail-safe: an empty temps map means the
+                                    // EC temperature read failed (ec_wrapper
+                                    // returns Ok with empty temps on read
+                                    // error while fan RPMs may still read).
+                                    // curve_control_temp would then return 0
+                                    // and the stepper would write 0% duty —
+                                    // fans off with no firmware protection.
+                                    // Hand control back to the EC firmware,
+                                    // which has its own thermal protection.
+                                    if thermal.temps.is_empty() {
+                                        // Treat silent empty temps like a read
+                                        // error so a dead EC is eventually
+                                        // reset: autofanctrl() alone can never
+                                        // recover it, and counting here feeds
+                                        // the same MAX_EC_IO_FAILURES path as
+                                        // an explicit thermal() error.
+                                        consecutive_ec_failures += 1;
+                                        if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
+                                            reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
+                                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                            continue 'poll_loop;
+                                        }
+                                        if now_ms.saturating_sub(last_curve_failover_ms) >= CURVE_TEMP_FAILOVER_MS {
+                                            let ec_clone = Arc::clone(&ec);
+                                            match tokio::task::spawn_blocking(move || ec_clone.autofanctrl()).await {
+                                                Ok(Ok(())) => {
+                                                    last_curve_failover_ms = now_ms;
+                                                    consecutive_ec_failures = 0;
+                                                    tracing::warn!("Curve mode: EC temps read failed, handed fan control to firmware");
+                                                }
+                                                Ok(Err(e)) => warn!("Curve fail-safe autofanctrl failed: {}", e),
+                                                Err(join_err) => {
+                                                    warn!("EC spawn panicked (curve fail-safe autofanctrl): {}", join_err);
+                                                    reset_ec_on_panic(&bg_state2);
+                                                }
+                                            }
+                                        }
+                                        continue 'poll_loop;
+                                    }
                                     let control_temp = crate::types::curve_control_temp(&thermal.temps, &curve_sensors);
                                     let full_pts_arc = read_lock(&bg_state2.fan.curve_full_points);
                                     let full_pts: &[[u32; 2]] = &full_pts_arc;
@@ -785,17 +870,20 @@ pub fn spawn(state: AppState) {
                                     if let Some(next) = next {
                                         let fan_count = bg_state2.fan.fan_count.load(Ordering::Acquire) as u32;
                                         let write_each = !bg_state2.fan.unified_duty.load(Ordering::Acquire) && fan_count > 1;
-                                        // Only advance the stepper when at least one fan
-                                        // actually received the new duty; failed writes
-                                        // must not distort the rate-limit basis (the next
-                                        // step would be computed from an unapplied value).
+                                        // Only advance the stepper when the duty was
+                                        // actually applied to every target fan: a
+                                        // partial success must not distort the
+                                        // rate-limit basis (the next step would be
+                                        // computed from an unapplied value).
                                         let mut applied = false;
                                         if write_each {
+                                            let mut all_fans_applied = true;
                                             for fan_idx in 0..fan_count {
                                                 let mode_check = crate::types::FanControlMode::from_u8(
                                                     bg_state2.fan.mode.load(Ordering::Acquire) as u8
                                                 );
                                                 if mode_check != mode {
+                                                    all_fans_applied = false;
                                                     break;
                                                 }
                                                 let ec_clone = Arc::clone(&ec);
@@ -804,13 +892,13 @@ pub fn spawn(state: AppState) {
                                                         if let Err(e) = result {
                                                             warn!("Failed to set fan {} duty (curve): {}", fan_idx, e);
                                                             consecutive_ec_write_failures += 1;
+                                                            all_fans_applied = false;
                                                             if consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
                                                                 reset_ec_after_failures(&bg_state2, consecutive_ec_write_failures);
                                                                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                                                 continue 'poll_loop;
                                                             }
                                                         } else {
-                                                            applied = true;
                                                             consecutive_ec_write_failures = 0;
                                                             last_duty_write_ms = now_ms;
                                                         }
@@ -818,10 +906,12 @@ pub fn spawn(state: AppState) {
                                                     Err(join_err) => {
                                                         warn!("EC spawn panicked (set_fan_duty curve fan {}): {}", fan_idx, join_err);
                                                         reset_ec_on_panic(&bg_state2);
+                                                        all_fans_applied = false;
                                                         break;
                                                     }
                                                 }
                                             }
+                                            applied = all_fans_applied;
                                             if applied {
                                                 bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
                                             }

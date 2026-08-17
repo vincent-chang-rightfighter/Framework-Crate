@@ -51,7 +51,7 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) {
     }
 }
 
-pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
+pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState) {
     tokio::spawn(async move {
         pin_to_slowest_core();
         let mut last_battery: Option<BatteryKey>;
@@ -59,7 +59,7 @@ pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
         // Apply the persisted charge limit once EC is ready. The client is
         // initialized asynchronously, so retry until it appears or shutdown.
         {
-            let cfg = Arc::clone(&config_rx.borrow());
+            let (cfg, _ver) = config_rx.borrow().clone();
             let key = battery_key(&cfg);
             last_battery = Some(key);
             if key.is_some() {
@@ -75,21 +75,22 @@ pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
 
             // Drain rapid successive changes within the debounce window.
             // The timeout returns Err on timeout (normal), Ok(Err(_)) on channel close.
-            let mut latest = Arc::clone(&config_rx.borrow());
+            let mut latest = config_rx.borrow().clone();
             loop {
                 match tokio::time::timeout(
                     Duration::from_millis(DEBOUNCE_MS),
                     config_rx.changed(),
                 ).await {
                     Ok(Ok(())) => {
-                        latest = Arc::clone(&config_rx.borrow());
+                        latest = config_rx.borrow().clone();
                     }
                     Ok(Err(_)) => {
-                        // Channel closed — save latest config and exit
-                        let cfg_arc = Arc::clone(&latest);
+                        // Channel closed — save latest config and exit.
+                        // Versioned: skipped if a newer snapshot already hit disk.
+                        let (cfg_arc, ver) = latest;
                         let save_failed = Arc::clone(&state.lifecycle.bg_config_save_failed);
                         tokio::task::spawn_blocking(move || {
-                            if let Err(e) = crate::config::save_fast(&cfg_arc) {
+                            if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, false) {
                                 warn!("Failed to save config on channel close: {}", e);
                                 save_failed.store(true, Ordering::Relaxed);
                             }
@@ -103,10 +104,14 @@ pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
                 }
             }
 
-            let cfg_arc = Arc::clone(&latest);
+            // Versioned: a newer shutdown-time save_config_now() marks older
+            // snapshots as superseded, so this debounced write can never roll
+            // the file back after it.
+            let (cfg_arc, ver) = latest;
+            let cfg_for_battery = Arc::clone(&cfg_arc);
             let save_failed = Arc::clone(&state.lifecycle.bg_config_save_failed);
             tokio::task::spawn_blocking(move || {
-                if let Err(e) = crate::config::save_fast(&cfg_arc) {
+                if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, false) {
                     warn!("Failed to save config: {}", e);
                     save_failed.store(true, Ordering::Relaxed);
                 } else {
@@ -114,10 +119,10 @@ pub fn spawn(mut config_rx: watch::Receiver<Arc<Config>>, state: AppState) {
                 }
             }).await.unwrap_or_else(|e| warn!("config save task panicked: {}", e));
 
-            let key = battery_key(&latest);
+            let key = battery_key(&cfg_for_battery);
             if last_battery.as_ref() != Some(&key) {
                 last_battery = Some(key);
-                apply_battery_settings(&latest, &state).await;
+                apply_battery_settings(&cfg_for_battery, &state).await;
             }
         }
     });

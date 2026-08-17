@@ -24,13 +24,20 @@ thread_local! {
 
 static TRAY_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
-pub fn notify_tray_thread() {
+/// Wake the tray thread with WM_COMMAND_READY so it drains command_rx.
+/// Returns false (and logs) when the post fails — normally because the
+/// thread's message queue does not exist yet. Callers with a pending
+/// command must re-post until the thread is ready.
+pub fn notify_tray_thread() -> bool {
     let tid = TRAY_THREAD_ID.load(Ordering::Acquire);
-    if tid != 0 {
-        unsafe {
-            PostThreadMessageW(tid, WM_COMMAND_READY, 0, 0);
-        }
+    if tid == 0 {
+        return false;
     }
+    let ok = unsafe { PostThreadMessageW(tid, WM_COMMAND_READY, 0, 0) != 0 };
+    if !ok {
+        tracing::warn!("PostThreadMessageW to tray thread {} failed (queue not ready?)", tid);
+    }
+    ok
 }
 
 #[repr(C)]
@@ -80,6 +87,7 @@ unsafe extern "system" {
         hInstance: *mut core::ffi::c_void, lpParam: *mut core::ffi::c_void,
     ) -> *mut core::ffi::c_void;
     fn DestroyWindow(hWnd: *mut core::ffi::c_void) -> i32;
+    fn DestroyIcon(hIcon: *mut core::ffi::c_void) -> i32;
     fn GetModuleHandleW(lpModuleName: *const u16) -> *mut core::ffi::c_void;
     fn GetCursorPos(lpPoint: *mut POINT) -> i32;
     fn SetForegroundWindow(hWnd: *mut core::ffi::c_void) -> i32;
@@ -137,14 +145,26 @@ pub fn spawn_message_pump(
     })
 }
 
-fn cleanup_and_exit(tray_icon_loaded: bool, tray_hwnd: *mut core::ffi::c_void) {
+fn cleanup_and_exit(tray_icon_loaded: bool, tray_hwnd: *mut core::ffi::c_void, hicon: Option<isize>) {
     // Clear the thread id so notify_tray_thread() stops posting to a dead thread.
     TRAY_THREAD_ID.store(0, Ordering::Release);
     if tray_icon_loaded {
         system_info::shell_notify_delete(tray_hwnd as isize);
     }
+    if let Some(icon) = hicon {
+        unsafe {
+            // Release the HICON from CreateIconFromResourceEx, or every
+            // pump exit (shutdown / reinit) leaks one GDI handle.
+            DestroyIcon(icon as *mut core::ffi::c_void);
+        }
+    }
     unsafe {
         DestroyWindow(tray_hwnd);
+        // Unregister the hidden window's class so a subsequent reinit()
+        // does not depend on the ERROR_CLASS_ALREADY_EXISTS retry path.
+        let class_name: Vec<u16> = "FrameworkControlTray\0".encode_utf16().collect();
+        let h_instance = GetModuleHandleW(std::ptr::null());
+        UnregisterClassW(class_name.as_ptr(), h_instance);
     }
 }
 
@@ -195,7 +215,7 @@ fn message_pump_loop(
         let result = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
         if result == 0 || result == -1 {
             tracing::info!("Tray message pump exiting during priming (result={})", result);
-            cleanup_and_exit(tray_icon_loaded, tray_hwnd);
+            cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
             return;
         }
         // Process the primed message normally
@@ -217,7 +237,7 @@ fn message_pump_loop(
 
         if result == 0 || result == -1 {
             tracing::info!("Tray message pump exiting (result={})", result);
-            cleanup_and_exit(tray_icon_loaded, tray_hwnd);
+            cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
             return;
         }
 
@@ -225,7 +245,7 @@ fn message_pump_loop(
             match command_rx.try_recv() {
                 Ok(TrayCommand::Shutdown) => {
                     tracing::info!("Tray shutdown");
-                    cleanup_and_exit(tray_icon_loaded, tray_hwnd);
+                    cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
                     return;
                 }
                 Ok(TrayCommand::CreateIcon) => {
@@ -235,29 +255,26 @@ fn message_pump_loop(
                                 tray_hwnd as isize, icon, "Framework Crate", WM_TRAYICON,
                             );
                             tray_icon_loaded = ok;
-                            let _ = icon_ready_tx.send(ok);
+                            // try_send: the channel is sync(1) and the UI re-posts
+                            // CreateIcon while the icon is pending — a blocking
+                            // send() would freeze this thread in GetMessageW and
+                            // the tray icon would stop responding to clicks.
+                            let _ = icon_ready_tx.try_send(ok);
                             if ok {
                                 tracing::info!("Tray icon created");
                             } else {
                                 tracing::warn!("Shell_NotifyIconW failed");
                             }
                         } else {
-                            let _ = icon_ready_tx.send(false);
+                            let _ = icon_ready_tx.try_send(false);
                         }
                     } else {
-                        let _ = icon_ready_tx.send(true);
-                    }
-                }
-                Ok(TrayCommand::RemoveIcon) => {
-                    if tray_icon_loaded {
-                        system_info::shell_notify_delete(tray_hwnd as isize);
-                        tray_icon_loaded = false;
-                        tracing::info!("Tray icon removed");
+                        let _ = icon_ready_tx.try_send(true);
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    cleanup_and_exit(tray_icon_loaded, tray_hwnd);
+                    cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
                     return;
                 }
             }

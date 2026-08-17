@@ -108,6 +108,7 @@ unsafe extern "system" {
     fn ShowWindow(hWnd: *mut core::ffi::c_void, nCmdShow: i32) -> i32;
     fn SetForegroundWindow(hWnd: *mut core::ffi::c_void) -> i32;
     fn IsIconic(hWnd: *mut core::ffi::c_void) -> i32;
+    fn IsZoomed(hWnd: *mut core::ffi::c_void) -> i32;
     fn IsWindow(hWnd: *mut core::ffi::c_void) -> i32;
     fn PostMessageW(hWnd: *mut core::ffi::c_void, msg: u32, wParam: usize, lParam: isize) -> i32;
     fn CreatePopupMenu() -> *mut core::ffi::c_void;
@@ -164,13 +165,8 @@ struct WINDOWPLACEMENT {
     ptMinPosition: POINT,
     ptMaxPosition: POINT,
     rcNormalPosition: RECT,
-    /// Reserved (rcDevice). Must be present: SetWindowPlacement validates
-    /// `length == sizeof(WINDOWPLACEMENT)` (60 bytes on x64/x86) and fails
-    /// otherwise, leaving the window parked on screen.
-    rcDevice: RECT,
 }
 
-const GWL_STYLE: i32 = -16;
 const GWL_EXSTYLE: i32 = -20;
 const WS_EX_TOOLWINDOW: isize = 0x00000080;
 /// winit sets WS_EX_APPWINDOW by default (window_state.rs ON_TASKBAR).
@@ -188,17 +184,15 @@ const SWP_SHOWWINDOW: u32 = 0x0040;
 /// Classic off-screen parking coordinates (far outside the virtual screen).
 const OFFSCREEN: i32 = -32000;
 
-/// The Windows SDK WINDOWPLACEMENT is exactly 60 bytes (incl. reserved
-/// rcDevice) on both x86 and x64. SetWindowPlacement fails if `length` does
-/// not match sizeof(WINDOWPLACEMENT), so pin the size at compile time.
-const _: () = assert!(std::mem::size_of::<WINDOWPLACEMENT>() == 60);
+/// The Windows SDK WINDOWPLACEMENT is 44 bytes on both x86 and x64
+/// (rcDevice exists only in the _MAC variant). SetWindowPlacement fails if
+/// `length` does not match sizeof(WINDOWPLACEMENT), so pin the size at
+/// compile time.
+const _: () = assert!(std::mem::size_of::<WINDOWPLACEMENT>() == 44);
 
 /// Placement saved when the window is parked, used to restore its on-screen
 /// position and size.
 static SAVED_PLACEMENT: std::sync::Mutex<Option<WINDOWPLACEMENT>> = std::sync::Mutex::new(None);
-/// Original GWL_STYLE saved when parked, so minimize/maximize buttons are
-/// restored (WS_EX_TOOLWINDOW causes DWM to use tool-window chrome).
-static SAVED_STYLE: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
 
 /// "Hide" the window by parking it off-screen instead of SW_HIDE. The window
 /// stays WS_VISIBLE, so WM_PAINT keeps arriving and the swapchain stays valid
@@ -215,6 +209,12 @@ pub fn hide_window_to_tray(hwnd: isize) {
         // Park off-screen. NOTE: SetWindowPlacement clamps negative coordinates
         // back to the virtual screen origin (0,0), leaving the window visible;
         // SetWindowPos does not, so it must be used for parking.
+        // Maximized windows ignore SetWindowPos positioning (a no-op that would
+        // leave the window on screen), so unmaximize first — the saved
+        // placement still carries SW_SHOWMAXIMIZED and restore re-maximizes.
+        if IsZoomed(h) != 0 {
+            ShowWindow(h, SW_RESTORE as i32);
+        }
         SetWindowPos(
             h,
             std::ptr::null_mut(),
@@ -229,8 +229,6 @@ pub fn hide_window_to_tray(hwnd: isize) {
         // taskbar button even alongside it, so clear that too. SWP_FRAMECHANGED
         // makes the taskbar re-evaluate the extended style.
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-        let style = GetWindowLongPtrW(h, GWL_STYLE);
-        *SAVED_STYLE.lock().unwrap_or_else(|p| p.into_inner()) = Some(style);
         SetWindowLongPtrW(h, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW);
         SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         // Drop keyboard focus so keystrokes don't reach the invisible window.
@@ -244,15 +242,11 @@ pub fn restore_window_from_tray(hwnd: isize) {
     // SAFETY: hwnd is a valid window handle from FindWindowW/CreateWindowExW.
     unsafe {
         // Re-add taskbar / alt-tab presence (restore WS_EX_APPWINDOW that
-        // winit set at creation). Also restore the original window style
-        // (GWL_STYLE) because WS_EX_TOOLWINDOW causes DWM to use tool-window
-        // chrome which hides minimize/maximize buttons. SWP_FRAMECHANGED
+        // winit set at creation). GWL_STYLE is left untouched (it was never
+        // modified while parked, so no restore is needed). SWP_FRAMECHANGED
         // makes the taskbar and DWM re-evaluate.
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
         SetWindowLongPtrW(h, GWL_EXSTYLE, (ex & !WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW);
-        if let Some(orig_style) = SAVED_STYLE.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            SetWindowLongPtrW(h, GWL_STYLE, orig_style);
-        }
         SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 
         // Explicitly restore from iconic state FIRST. SetWindowPlacement with
@@ -370,7 +364,9 @@ pub fn total_memory_gb() -> String {
     // initialised MemoryStatusEx struct (dw_length set). The buffer is stack-allocated.
     let ok = unsafe { GlobalMemoryStatusEx(&mut mem) };
     if ok != 0 && mem.ull_total_phys > 0 {
-        let gb = ((mem.ull_total_phys as f64 / 1024.0 / 1024.0 / 1024.0).ceil()) as u64;
+        // Round, not ceil: 15.5 GiB is "16 GB" either way, but 15.2 GiB
+        // must not be reported as 16 GB.
+        let gb = ((mem.ull_total_phys as f64 / 1024.0 / 1024.0 / 1024.0).round()) as u64;
         format!("{} GB", gb)
     } else {
         "N/A".to_string()
