@@ -21,6 +21,18 @@ const MAX_PD_HISTORY: usize = 3;
 /// even if the tray's PowerResumed event was missed.
 const MAX_EC_IO_FAILURES: u32 = 5;
 
+/// Consecutive EC fan duty write failures tolerated before forcing a
+/// client reinitialization (separate from reads: a healthy thermal poll
+/// would otherwise keep resetting the read counter while writes fail).
+const MAX_EC_WRITE_FAILURES: u32 = 5;
+
+/// Re-assert the configured fan duty even when the ramp has converged if
+/// no successful duty write happened for this long. The EC resets fan
+/// control during sleep; if the tray's PowerResumed event is missed, the
+/// fans would otherwise stay off (0 RPM) forever with no write to bring
+/// them back. This window bounds that recovery to 30s.
+const FAN_REASSERT_INTERVAL_MS: u64 = 30_000;
+
 /// Reset the EC client and mark it unavailable so the next loop iteration
 /// will reinitialize it. Called when a spawn_blocking panics, indicating
 /// the EC may be in a bad state.
@@ -327,6 +339,11 @@ pub fn spawn(state: AppState) {
                     };
                 let mut last_manual_duty: Option<u32> = None;
                 let mut consecutive_ec_failures: u32 = 0;
+                let mut consecutive_ec_write_failures: u32 = 0;
+                // Wall-clock time of the last successful fan duty write.
+                // Drives the periodic re-assert that recovers the fans when
+                // a sleep/resume cycle was not detected (missed event).
+                let mut last_duty_write_ms: u64 = 0;
                 // True on the iteration right after a resume was detected.
                 // Manual control then re-asserts itself with at least one
                 // duty write even when the ramp estimate already equals the
@@ -351,8 +368,8 @@ pub fn spawn(state: AppState) {
                 let mut last_expansion_scan: u64 = start_ms;
                 let mut last_versions_scan: u64 = start_ms;
                 let mut last_cpu_power_poll: u64 = 0;
-                let mut last_resume_ts: u64 = 0;
-                loop {
+let mut last_resume_ts: u64 = 0;
+                'poll_loop: loop {
                     let resume_ts = bg_state2.lifecycle.last_resume_ts.load(Ordering::Acquire);
                     if resume_ts != 0 && resume_ts != last_resume_ts {
                         last_resume_ts = resume_ts;
@@ -597,6 +614,15 @@ pub fn spawn(state: AppState) {
                                     Ok(result) => {
                                         if let Err(e) = result {
                                             warn!("Failed to restore auto fan control: {}", e);
+                                            consecutive_ec_write_failures += 1;
+                                            if consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
+                                                reset_ec_after_failures(&bg_state2, consecutive_ec_write_failures);
+                                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                                continue 'poll_loop;
+                                            }
+                                        } else {
+                                            consecutive_ec_write_failures = 0;
+                                            last_duty_write_ms = now_ms;
                                         }
                                     }
                                     Err(join_err) => {
@@ -617,7 +643,16 @@ pub fn spawn(state: AppState) {
                                 if let Some(target) = manual_duty {
                                     let current = manual_ramp_current.unwrap_or(target);
                                     let next = crate::fan_control::apply_rate_limit(current, target, 10);
-                                    if last_manual_duty != Some(next) {
+                                    let converged = last_manual_duty == Some(next);
+                                    // Even when converged, periodically re-assert the duty:
+                                    // the EC resets fan control during sleep, and if the
+                                    // resume event was missed the fan would stay off with
+                                    // no write to bring it back.
+                                    let reassert = converged
+                                        && now_ms.saturating_sub(last_duty_write_ms) >= FAN_REASSERT_INTERVAL_MS;
+                                    if converged && !reassert {
+                                        manual_ramp_current = Some(next);
+                                    } else {
                                         let ec_clone = Arc::clone(&ec);
                                         match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, None)).await {
                                             Ok(result) => match result {
@@ -626,11 +661,21 @@ pub fn spawn(state: AppState) {
                                                         bg_state2.fan.mode.load(Ordering::Acquire) as u8
                                                     );
                                                     if mode_now != mode { last_fan_mode = Some(mode); continue; }
+                                                    consecutive_ec_write_failures = 0;
+                                                    last_duty_write_ms = now_ms;
                                                     bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
                                                     last_manual_duty = Some(next);
                                                     manual_ramp_current = Some(next);
                                                 }
-                                                Err(e) => warn!("Failed to set manual fan duty: {}", e),
+                                                Err(e) => {
+                                                    warn!("Failed to set manual fan duty: {}", e);
+                                                    consecutive_ec_write_failures += 1;
+                                                    if consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
+                                                        reset_ec_after_failures(&bg_state2, consecutive_ec_write_failures);
+                                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                                        continue 'poll_loop;
+                                                    }
+                                                }
                                             },
                                             Err(join_err) => {
                                                 warn!("EC spawn panicked (set_fan_duty): {}", join_err);
@@ -638,8 +683,6 @@ pub fn spawn(state: AppState) {
                                                 continue;
                                             }
                                         }
-                                    } else {
-                                        manual_ramp_current = Some(next);
                                     }
                                 }
                             } else {
@@ -664,8 +707,14 @@ pub fn spawn(state: AppState) {
                                         // estimate already equals the target: the EC
                                         // reverted to firmware control during sleep
                                         // and needs one explicit duty write to hand
-                                        // control back.
-                                        if next_i == current && !just_resumed {
+                                        // control back. Same for the periodic
+                                        // re-assert when the ramp has converged — a
+                                        // missed resume event would otherwise leave
+                                        // the fans off with no write to bring them
+                                        // back.
+                                        let reassert = now_ms.saturating_sub(last_duty_write_ms)
+                                            >= FAN_REASSERT_INTERVAL_MS;
+                                        if next_i == current && !just_resumed && !reassert {
                                             continue;
                                         }
                                         // Re-check mode between fans to avoid setting duties
@@ -682,8 +731,18 @@ pub fn spawn(state: AppState) {
                                             Ok(Ok(())) => {
                                                 ramp[idx] = next_i;
                                                 max_applied = max_applied.max(next_i);
+                                                consecutive_ec_write_failures = 0;
+                                                last_duty_write_ms = now_ms;
                                             }
-                                            Ok(Err(e)) => warn!("Failed to set fan {} duty: {}", fan_idx, e),
+                                            Ok(Err(e)) => {
+                                                warn!("Failed to set fan {} duty: {}", fan_idx, e);
+                                                consecutive_ec_write_failures += 1;
+                                                if consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
+                                                    reset_ec_after_failures(&bg_state2, consecutive_ec_write_failures);
+                                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                                    continue 'poll_loop;
+                                                }
+                                            }
                                             Err(join_err) => {
                                                 warn!("EC spawn panicked (set_fan_duty fan {}): {}", fan_idx, join_err);
                                                 reset_ec_on_panic(&bg_state2);
@@ -711,7 +770,17 @@ pub fn spawn(state: AppState) {
                                     let control_temp = crate::types::curve_control_temp(&thermal.temps, &curve_sensors);
                                     let full_pts_arc = read_lock(&bg_state2.fan.curve_full_points);
                                     let full_pts: &[[u32; 2]] = &full_pts_arc;
-                                    if let Some(next) = curve_stepper.next(control_temp, hyst, rate, curve_rate_limit_down, full_pts) {
+                                    let mut next = curve_stepper.next(control_temp, hyst, rate, curve_rate_limit_down, full_pts);
+                                    // The stepper only yields a value when the duty
+                                    // changes. When it has converged, periodically
+                                    // re-assert the last duty anyway: a missed resume
+                                    // event would otherwise leave the fans off.
+                                    if next.is_none()
+                                        && now_ms.saturating_sub(last_duty_write_ms) >= FAN_REASSERT_INTERVAL_MS
+                                    {
+                                        next = curve_stepper.current_duty();
+                                    }
+                                    if let Some(next) = next {
                                         let fan_count = bg_state2.fan.fan_count.load(Ordering::Acquire) as u32;
                                         let write_each = !bg_state2.fan.unified_duty.load(Ordering::Acquire) && fan_count > 1;
                                         // Only advance the stepper when at least one fan
@@ -732,8 +801,16 @@ pub fn spawn(state: AppState) {
                                                     Ok(result) => {
                                                         if let Err(e) = result {
                                                             warn!("Failed to set fan {} duty (curve): {}", fan_idx, e);
+                                                            consecutive_ec_write_failures += 1;
+                                                            if consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
+                                                                reset_ec_after_failures(&bg_state2, consecutive_ec_write_failures);
+                                                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                                                continue 'poll_loop;
+                                                            }
                                                         } else {
                                                             applied = true;
+                                                            consecutive_ec_write_failures = 0;
+                                                            last_duty_write_ms = now_ms;
                                                         }
                                                     }
                                                     Err(join_err) => {
@@ -755,10 +832,20 @@ pub fn spawn(state: AppState) {
                                                             bg_state2.fan.mode.load(Ordering::Acquire) as u8
                                                         );
                                                         if mode_now != mode { last_fan_mode = Some(mode); continue; }
+                                                        consecutive_ec_write_failures = 0;
+                                                        last_duty_write_ms = now_ms;
                                                         bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
                                                         applied = true;
                                                     }
-                                                    Err(e) => warn!("Failed to set fan duty (curve): {}", e),
+                                                    Err(e) => {
+                                                        warn!("Failed to set fan duty (curve): {}", e);
+                                                        consecutive_ec_write_failures += 1;
+                                                        if consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
+                                                            reset_ec_after_failures(&bg_state2, consecutive_ec_write_failures);
+                                                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                                            continue 'poll_loop;
+                                                        }
+                                                    }
                                                 },
                                                 Err(join_err) => {
                                                     warn!("EC spawn panicked (set_fan_duty curve): {}", join_err);

@@ -28,6 +28,11 @@ impl CurveStepper {
     pub fn note_applied(&mut self, duty: u32) {
         self.last_duty = Some(duty);
     }
+    /// Last duty actually applied (or the seed), if any. Used to re-assert
+    /// a converged duty after sleep/resume.
+    pub fn current_duty(&self) -> Option<u32> {
+        self.last_duty
+    }
     pub fn next(&mut self, temp: i32, hysteresis_c: u32, rate_limit_up: u32, rate_limit_down: Option<u32>, full_points: &[[u32; 2]]) -> Option<u32> {
         if !self.anchored {
             self.transition_start_temp = temp;
