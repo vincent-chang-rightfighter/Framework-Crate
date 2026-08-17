@@ -15,6 +15,9 @@ pub struct TrayManager {
     icon_ready_rx: Option<mpsc::Receiver<bool>>,
     thread_ready_rx: Option<mpsc::Receiver<()>>,
     initialized: bool,
+    thread_ready: bool,
+    icon_requested: bool,
+    init_started_at: Option<std::time::Instant>,
     icon_loaded: bool,
     thread_handle: Option<JoinHandle<()>>,
     pub(crate) just_restored_at: Option<std::time::Instant>,
@@ -35,6 +38,9 @@ impl TrayManager {
             icon_ready_rx: None,
             thread_ready_rx: None,
             initialized: false,
+            thread_ready: false,
+            icon_requested: false,
+            init_started_at: None,
             icon_loaded: false,
             thread_handle: None,
             just_restored_at: None,
@@ -53,28 +59,51 @@ impl TrayManager {
         let (icon_ready_tx, icon_ready_rx) = mpsc::sync_channel(1);
         let (thread_ready_tx, thread_ready_rx) = mpsc::sync_channel(1);
 
-        let handle = spawn_message_pump(hwnd, event_tx, command_rx, icon_ready_tx, thread_ready_tx);
+        let handle = spawn_message_pump(event_tx, command_rx, icon_ready_tx, thread_ready_tx);
 
-        // Block until the tray thread confirms it has entered GetMessageW.
-        // This prevents the race where notify_tray_thread() posts WM_COMMAND_READY
-        // before the thread has a message queue.
-        match thread_ready_rx.recv_timeout(std::time::Duration::from_secs(3)) {
-            Ok(()) => tracing::info!("Tray thread ready"),
-            Err(_) => tracing::warn!("Tray thread ready signal timeout"),
-        }
-
+        // Do not block on the thread-ready signal: poll it from the UI tick
+        // via show_icon_async(). This keeps init() off the UI thread's
+        // critical path (a hung tray thread must not freeze the window).
         self.command_tx = Some(command_tx);
         self.event_rx = Some(event_rx);
         self.icon_ready_rx = Some(icon_ready_rx);
         self.thread_ready_rx = Some(thread_ready_rx);
         self.thread_handle = Some(handle);
         self.initialized = true;
+        self.thread_ready = false;
+        self.icon_requested = false;
+        self.init_started_at = Some(std::time::Instant::now());
 
         tracing::info!("Tray manager initialized with HWND: {}", hwnd);
         true
     }
 
-    pub fn show_icon_async(&mut self) {
+    /// Send CreateIcon once the tray thread has signaled it is inside
+    /// GetMessageW (PostThreadMessageW needs the queue to exist first).
+    /// Non-blocking: returns false until the thread is ready, then true.
+    /// Falls back after 3s so a stuck thread never wedges the UI.
+    pub fn show_icon_async(&mut self) -> bool {
+        if self.icon_requested {
+            return true;
+        }
+        if !self.thread_ready {
+            match self.thread_ready_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                Some(()) => self.thread_ready = true,
+                None => {
+                    let timed_out = self
+                        .init_started_at
+                        .is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(3));
+                    if !timed_out {
+                        return false;
+                    }
+                    // Best-effort fallback: the command stays queued, but the
+                    // notify may be lost if the thread has no queue yet.
+                    tracing::warn!("Tray thread ready signal timeout, proceeding anyway");
+                    self.thread_ready = true;
+                }
+            }
+        }
+        self.icon_requested = true;
         if let Some(rx) = &self.icon_ready_rx {
             while rx.try_recv().is_ok() {}
         }
@@ -82,6 +111,7 @@ impl TrayManager {
             let _ = tx.send(TrayCommand::CreateIcon);
         }
         notify_tray_thread();
+        true
     }
 
     /// Check if the async icon creation has completed, updating `icon_loaded`.
@@ -94,28 +124,6 @@ impl TrayManager {
             return ready;
         }
         self.icon_loaded
-    }
-
-    pub fn show_icon(&mut self) -> bool {
-        if let Some(tx) = &self.command_tx {
-            let _ = tx.send(TrayCommand::CreateIcon);
-        }
-        notify_tray_thread();
-        if let Some(rx) = &self.icon_ready_rx {
-            match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                Ok(ready) => {
-                    tracing::info!("IconReady received: {}", ready);
-                    self.icon_loaded = ready;
-                    ready
-                }
-                Err(_) => {
-                    tracing::warn!("IconReady timeout");
-                    false
-                }
-            }
-        } else {
-            false
-        }
     }
 
     pub fn hide_icon(&self) {
@@ -165,6 +173,26 @@ impl TrayManager {
         self.initialized
     }
 
+    /// True while the message pump thread is still running.
+    pub fn is_alive(&self) -> bool {
+        self.thread_handle.as_ref().is_some_and(|h| !h.is_finished())
+    }
+
+    /// Drop all thread state so the next `init()` spawns a fresh pump.
+    pub fn reset(&mut self) {
+        self.command_tx = None;
+        self.event_rx = None;
+        self.icon_ready_rx = None;
+        self.thread_ready_rx = None;
+        self.thread_handle = None;
+        self.initialized = false;
+        self.thread_ready = false;
+        self.icon_requested = false;
+        self.init_started_at = None;
+        self.icon_loaded = false;
+        tracing::warn!("TrayManager state reset");
+    }
+
     pub fn hwnd(&self) -> isize {
         self.hwnd
     }
@@ -199,12 +227,7 @@ impl TrayManager {
         let (icon_ready_tx, icon_ready_rx) = mpsc::sync_channel(1);
         let (thread_ready_tx, thread_ready_rx) = mpsc::sync_channel(1);
 
-        let handle = spawn_message_pump(hwnd, event_tx, command_rx, icon_ready_tx, thread_ready_tx);
-
-        match thread_ready_rx.recv_timeout(std::time::Duration::from_secs(3)) {
-            Ok(()) => tracing::info!("Tray thread ready (reinit)"),
-            Err(_) => tracing::warn!("Tray thread ready signal timeout (reinit)"),
-        }
+        let handle = spawn_message_pump(event_tx, command_rx, icon_ready_tx, thread_ready_tx);
 
         self.hwnd = hwnd;
         self.command_tx = Some(command_tx);
@@ -212,6 +235,10 @@ impl TrayManager {
         self.icon_ready_rx = Some(icon_ready_rx);
         self.thread_ready_rx = Some(thread_ready_rx);
         self.thread_handle = Some(handle);
+        self.initialized = true;
+        self.thread_ready = false;
+        self.icon_requested = false;
+        self.init_started_at = Some(std::time::Instant::now());
         self.icon_loaded = false;
 
         tracing::info!("TrayManager reinit complete, new HWND: {}", hwnd);

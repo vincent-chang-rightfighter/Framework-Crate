@@ -48,8 +48,10 @@ impl Config {
                 *down = (*down).clamp(RATE_LIMIT_MIN, RATE_LIMIT_MAX);
             }
             for point in &mut curve.curve.points {
-                point[0] = point[0].min(100);
-                point[1] = point[1].min(100);
+                // Both axes are canvas coordinates too: values outside 0..=100
+                // would draw off-plot, so clamp instead of trusting the editor.
+                point[0] = point[0].clamp(0, 100);
+                point[1] = point[1].clamp(0, 100);
             }
         }
         for duty in &mut self.fan.per_fan_duty {

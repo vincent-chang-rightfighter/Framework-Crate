@@ -699,6 +699,9 @@ pub fn shell_notify_add(hwnd: isize, icon: isize, tip: &str, callback_msg: u32) 
     let tip_wide = to_wide(tip);
     let copy_len = tip_wide.len().min(127);
     nid.szTip[..copy_len].copy_from_slice(&tip_wide[..copy_len]);
+    // Always keep the buffer NUL-terminated: a tip longer than 127 UTF-16
+    // units would otherwise copy its terminator out of the slice.
+    nid.szTip[copy_len] = 0;
     // SAFETY: Shell_NotifyIconW modifies the system tray icon list.
     // nid is properly initialized with all required fields.
     unsafe { Shell_NotifyIconW(NIM_ADD, &nid) != 0 }

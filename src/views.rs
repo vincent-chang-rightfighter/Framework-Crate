@@ -676,6 +676,16 @@ fn view_charge_limit_section(enabled: bool, value: u32) -> Element<'static, Mess
     ].spacing(4).into()
 }
 
+/// Resolve the charge limit to display: an unset limit means the hardware
+/// default (no software cap), so show it as disabled at 100% rather than a
+/// misleading 0%.
+fn charge_limit_display(limit: Option<crate::types::SettingU8>) -> (bool, u32) {
+    match limit {
+        Some(l) => (l.enabled, l.value as u32),
+        None => (false, CHARGE_LIMIT_MAX),
+    }
+}
+
 fn view_battery_info(battery: &crate::cli::ec_wrapper::BatteryData, charging: bool) -> Element<'_, Message> {
     let mut rows = column![].spacing(4);
 
@@ -803,10 +813,11 @@ fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
             text(format!("{}  {}", power_text, soc_text)).size(FONT_BODY).style(move |_theme| iced::widget::text::Style { color: Some(status_color) }),
         ].align_y(iced::Alignment::Center);
 
-        let charge_limit = config.battery.charge_limit_max_pct.unwrap_or_default();
+        let (charge_limit_enabled, charge_limit_value) =
+            charge_limit_display(config.battery.charge_limit_max_pct);
 
         let mut content = column![title_row].spacing(6);
-        content = content.push(view_charge_limit_section(charge_limit.enabled, charge_limit.value as u32));
+        content = content.push(view_charge_limit_section(charge_limit_enabled, charge_limit_value));
         content = content.push(view_battery_info(&battery.power_info, charging));
 
         if let Some(verbose) = view_battery_verbose(&battery.power_info, app.show_battery_details) {
@@ -1216,6 +1227,19 @@ mod tests {
     #[test]
     fn view_charge_limit_section_returns_element() {
         let _el = view_charge_limit_section(true, 80);
+    }
+
+    #[test]
+    fn charge_limit_display_unset_is_disabled_100() {
+        assert_eq!(charge_limit_display(None), (false, 100));
+    }
+
+    #[test]
+    fn charge_limit_display_configured_uses_values() {
+        assert_eq!(
+            charge_limit_display(Some(crate::types::SettingU8 { enabled: true, value: 80 })),
+            (true, 80)
+        );
     }
 
     #[test]

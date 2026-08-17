@@ -544,62 +544,75 @@ impl App {
         }
 
         if self.tray_initialized {
-            // Only validate HWND every 5 seconds to avoid repeated FindWindowW syscalls
-            const HWND_CHECK_INTERVAL_MS: u64 = 5000;
-            if now_ms.saturating_sub(self.last_hwnd_check_ts) >= HWND_CHECK_INTERVAL_MS {
-                self.last_hwnd_check_ts = now_ms;
-                if !system_info::is_window(self.tray.hwnd()) {
-                    tracing::warn!("HWND {} invalid, reinitializing tray", self.tray.hwnd());
-                    if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
-                        self.tray.reinit(hwnd);
-                        self.tray.show_icon_async();
-                    } else {
-                        self.tray_initialized = false;
-                        tracing::error!("Cannot find window after HWND invalidation");
+            if !self.tray.is_alive() {
+                // Message pump thread died (crash or stuck shutdown): drop the
+                // dead state so the next tick spawns a fresh pump, and cancel
+                // any pending minimize so the window never hangs half-hidden.
+                tracing::warn!("Tray message pump thread exited unexpectedly");
+                self.tray_initialized = false;
+                self.pending_minimize_to_tray = false;
+                self.tray.reset();
+            } else {
+                // Retry icon creation until the tray thread is ready —
+                // show_icon_async() is a non-blocking no-op until then.
+                self.tray.show_icon_async();
+                // Only validate HWND every 5 seconds to avoid repeated FindWindowW syscalls
+                const HWND_CHECK_INTERVAL_MS: u64 = 5000;
+                if now_ms.saturating_sub(self.last_hwnd_check_ts) >= HWND_CHECK_INTERVAL_MS {
+                    self.last_hwnd_check_ts = now_ms;
+                    if !system_info::is_window(self.tray.hwnd()) {
+                        tracing::warn!("HWND {} invalid, reinitializing tray", self.tray.hwnd());
+                        if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
+                            self.tray.reinit(hwnd);
+                            self.tray.show_icon_async();
+                        } else {
+                            self.tray_initialized = false;
+                            tracing::error!("Cannot find window after HWND invalidation");
+                        }
+                    }
+                    if !self.tray.is_recently_restored()
+                        && self.state.lifecycle.visible.load(Ordering::Acquire)
+                    {
+                        if system_info::is_iconic(self.tray.hwnd()) {
+                            self.iconic_check_count += 1;
+                            if self.iconic_check_count >= 2 {
+                                tracing::info!(
+                                    "Window minimized (iconic_check_count={}), auto-minimizing to tray",
+                                    self.iconic_check_count
+                                );
+                                self.iconic_check_count = 0;
+                                return Task::batch([
+                                    Task::perform(async {}, |_| Message::MinimizeToTray),
+                                    tick_task(next_ms),
+                                ]);
+                            }
+                        } else {
+                            self.iconic_check_count = 0;
+                        }
                     }
                 }
-                if !self.tray.is_recently_restored()
+                if let Some(event) = self.tray.receive_event() {
+                    match &event {
+                        crate::tray::TrayEvent::Show | crate::tray::TrayEvent::MenuShow => {
+                            self.tray.mark_restored();
+                            tracing::info!("Tray show event received, marking restored");
+                        }
+                        _ => {}
+                    }
+                    let task = Task::perform(async move { event }, Message::TrayEventReceived);
+                    let tick = tick_task(next_ms);
+                    return Task::batch([task, tick]);
+                }
+                if self.pending_minimize_to_tray
+                    && self.tray.check_icon_ready()
                     && self.state.lifecycle.visible.load(Ordering::Acquire)
                 {
-                    if system_info::is_iconic(self.tray.hwnd()) {
-                        self.iconic_check_count += 1;
-                        if self.iconic_check_count >= 2 {
-                            tracing::info!(
-                                "Window minimized (iconic_check_count={}), auto-minimizing to tray",
-                                self.iconic_check_count
-                            );
-                            self.iconic_check_count = 0;
-                            return Task::batch([
-                                Task::perform(async {}, |_| Message::MinimizeToTray),
-                                tick_task(next_ms),
-                            ]);
-                        }
-                    } else {
-                        self.iconic_check_count = 0;
-                    }
+                    self.tray.hide_window();
+                    self.state.lifecycle.visible.store(false, Ordering::Release);
+                    self.pending_minimize_to_tray = false;
+                    self.icon_create_in_flight = false;
+                    tracing::info!("Tray icon ready, window hidden");
                 }
-            }
-            if let Some(event) = self.tray.receive_event() {
-                match &event {
-                    crate::tray::TrayEvent::Show | crate::tray::TrayEvent::MenuShow => {
-                        self.tray.mark_restored();
-                        tracing::info!("Tray show event received, marking restored");
-                    }
-                    _ => {}
-                }
-                let task = Task::perform(async move { event }, Message::TrayEventReceived);
-                let tick = tick_task(next_ms);
-                return Task::batch([task, tick]);
-            }
-            if self.pending_minimize_to_tray
-                && self.tray.check_icon_ready()
-                && self.state.lifecycle.visible.load(Ordering::Acquire)
-            {
-                self.tray.hide_window();
-                self.state.lifecycle.visible.store(false, Ordering::Release);
-                self.pending_minimize_to_tray = false;
-                self.icon_create_in_flight = false;
-                tracing::info!("Tray icon ready, window hidden");
             }
         }
 

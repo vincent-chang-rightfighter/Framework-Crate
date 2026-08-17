@@ -185,139 +185,139 @@ fn draw_temp_chart_contents(
     points_buf: &mut Vec<(f32, f32)>,
     size: Size,
 ) {
-        let margin_left = 30.0f32;
-        let margin_right = 8.0f32;
-        let margin_top = 4.0f32;
-        let margin_bottom = 18.0f32;
-        let plot_w = size.width - margin_left - margin_right;
-        let plot_h = size.height - margin_top - margin_bottom;
-        let origin = Point::new(margin_left, margin_top);
+    let margin_left = 30.0f32;
+    let margin_right = 8.0f32;
+    let margin_top = 4.0f32;
+    let margin_bottom = 18.0f32;
+    let plot_w = size.width - margin_left - margin_right;
+    let plot_h = size.height - margin_top - margin_bottom;
+    let origin = Point::new(margin_left, margin_top);
 
-        // Background
-        frame.fill_rectangle(
-            origin,
-            Size::new(plot_w, plot_h),
-            Color::from_rgb(0.10, 0.10, 0.13),
+    // Background
+    frame.fill_rectangle(
+        origin,
+        Size::new(plot_w, plot_h),
+        Color::from_rgb(0.10, 0.10, 0.13),
+    );
+
+    // Grid lines (horizontal for temp levels)
+    let grid_stroke = iced::widget::canvas::Stroke::default()
+        .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.08))
+        .with_width(0.5);
+    for temp in [20.0, 40.0, 60.0, 80.0] {
+        let y = origin.y + plot_h - ((temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h;
+        frame.stroke(
+            &iced::widget::canvas::Path::line(
+                Point::new(origin.x, y),
+                Point::new(origin.x + plot_w, y),
+            ),
+            grid_stroke,
         );
+    }
 
-        // Grid lines (horizontal for temp levels)
-        let grid_stroke = iced::widget::canvas::Stroke::default()
-            .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.08))
-            .with_width(0.5);
-        for temp in [20.0, 40.0, 60.0, 80.0] {
-            let y = origin.y + plot_h - ((temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h;
+    // Border
+    frame.stroke_rectangle(
+        origin,
+        Size::new(plot_w, plot_h),
+        iced::widget::canvas::Stroke::default()
+            .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.2))
+            .with_width(1.0),
+    );
+
+    // Y-axis labels
+    let font = iced::Font::with_name("Consolas");
+    for (i, temp) in [0, 20, 40, 60, 80, 100].iter().enumerate() {
+        let y = origin.y + plot_h - ((*temp as f32 - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h;
+        frame.fill_text(iced::widget::canvas::Text {
+            content: Y_LABELS[i].to_owned(),
+            position: Point::new(origin.x - 4.0, y),
+            color: Color::from_rgb(0.5, 0.5, 0.5),
+            size: iced::Pixels(8.0),
+            font,
+            align_x: iced::alignment::Horizontal::Right.into(),
+            align_y: iced::alignment::Vertical::Center,
+            line_height: iced::widget::text::LineHeight::default(),
+            shaping: iced::widget::text::Shaping::Basic,
+            max_width: f32::INFINITY,
+        });
+    }
+
+    // X-axis time labels (0s, 10s, 20s, 30s)
+    for (i, sec) in [0, 10, 20, 30].iter().enumerate() {
+        let x = origin.x + (*sec as f32 / HISTORY_SECONDS as f32) * plot_w;
+        frame.fill_text(iced::widget::canvas::Text {
+            content: X_LABELS[i].to_owned(),
+            position: Point::new(x, origin.y + plot_h + 4.0),
+            color: Color::from_rgb(0.5, 0.5, 0.5),
+            size: iced::Pixels(8.0),
+            font,
+            align_x: iced::alignment::Horizontal::Center.into(),
+            align_y: iced::alignment::Vertical::Top,
+            line_height: iced::widget::text::LineHeight::default(),
+            shaping: iced::widget::text::Shaping::Basic,
+            max_width: f32::INFINITY,
+        });
+    }
+
+    if samples.is_empty() || sensor_names.is_empty() {
+        frame.fill_text(iced::widget::canvas::Text {
+            content: "Waiting for data...".to_string(),
+            position: Point::new(origin.x + plot_w / 2.0, origin.y + plot_h / 2.0),
+            color: Color::from_rgb(0.4, 0.4, 0.4),
+            size: iced::Pixels(11.0),
+            font,
+            align_x: iced::alignment::Horizontal::Center.into(),
+            align_y: iced::alignment::Vertical::Center,
+            line_height: iced::widget::text::LineHeight::default(),
+            shaping: iced::widget::text::Shaping::Basic,
+            max_width: f32::INFINITY,
+        });
+        return;
+    }
+
+    let now_ms = samples.back().map(|s| s.ts_ms).unwrap_or(0);
+    let start_ms = now_ms - HISTORY_MS;
+
+    // Draw lines per sensor
+    for (sensor_idx, sensor_name) in sensor_names.iter().enumerate() {
+        let color = if colors.is_empty() {
+            Color::WHITE
+        } else {
+            colors[sensor_idx % colors.len()]
+        };
+
+        points_buf.clear();
+        points_buf.extend(samples.iter()
+            .filter(|s| s.ts_ms >= start_ms)
+            .filter_map(|s| {
+                let temp = *s.temps.get(sensor_name)? as f32;
+                let t_ratio = (s.ts_ms - start_ms) as f32 / (now_ms - start_ms).max(1) as f32;
+                let clamped = temp.clamp(TEMP_MIN, TEMP_MAX);
+                Some((t_ratio, clamped))
+            }));
+
+        if points_buf.len() >= 2 {
+            let path = iced::widget::canvas::Path::new(|b| {
+                let first = &points_buf[0];
+                b.move_to(Point::new(
+                    origin.x + first.0 * plot_w,
+                    origin.y + plot_h - ((first.1 - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h,
+                ));
+                for pt in points_buf.iter().skip(1) {
+                    b.line_to(Point::new(
+                        origin.x + pt.0 * plot_w,
+                        origin.y + plot_h - ((pt.1 - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h,
+                    ));
+                }
+            });
             frame.stroke(
-                &iced::widget::canvas::Path::line(
-                    Point::new(origin.x, y),
-                    Point::new(origin.x + plot_w, y),
-                ),
-                grid_stroke,
+                &path,
+                iced::widget::canvas::Stroke::default()
+                    .with_color(color)
+                    .with_width(1.5),
             );
         }
-
-        // Border
-        frame.stroke_rectangle(
-            origin,
-            Size::new(plot_w, plot_h),
-            iced::widget::canvas::Stroke::default()
-                .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.2))
-                .with_width(1.0),
-        );
-
-        // Y-axis labels
-        let font = iced::Font::with_name("Consolas");
-        for (i, temp) in [0, 20, 40, 60, 80, 100].iter().enumerate() {
-            let y = origin.y + plot_h - ((*temp as f32 - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h;
-            frame.fill_text(iced::widget::canvas::Text {
-                content: Y_LABELS[i].to_owned(),
-                position: Point::new(origin.x - 4.0, y),
-                color: Color::from_rgb(0.5, 0.5, 0.5),
-                size: iced::Pixels(8.0),
-                font,
-                align_x: iced::alignment::Horizontal::Right.into(),
-                align_y: iced::alignment::Vertical::Center,
-                line_height: iced::widget::text::LineHeight::default(),
-                shaping: iced::widget::text::Shaping::Basic,
-                max_width: f32::INFINITY,
-            });
-        }
-
-        // X-axis time labels (0s, 10s, 20s, 30s)
-        for (i, sec) in [0, 10, 20, 30].iter().enumerate() {
-            let x = origin.x + (*sec as f32 / HISTORY_SECONDS as f32) * plot_w;
-            frame.fill_text(iced::widget::canvas::Text {
-                content: X_LABELS[i].to_owned(),
-                position: Point::new(x, origin.y + plot_h + 4.0),
-                color: Color::from_rgb(0.5, 0.5, 0.5),
-                size: iced::Pixels(8.0),
-                font,
-                align_x: iced::alignment::Horizontal::Center.into(),
-                align_y: iced::alignment::Vertical::Top,
-                line_height: iced::widget::text::LineHeight::default(),
-                shaping: iced::widget::text::Shaping::Basic,
-                max_width: f32::INFINITY,
-            });
-        }
-
-        if samples.is_empty() || sensor_names.is_empty() {
-            frame.fill_text(iced::widget::canvas::Text {
-                content: "Waiting for data...".to_string(),
-                position: Point::new(origin.x + plot_w / 2.0, origin.y + plot_h / 2.0),
-                color: Color::from_rgb(0.4, 0.4, 0.4),
-                size: iced::Pixels(11.0),
-                font,
-                align_x: iced::alignment::Horizontal::Center.into(),
-                align_y: iced::alignment::Vertical::Center,
-                line_height: iced::widget::text::LineHeight::default(),
-                shaping: iced::widget::text::Shaping::Basic,
-                max_width: f32::INFINITY,
-            });
-            return;
-        }
-
-        let now_ms = samples.back().map(|s| s.ts_ms).unwrap_or(0);
-        let start_ms = now_ms - HISTORY_MS;
-
-        // Draw lines per sensor
-        for (sensor_idx, sensor_name) in sensor_names.iter().enumerate() {
-            let color = if colors.is_empty() {
-                Color::WHITE
-            } else {
-                colors[sensor_idx % colors.len()]
-            };
-
-            points_buf.clear();
-            points_buf.extend(samples.iter()
-                .filter(|s| s.ts_ms >= start_ms)
-                .filter_map(|s| {
-                    let temp = *s.temps.get(sensor_name)? as f32;
-                    let t_ratio = (s.ts_ms - start_ms) as f32 / (now_ms - start_ms).max(1) as f32;
-                    let clamped = temp.clamp(TEMP_MIN, TEMP_MAX);
-                    Some((t_ratio, clamped))
-                }));
-
-            if points_buf.len() >= 2 {
-                let path = iced::widget::canvas::Path::new(|b| {
-                    let first = &points_buf[0];
-                    b.move_to(Point::new(
-                        origin.x + first.0 * plot_w,
-                        origin.y + plot_h - ((first.1 - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h,
-                    ));
-                    for pt in points_buf.iter().skip(1) {
-                        b.line_to(Point::new(
-                            origin.x + pt.0 * plot_w,
-                            origin.y + plot_h - ((pt.1 - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h,
-                        ));
-                    }
-                });
-                frame.stroke(
-                    &path,
-                    iced::widget::canvas::Stroke::default()
-                        .with_color(color)
-                        .with_width(1.5),
-                );
-            }
-        }
+    }
 }
 
 #[cfg(test)]

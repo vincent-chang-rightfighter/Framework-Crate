@@ -6,13 +6,13 @@ use framework_lib::power;
 use framework_lib::smbios;
 use framework_lib::smbios::Platform;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ThermalData {
     pub temps: Arc<BTreeMap<String, i32>>,
     pub fans: Vec<FanReading>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FanReading {
     pub name: String,
     pub rpm: u32,
@@ -49,7 +49,6 @@ pub struct VersionsData {
     pub uefi_release_date: Option<String>,
     pub ec_build_version: Option<String>,
     pub ec_current_image: Option<String>,
-    pub tool_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -474,9 +473,17 @@ impl EcClient {
     }
 
     pub fn kblight_set(&self, percent: u32) -> Result<(), String> {
-        self.ec.set_keyboard_backlight(percent as u8);
+        let percent = percent.min(100) as u8;
+        // framework_lib swallows the EC write error (only debug_asserts), so
+        // verify the write by reading the value back. duty<->percent rounding
+        // can be off by one, hence the tolerance.
+        self.ec.set_keyboard_backlight(percent);
         match self.ec.get_keyboard_backlight() {
-            Ok(_) => Ok(()),
+            Ok(actual) if (actual as i32 - percent as i32).abs() <= 1 => Ok(()),
+            Ok(actual) => Err(format!(
+                "Keyboard backlight write failed: wrote {}%, read back {}%",
+                percent, actual
+            )),
             Err(e) => Err(format!("Failed to set keyboard backlight: {:?}", e)),
         }
     }

@@ -19,7 +19,6 @@ const WM_RBUTTONUP: u32 = 0x0205;
 // No locking needed since thread-local storage is inherently thread-safe.
 thread_local! {
     static EVENT_TX: std::cell::RefCell<Option<mpsc::Sender<TrayEvent>>> = const { std::cell::RefCell::new(None) };
-    static ICED_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     static TRAY_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
 }
 
@@ -128,14 +127,13 @@ unsafe extern "system" fn tray_wnd_proc(
 }
 
 pub fn spawn_message_pump(
-    iced_hwnd: isize,
     event_tx: mpsc::Sender<TrayEvent>,
     command_rx: mpsc::Receiver<TrayCommand>,
     icon_ready_tx: mpsc::SyncSender<bool>,
     thread_ready_tx: mpsc::SyncSender<()>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        message_pump_loop(iced_hwnd, event_tx, command_rx, icon_ready_tx, thread_ready_tx);
+        message_pump_loop(event_tx, command_rx, icon_ready_tx, thread_ready_tx);
     })
 }
 
@@ -151,7 +149,6 @@ fn cleanup_and_exit(tray_icon_loaded: bool, tray_hwnd: *mut core::ffi::c_void) {
 }
 
 fn message_pump_loop(
-    iced_hwnd: isize,
     event_tx: mpsc::Sender<TrayEvent>,
     command_rx: mpsc::Receiver<TrayCommand>,
     icon_ready_tx: mpsc::SyncSender<bool>,
@@ -165,9 +162,6 @@ fn message_pump_loop(
 
     EVENT_TX.with(|tx| {
         *tx.borrow_mut() = Some(event_tx.clone());
-    });
-    ICED_HWND.with(|hwnd| {
-        hwnd.set(iced_hwnd);
     });
 
     let tray_hwnd = create_hidden_window();

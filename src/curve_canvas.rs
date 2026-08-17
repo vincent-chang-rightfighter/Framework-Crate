@@ -5,28 +5,11 @@ use iced::widget::canvas::Cache;
 
 const AXIS_LABELS: [&str; 6] = ["0", "20", "40", "60", "80", "100"];
 
-/// Reuses the Arc built for the previous `view_curve()` call as long as the
-/// curve points storage is unchanged (same base pointer + length). A fresh
-/// `Arc::from(points)` every frame would make `CurveState`'s `points_changed`
-/// comparison always true, clearing the canvas cache and re-drawing the whole
-/// curve at 60 fps. The slice storage only changes when the config actually
-/// changes (new allocation), so the pointer key is safe here.
-/// Cached (base pointer as usize, length, Arc) of the last curve points view.
-type PointsArcCache = std::sync::Mutex<Option<(usize, usize, Arc<[[u32; 2]]>)>>;
-
-static POINTS_ARC_CACHE: PointsArcCache = std::sync::Mutex::new(None);
-
 pub fn view_curve(points: &[[u32; 2]], all_pts: &Arc<Vec<[u32; 2]>>) -> Element<'static, crate::Message> {
-    let key = (points.as_ptr() as usize, points.len());
-    let mut cache = POINTS_ARC_CACHE.lock().unwrap_or_else(|p| p.into_inner());
-    let points_arc = match cache.as_ref() {
-        Some((ptr, len, arc)) if *ptr == key.0 && *len == key.1 => Arc::clone(arc),
-        _ => {
-            let arc: Arc<[[u32; 2]]> = Arc::from(points);
-            *cache = Some((key.0, key.1, Arc::clone(&arc)));
-            arc
-        }
-    };
+    // A fresh Arc per frame is fine: CurveState's `points_changed` check
+    // compares slice *content*, so the canvas cache is only invalidated when
+    // the points actually change.
+    let points_arc: Arc<[[u32; 2]]> = Arc::from(points);
     iced::widget::canvas(CurveRenderer {
         all_pts: Arc::clone(all_pts),
         points: points_arc,

@@ -149,7 +149,7 @@ impl PeripheralState {
 pub struct BatteryState {
     /// Latest battery/power data.
     pub info: Arc<RwLock<Arc<Option<BatteryInfo>>>>,
-    /// 上一次 AC 電源狀態（用於偵測 AC→Battery 轉換）
+    /// Previous AC power state (used to detect AC→Battery transitions).
     pub prev_ac_present: Arc<AtomicBool>,
 }
 

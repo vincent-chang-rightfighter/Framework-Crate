@@ -58,11 +58,12 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
     std::fs::create_dir_all(&dir).map_err(|_| "failed to create modules directory")?;
 
     let zip_path = dir.join(format!("pawnio_modules_{}.zip", PAWNIO_MODULES_VERSION));
+    // Release asset naming on github.com/namazso/PawnIO.Modules:
+    // tag "0.2.10" ships "release_0_2_10.zip".
     let url = format!(
-        "https://github.com/namazso/PawnIO.Modules/releases/download/{}/release_{}_{}.zip",
+        "https://github.com/namazso/PawnIO.Modules/releases/download/{}/release_{}.zip",
         PAWNIO_MODULES_VERSION,
-        PAWNIO_MODULES_VERSION.replace('.', "_"),
-        PAWNIO_MODULES_VERSION
+        PAWNIO_MODULES_VERSION.replace('.', "_")
     );
     debug!("Downloading modules from: {}", url);
 
@@ -554,8 +555,10 @@ pub fn read_cpu_power() -> CpuPowerInfo {
     }
 
     // Read MSR 0x610 (MSR_PKG_POWER_LIMIT) for static PL1/PL2.
+    let mut msr610_ok = false;
     let mut out = [0u64; 1];
     if exec_ioctl(&msr_handle, "ioctl_read_msr", &[0x610], &mut out).is_ok() {
+        msr610_ok = true;
         let raw = out[0];
         debug!("MSR 0x610 raw: 0x{:016X}", raw);
         let (pl1, pl1_en, pl1_cl, pl1_y, pl1_z) = decode_power_limit(raw, info.power_unit);
@@ -574,8 +577,10 @@ pub fn read_cpu_power() -> CpuPowerInfo {
 
     // Read MMIO at MCHBAR + 0x59A0 (PACKAGE_POWER_LIMIT_MMIO) via IntelMCHBAR.
     let mmio_offset = 0x59A0u64;
+    let mut mmio_ok = false;
     let mut out = [0u64; 1];
     if exec_ioctl(&mchbar_handle, "ioctl_read_qword", &[mmio_offset], &mut out).is_ok() {
+        mmio_ok = true;
         let raw = out[0];
         let (pl1, pl1_en, pl1_cl, pl1_y, pl1_z) = decode_power_limit(raw, info.power_unit);
         let (pl2, pl2_en, pl2_cl, pl2_y, pl2_z) = decode_power_limit(raw >> 32, info.power_unit);
@@ -591,6 +596,12 @@ pub fn read_cpu_power() -> CpuPowerInfo {
         debug!("MMIO PL2: {:.1}W (en={} clamp={}) time={:.1}s", pl2, pl2_en, pl2_cl, info.pl2_mmio_time_s);
     }
 
+    // Both limit registers unreadable: report unavailable instead of
+    // presenting all-zero limits as valid data.
+    if !msr610_ok && !mmio_ok {
+        info.error_msg = Some("Failed to read MSR 0x610 and MMIO power limits");
+        return info;
+    }
     info.available = true;
     info
 }
@@ -896,7 +907,7 @@ pub fn pawnio_version() -> Option<String> {
 
 /// Get the embedded PawnIO Modules blob version.
 pub fn pawnio_modules_version() -> &'static str {
-    "0.2.10"
+    PAWNIO_MODULES_VERSION
 }
 
 #[cfg(test)]

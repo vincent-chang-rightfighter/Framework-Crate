@@ -211,11 +211,13 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
     }
     let now = crate::util::current_time_ms_i64();
 
-    // Read-only comparison first to avoid cloning when unchanged
+    // Read-only comparison first to avoid cloning when unchanged.
+    // Compare the whole payload: fan RPM can change while temperatures stay
+    // flat (manual ramping, EC recovery), and that data must still be stored.
     let changed = {
         let cur = read_lock(&state.thermal.data);
         match cur.as_ref().as_ref() {
-            Some(cur) => *cur.temps != *t.temps,
+            Some(cur) => *cur != t,
             None => true,
         }
     };
@@ -368,7 +370,7 @@ pub fn spawn(state: AppState) {
                 let mut last_expansion_scan: u64 = start_ms;
                 let mut last_versions_scan: u64 = start_ms;
                 let mut last_cpu_power_poll: u64 = 0;
-let mut last_resume_ts: u64 = 0;
+                let mut last_resume_ts: u64 = 0;
                 'poll_loop: loop {
                     let resume_ts = bg_state2.lifecycle.last_resume_ts.load(Ordering::Acquire);
                     if resume_ts != 0 && resume_ts != last_resume_ts {
@@ -890,5 +892,44 @@ mod tests {
     #[test]
     fn pin_to_slowest_core_does_not_panic() {
         pin_to_slowest_core();
+    }
+
+    #[test]
+    fn record_thermal_sample_updates_on_fan_rpm_change() {
+        use crate::app::AppState;
+        use crate::cli::ec_wrapper::{FanReading, ThermalData};
+        use std::collections::BTreeMap;
+
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        let mut temps = BTreeMap::new();
+        temps.insert("CPU".to_string(), 60);
+        let sample = |rpm: u32| ThermalData {
+            temps: Arc::new(temps.clone()),
+            fans: vec![FanReading { name: "Fan 1".to_string(), rpm }],
+        };
+
+        assert!(record_thermal_sample(&state, sample(2000)));
+        assert_eq!(
+            read_lock(&state.thermal.data).as_ref().as_ref().unwrap().fans[0].rpm,
+            2000
+        );
+
+        // Same temps, different RPM — must still be stored and flagged dirty.
+        assert!(record_thermal_sample(&state, sample(3200)));
+        assert_eq!(
+            read_lock(&state.thermal.data).as_ref().as_ref().unwrap().fans[0].rpm,
+            3200
+        );
+
+        // Identical data — no write, not dirty.
+        assert!(!record_thermal_sample(&state, sample(3200)));
     }
 }
