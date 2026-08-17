@@ -28,6 +28,7 @@ const AUTO_MAX_HEIGHT: f32 = 1100.0;
 /// are logged as warnings.
 pub(crate) fn run_ec_task(
     ec_client: &Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
+    done: Message,
     f: impl FnOnce(Arc<cli::EcClient>) + Send + 'static,
 ) -> Task<Message> {
     let ec_client = Arc::clone(ec_client);
@@ -40,7 +41,7 @@ pub(crate) fn run_ec_task(
                     warn!("EC task failed: {}", e);
                 }
             }
-            Message::Tick
+            done
         },
         |msg| msg,
     )
@@ -851,14 +852,14 @@ impl App {
             Message::QuitWithRestore => {
                 self.show_quit_warning = false;
                 self.state.lifecycle.shutdown.store(true, Ordering::Release);
-                Some(Task::batch([
-                    run_ec_task(&self.state.system.ec_client, |ec| {
-                        if let Err(e) = ec.autofanctrl() {
-                            warn!("Failed to restore auto fan control on quit: {}", e);
-                        }
-                    }),
-                    Task::perform(async {}, |_| Message::QuitShutdown),
-                ]))
+                // Run the EC restore first and only quit once it completes,
+                // so "Restore Auto & Exit" actually restores the fan before
+                // the process exits.
+                Some(run_ec_task(&self.state.system.ec_client, Message::QuitShutdown, |ec| {
+                    if let Err(e) = ec.autofanctrl() {
+                        warn!("Failed to restore auto fan control on quit: {}", e);
+                    }
+                }))
             }
             Message::QuitDutyChanged(duty) => {
                 self.quit_duty_value = duty.clamp(0, 100);
@@ -868,14 +869,12 @@ impl App {
                 self.show_quit_warning = false;
                 self.state.lifecycle.shutdown.store(true, Ordering::Release);
                 let duty = self.quit_duty_value;
-                Some(Task::batch([
-                    run_ec_task(&self.state.system.ec_client, move |ec| {
-                        if let Err(e) = ec.set_fan_duty(duty, None) {
-                            warn!("Failed to set quit fan duty: {}", e);
-                        }
-                    }),
-                    Task::perform(async {}, |_| Message::QuitShutdown),
-                ]))
+                // Same as QuitWithRestore: write the quit duty first, then quit.
+                Some(run_ec_task(&self.state.system.ec_client, Message::QuitShutdown, move |ec| {
+                    if let Err(e) = ec.set_fan_duty(duty, None) {
+                        warn!("Failed to set quit fan duty: {}", e);
+                    }
+                }))
             }
             Message::QuitWithoutRestore => {
                 self.show_quit_warning = false;
@@ -941,6 +940,9 @@ impl App {
             }
             Message::ToggleCpuPowerSettings => {
                 self.show_cpu_power_settings = !self.show_cpu_power_settings;
+                // This flag lives in the cached ViewSnapshot, so mark it dirty
+                // or the toggle only appears after an unrelated background poll.
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
             Message::SettingsToggled => {
@@ -949,7 +951,7 @@ impl App {
             }
             Message::KblightChanged(percent) => {
                 let kblight = Arc::clone(&self.state.peripherals.kblight);
-                let task = run_ec_task(&self.state.system.ec_client, move |ec| {
+                let task = run_ec_task(&self.state.system.ec_client, Message::Tick, move |ec| {
                     if let Err(e) = ec.kblight_set(percent) {
                         warn!("Failed to set keyboard backlight: {}", e);
                     }
@@ -963,7 +965,7 @@ impl App {
                 task
             }
             Message::FpLedLevelChanged(level) => {
-                run_ec_task(&self.state.system.ec_client, move |ec| {
+                run_ec_task(&self.state.system.ec_client, Message::Tick, move |ec| {
                     if let Err(e) = ec.fp_led_level_set(level) {
                         warn!("Failed to set fingerprint LED: {}", e);
                     }
@@ -975,6 +977,8 @@ impl App {
             }
             Message::ToggleExpansionCardDebug => {
                 self.expansion_card_debug = !self.expansion_card_debug;
+                // Also snapshot-backed (view_misc reads it from the snapshot).
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
             Message::DismissConfigWarning => {
@@ -995,7 +999,7 @@ impl App {
                     report.push_str(&format!("BIOS: {:?}\n", v.uefi_version));
                     report.push_str(&format!("EC Firmware: {:?}\n", v.ec_build_version));
                 }
-                report.push_str("framework_lib: 0.6.5\n");
+                report.push_str(&format!("framework_lib: {}\n", env!("FRAMEWORK_LIB_VERSION")));
                 if let Some(ver) = crate::cpu_power::pawnio_version() {
                     report.push_str(&format!("PawnIO: {}\n", ver));
                 }
@@ -1169,7 +1173,6 @@ impl App {
                         self.apply_edit_fields_from_snapshot(&info);
                         self.pl_custom_applied = true;
                         self.cpu_power_error = None;
-                            self.cpu_power_error = None;
                         // If sync was running, restart it with the newly applied values
                         // so the thread writes the updated params instead of stale ones.
                         if self.state.cpu_power.sync_enabled.load(Ordering::Acquire) {

@@ -158,6 +158,19 @@ pub struct CpuPowerInfo {
 }
 
 impl CpuPowerInfo {
+    /// Effective PL1: the CPU enforces the lower of the MSR and MMIO
+    /// registers, so the effective limit is whichever is tighter. Falls
+    /// back to the value actually read when the other register is
+    /// unavailable (0).
+    pub fn effective_pl1(&self) -> f64 {
+        effective_limit(self.pl1_msr, self.pl1_mmio)
+    }
+
+    /// Effective PL2: see [`CpuPowerInfo::effective_pl1`].
+    pub fn effective_pl2(&self) -> f64 {
+        effective_limit(self.pl2_msr, self.pl2_mmio)
+    }
+
     /// Pre-fill edit fields from current MSR values.
     /// Returns (pl1_watts, pl2_watts, pl1_enabled, pl2_enabled, pl1_clamped, pl2_clamped, pl1_time_s, pl2_time_s).
     pub fn init_edit_fields(&self) -> (String, String, bool, bool, bool, bool, String, String) {
@@ -175,6 +188,16 @@ impl CpuPowerInfo {
         } else {
             (String::new(), String::new(), true, true, false, false, String::new(), String::new())
         }
+    }
+}
+
+/// Lower of two power limits, ignoring 0 (meaning "not read / unavailable").
+fn effective_limit(msr: f64, mmio: f64) -> f64 {
+    match (msr > 0.0, mmio > 0.0) {
+        (true, true) => msr.min(mmio),
+        (true, false) => msr,
+        (false, true) => mmio,
+        (false, false) => 0.0,
     }
 }
 
@@ -394,22 +417,26 @@ fn init_dll_fns() -> Result<(), &'static str> {
     }
 
     unsafe {
-        let open: PawnioOpen = std::mem::transmute(
-            GetProcAddress(dll, c"pawnio_open".as_ptr() as *const u8)
-                .ok_or("pawnio_open not found")?
+        // GetProcAddress returns FARPROC (a generic fn pointer type). rustc
+        // does not check ABI compatibility when transmuting between fn
+        // pointer types, so use transmute_copy with a compile-time size
+        // assertion instead — the accepted pattern for dynamic DLL loading.
+        const _: () = assert!(
+            std::mem::size_of::<PawnioOpen>()
+                == std::mem::size_of::<windows_sys::Win32::Foundation::FARPROC>()
         );
-        let load: PawnioLoad = std::mem::transmute(
-            GetProcAddress(dll, c"pawnio_load".as_ptr() as *const u8)
-                .ok_or("pawnio_load not found")?
-        );
-        let exec: PawnioExecute = std::mem::transmute(
-            GetProcAddress(dll, c"pawnio_execute".as_ptr() as *const u8)
-                .ok_or("pawnio_execute not found")?
-        );
-        let close: PawnioClose = std::mem::transmute(
-            GetProcAddress(dll, c"pawnio_close".as_ptr() as *const u8)
-                .ok_or("pawnio_close not found")?
-        );
+        let addr = GetProcAddress(dll, c"pawnio_open".as_ptr() as *const u8)
+            .ok_or("pawnio_open not found")?;
+        let open: PawnioOpen = std::mem::transmute_copy(&addr);
+        let addr = GetProcAddress(dll, c"pawnio_load".as_ptr() as *const u8)
+            .ok_or("pawnio_load not found")?;
+        let load: PawnioLoad = std::mem::transmute_copy(&addr);
+        let addr = GetProcAddress(dll, c"pawnio_execute".as_ptr() as *const u8)
+            .ok_or("pawnio_execute not found")?;
+        let exec: PawnioExecute = std::mem::transmute_copy(&addr);
+        let addr = GetProcAddress(dll, c"pawnio_close".as_ptr() as *const u8)
+            .ok_or("pawnio_close not found")?;
+        let close: PawnioClose = std::mem::transmute_copy(&addr);
         let _ = DLL_OPEN.set(open);
         let _ = DLL_LOAD.set(load);
         let _ = DLL_EXEC.set(exec);

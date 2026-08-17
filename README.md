@@ -185,6 +185,10 @@ The application icon is the "settings" icon (System category) from the [Iconoir]
 
 Rendering parameters: optical size 32, stroke weight 1.5, color `#7300ff` (R 115, G 0, B 255). The source SVG (`assets/settings.svg`) is reproduced with attribution to Iconoir.
 
+## Development
+
+This project is developed with AI coding agents (pair-programming / review / refactor assistance). Design decisions, hardware behavior, and releases are reviewed and owned by the maintainer.
+
 ## License
 
 MIT

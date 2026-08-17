@@ -278,6 +278,12 @@ pub fn spawn(state: AppState) {
                 } else {
                     None
                 };
+                // Per-fan ramp state for Manual mode (unified_duty = false).
+                // One entry per fan: the last duty actually written to that
+                // fan. Seeded from the RPM-based estimate on first use so
+                // per-fan mode ramps like the unified path instead of
+                // jumping straight to the target duty.
+                let mut manual_per_fan_ramp: Option<Vec<u32>> = None;
                 let mut curve_stepper = if saved_duty > 0 { CurveStepper::with_last_duty(saved_duty) } else { CurveStepper::new() };
                 let start_ms = crate::util::current_time_ms();
                 let mut last_expansion_scan: u64 = start_ms;
@@ -291,6 +297,7 @@ pub fn spawn(state: AppState) {
                         curve_stepper.reset();
                         last_manual_duty = None;
                         manual_ramp_current = None;
+                        manual_per_fan_ramp = None;
                         bg_state2.system.cli_available.store(false, Ordering::Release);
                         with_write_lock(&bg_state2.system.ec_client, |guard| {
                             *guard = Arc::new(None);
@@ -472,6 +479,7 @@ pub fn spawn(state: AppState) {
                     if last_fan_mode.as_ref() != Some(&mode) {
                         curve_stepper.reset();
                         last_manual_duty = None;
+                        manual_per_fan_ramp = None;
                         if matches!(mode, crate::types::FanControlMode::Manual) {
                             manual_ramp_current = estimate_duty_from_thermal(&bg_state2);
                         } else {
@@ -501,12 +509,12 @@ pub fn spawn(state: AppState) {
                             }
                         }
                         crate::types::FanControlMode::Manual => {
-                            if let Some(target) = manual_duty {
-                                let current = manual_ramp_current.unwrap_or(target);
-                                let next = crate::fan_control::apply_rate_limit(current, target, 10);
-                                if last_manual_duty != Some(next) {
-                                    let unified = bg_state2.fan.unified_duty.load(Ordering::Acquire);
-                                    if unified {
+                            let unified = bg_state2.fan.unified_duty.load(Ordering::Acquire);
+                            if unified {
+                                if let Some(target) = manual_duty {
+                                    let current = manual_ramp_current.unwrap_or(target);
+                                    let next = crate::fan_control::apply_rate_limit(current, target, 10);
+                                    if last_manual_duty != Some(next) {
                                         let ec_clone = Arc::clone(&ec);
                                         match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, None)).await {
                                             Ok(result) => match result {
@@ -528,37 +536,56 @@ pub fn spawn(state: AppState) {
                                             }
                                         }
                                     } else {
-                                        let per_fan = read_lock(&bg_state2.fan.per_fan_duty);
-                                        for (idx, &duty) in per_fan.iter().enumerate() {
-                                            // Re-check mode between fans to avoid setting duties
-                                            // after the user has switched away from Manual mode.
-                                            let mode_check = crate::types::FanControlMode::from_u8(
-                                                bg_state2.fan.mode.load(Ordering::Acquire) as u8
-                                            );
-                                            if mode_check != mode {
-                                                break;
-                                            }
-                                            let ec_clone = Arc::clone(&ec);
-                                            let fan_idx = idx as u32;
-                                            match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(duty, Some(fan_idx))).await {
-                                                Ok(result) => {
-                                                    if let Err(e) = result {
-                                                        warn!("Failed to set fan {} duty: {}", fan_idx, e);
-                                                    }
-                                                }
-                                                Err(join_err) => {
-                                                    warn!("EC spawn panicked (set_fan_duty fan {}): {}", fan_idx, join_err);
-                                                    reset_ec_on_panic(&bg_state2);
-                                                    continue;
-                                                }
-                                            }
-                                        }
-                                        bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
-                                        last_manual_duty = Some(next);
                                         manual_ramp_current = Some(next);
                                     }
-                                } else {
-                                    manual_ramp_current = Some(next);
+                                }
+                            } else {
+                                // Per-fan manual: each fan ramps independently toward its
+                                // configured duty. Deliberately NOT gated by the unified
+                                // duty's ramp state (last_manual_duty), otherwise slider
+                                // changes would stop being applied once the unified ramp
+                                // converges. last_applied_duty tracks the max actually
+                                // written so the quit warning shows a real value.
+                                let per_fan = read_lock(&bg_state2.fan.per_fan_duty);
+                                if !per_fan.is_empty() {
+                                    let ramp = manual_per_fan_ramp.get_or_insert_with(|| {
+                                        let est = estimate_duty_from_thermal(&bg_state2)
+                                            .unwrap_or_else(|| per_fan[0]);
+                                        vec![est; per_fan.len()]
+                                    });
+                                    let mut max_applied: u32 = 0;
+                                    for (idx, &target) in per_fan.iter().enumerate() {
+                                        let current = ramp.get(idx).copied().unwrap_or(target);
+                                        let next_i = crate::fan_control::apply_rate_limit(current, target, 10);
+                                        if next_i == current {
+                                            continue;
+                                        }
+                                        // Re-check mode between fans to avoid setting duties
+                                        // after the user has switched away from Manual mode.
+                                        let mode_check = crate::types::FanControlMode::from_u8(
+                                            bg_state2.fan.mode.load(Ordering::Acquire) as u8
+                                        );
+                                        if mode_check != mode {
+                                            break;
+                                        }
+                                        let ec_clone = Arc::clone(&ec);
+                                        let fan_idx = idx as u32;
+                                        match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next_i, Some(fan_idx))).await {
+                                            Ok(Ok(())) => {
+                                                ramp[idx] = next_i;
+                                                max_applied = max_applied.max(next_i);
+                                            }
+                                            Ok(Err(e)) => warn!("Failed to set fan {} duty: {}", fan_idx, e),
+                                            Err(join_err) => {
+                                                warn!("EC spawn panicked (set_fan_duty fan {}): {}", fan_idx, join_err);
+                                                reset_ec_on_panic(&bg_state2);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if max_applied > 0 {
+                                        bg_state2.fan.last_applied_duty.store(max_applied as u64, Ordering::Release);
+                                    }
                                 }
                             }
                         }

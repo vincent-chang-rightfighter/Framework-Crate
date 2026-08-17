@@ -276,7 +276,7 @@ fn view_settings(app: &App) -> Element<'_, Message> {
             sw_content = sw_content.push(info_row("EC Firmware", ec));
         }
     }
-    sw_content = sw_content.push(info_row("framework_lib", "0.6.5"));
+    sw_content = sw_content.push(info_row("framework_lib", env!("FRAMEWORK_LIB_VERSION")));
     if let Some(ref ver) = crate::cpu_power::pawnio_version() {
         sw_content = sw_content.push(info_row("PawnIO", ver));
     }
@@ -1084,14 +1084,15 @@ fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
         return content.into();
     }
 
-    // Summary line (always visible)
+    // Summary line (always visible). The CPU enforces the lower of the MSR
+    // and MMIO power-limit registers, so show the effective (min) value.
     let pl1_color = if snap.pl_custom_applied { COLOR_GREEN } else { COLOR_HEADER };
     let pl2_color = if snap.pl_custom_applied { COLOR_GREEN } else { COLOR_HEADER };
     content = content.push(row![
         text("  PL1:".to_string()).size(FONT_BODY),
-        text(format!("{:.1}W", info.pl1_mmio)).size(FONT_BODY).style(move |_theme| iced::widget::text::Style { color: Some(pl1_color) }),
+        text(format!("{:.1}W", info.effective_pl1())).size(FONT_BODY).style(move |_theme| iced::widget::text::Style { color: Some(pl1_color) }),
         text("  PL2:".to_string()).size(FONT_BODY),
-        text(format!("{:.1}W", info.pl2_mmio)).size(FONT_BODY).style(move |_theme| iced::widget::text::Style { color: Some(pl2_color) }),
+        text(format!("{:.1}W", info.effective_pl2())).size(FONT_BODY).style(move |_theme| iced::widget::text::Style { color: Some(pl2_color) }),
         if snap.sync_enabled {
             text("  [Syncing]").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GREEN) })
         } else {
@@ -1114,6 +1115,19 @@ fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             text(format!("  PL2: {:.1}W ({:.2}s)", info.pl2_msr, info.pl2_time_s)).size(FONT_BODY),
             text(if info.pl2_msr_enabled { " [En]" } else { " [Dis]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl2_msr_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
             text(if info.pl2_msr_clamped { " [Cl]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+        ].spacing(4));
+
+        // MMIO (static) read-only PL1/PL2
+        settings_content = settings_content.push(text("MMIO (Read-only)").size(FONT_BODY));
+        settings_content = settings_content.push(row![
+            text(format!("  PL1: {:.1}W ({:.2}s)", info.pl1_mmio, info.pl1_mmio_time_s)).size(FONT_BODY),
+            text(if info.pl1_mmio_enabled { " [En]" } else { " [Dis]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl1_mmio_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
+            text(if info.pl1_mmio_clamped { " [Cl]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+        ].spacing(4));
+        settings_content = settings_content.push(row![
+            text(format!("  PL2: {:.1}W ({:.2}s)", info.pl2_mmio, info.pl2_mmio_time_s)).size(FONT_BODY),
+            text(if info.pl2_mmio_enabled { " [En]" } else { " [Dis]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl2_mmio_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
+            text(if info.pl2_mmio_clamped { " [Cl]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
         ].spacing(4));
 
         // Editable PL1/PL2 — writes to MSR 0x610

@@ -5,6 +5,25 @@ use std::io::Write;
 use std::path::Path;
 
 fn main() {
+    // Expose the pinned framework_lib version so the UI (views.rs / app.rs)
+    // never shows a stale hardcoded version after a dependency bump.
+    println!("cargo:rerun-if-changed=Cargo.lock");
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let lock_path = Path::new(&manifest_dir).join("Cargo.lock");
+    let lock = std::fs::read_to_string(&lock_path).expect("Failed to read Cargo.lock");
+    let mut current_name = String::new();
+    for line in lock.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("name = ") {
+            current_name = rest.trim_matches('"').to_string();
+        } else if let Some(rest) = line.strip_prefix("version = ")
+            && current_name == "framework_lib"
+        {
+            println!("cargo:rustc-env=FRAMEWORK_LIB_VERSION={}", rest.trim_matches('"'));
+            break;
+        }
+    }
+
     if cfg!(target_os = "windows") {
         println!("cargo:rerun-if-changed=assets/app.ico");
         let mut res = winresource::WindowsResource::new();

@@ -34,6 +34,9 @@ jobs:
       - name: Test
         run: cargo test --verbose
 
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Build release binary
         run: cargo build --release --verbose
 
