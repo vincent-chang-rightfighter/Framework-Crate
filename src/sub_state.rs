@@ -17,8 +17,6 @@ pub type PdPortsHistory = VecDeque<Arc<Vec<cli::ec_wrapper::UsbCPort>>>;
 pub struct FanState {
     /// Current fan control mode (raw u64 for atomic access).
     pub mode: Arc<AtomicU64>,
-    /// Config poll interval (ms) for curve mode, synced from config.
-    pub curve_poll_ms: Arc<AtomicU64>,
     /// Last duty cycle applied to the EC fan.
     pub last_applied_duty: Arc<AtomicU64>,
     /// Last known fan max RPM (periodically refreshed).
@@ -39,7 +37,6 @@ impl Default for FanState {
     fn default() -> Self {
         Self {
             mode: Arc::new(AtomicU64::new(0)),
-            curve_poll_ms: Arc::new(AtomicU64::new(1000)),
             last_applied_duty: Arc::new(AtomicU64::new(0)),
             fan_max_rpm: Arc::new(AtomicU64::new(0)),
             last_fan_rpm_reset: Arc::new(AtomicU64::new(0)),

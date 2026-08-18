@@ -47,6 +47,13 @@ impl Config {
             if let Some(ref mut down) = curve.curve.rate_limit_down_pct_per_step {
                 *down = (*down).clamp(RATE_LIMIT_MIN, RATE_LIMIT_MAX);
             }
+            if curve.curve.points.is_empty() {
+                // An explicit `points = []` in the file is degenerate: the
+                // curve editor would render no draggable points at all.
+                // Fill in the defaults so the curve stays editable.
+                curve.curve.points = default_points();
+                debug!("Curve points were empty — restored default points");
+            }
             for point in &mut curve.curve.points {
                 // Both axes are canvas coordinates too: values outside 0..=100
                 // would draw off-plot, so clamp instead of trusting the editor.
@@ -409,5 +416,24 @@ mod tests {
         let pts = &c.fan.curve.as_ref().unwrap().curve.points;
         assert_eq!(pts[0], [100, 100]);
         assert_eq!(pts[1], [40, 10]);
+    }
+
+    #[test]
+    fn validate_empty_curve_points_restores_defaults() {
+        let mut c = Config::default();
+        c.fan.curve = Some(GlobalCurveConfig {
+            curve: CurveConfig {
+                sensors: vec![],
+                points: vec![],
+                hysteresis_c: 2,
+                rate_limit_pct_per_step: 10,
+                rate_limit_down_pct_per_step: None,
+            },
+            poll_ms: 1000,
+        });
+        c.validate();
+        let pts = &c.fan.curve.as_ref().unwrap().curve.points;
+        assert_eq!(pts, &default_points());
+        assert!(!pts.is_empty());
     }
 }

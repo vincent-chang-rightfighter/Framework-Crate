@@ -10,12 +10,12 @@ Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-c
 
 ## Features
 
-- **Fan Control** — Auto (firmware), manual (0–100% duty, optional per-fan), and curve mode with sliders (default 5 points, hysteresis, and rate limiting)
+- **Fan Control** — Auto (firmware), manual (0–100% duty, optional per-fan), and curve mode with draggable points on a canvas (default 5 points, hysteresis, and rate limiting; live sensor markers shown on the curve)
 - **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity
 - **Live Telemetry** — Real-time temperature chart (30s sliding window), per-sensor display with colored indicators, and fan RPM in the header
 - **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card, and USB-C / HDMI / DP port classification
 - **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download). AMD and other vendors are not supported.
-- **About Page** — Hardware info (CPU, RAM, display, BIOS) and software settings (poll rate, refresh interval)
+- **About Page** — Hardware info (CPU, RAM, display, BIOS), software settings (poll rate, refresh interval), GitHub link, and third-party license notices
 - **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit)
 
 ## Requirements
@@ -73,7 +73,7 @@ src/
   background_task.rs   — EC polling loop, fan control, expansion/PD scans
   cpu_power.rs         — PawnIO RAPL read/write (PL1/PL2) and sync thread
   temp_chart.rs        — Canvas-based temperature line chart (30s history)
-  curve_canvas.rs      — Canvas-based fan curve visualization
+  curve_canvas.rs      — Interactive canvas-based fan curve editor (drag points, sensor markers)
   fan_control.rs       — CurveStepper, rate limiting, duty calculation
   system_info.rs       — Windows API FFI (CPU, RAM, OS, display, tray)
   probe.rs             — HeightProbe widget for dynamic window sizing
@@ -108,10 +108,11 @@ framework_lib (CrosEc) → background_task → Arc<RwLock> → UI (view reads)
 - `ThermalData.temps` uses `Arc<BTreeMap>` — history samples share data
 - `SensorCache.sorted/colors` uses `Arc<Vec>` — zero-copy per UI tick
 - Config locks are held for less than 1µs by reading only the needed fields and dropping immediately
-- `curve_full_points` is debounced (100ms after the last slider edit)
+- `curve_full_points` is debounced (100ms after the last drag edit)
 - PD port history is pushed only when data changes
 - The fan curve keeps running during idle periods to maintain temperature response
 - The `mutate_config` helper reduces boilerplate for config mutations
+- Canvas editor uses cached rendering with content-based invalidation (points, sensor marks, hover/drag state)
 
 ## Configuration
 
@@ -127,7 +128,7 @@ per_fan_duty = []
 duty_pct = 50
 
 [fan.curve]
-poll_ms = 500
+poll_ms = 500           # deprecated — retained for compatibility; curve polling follows telemetry.poll_ms
 sensors = []                 # empty = hottest non-battery sensor
 points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]]
 hysteresis_c = 2
@@ -145,10 +146,10 @@ selected_sensors = []
 
 ## Known Limitations
 
-- **Fan curve coordinates**: Editing curve points with sliders can leave the canvas axes / line segments misaligned until the next full redraw. Fan duty still follows the numeric points, not the glitched drawing.
 - **AMD CPU Power**: CPU Power (PL1/PL2 via PawnIO) is Intel-only. On AMD and other CPUs the card stays visible and shows **Not Supported**; no RAPL / PawnIO access is attempted.
-- **USB expansion card classification** *(to be fixed in v0.3.0)*: Port type (USB-C / USB-A / HDMI / DP) is inferred from EC PD state. Starting with v0.3.0, ports that ever reported a Sink role are permanently classified as USB-C, so USB-C vs USB-A is no longer flipped when a device is plugged into an expansion-card port; HDMI/DP cards that omit DP-alt may still be mislabeled. Enable Expansion Card Debug Mode on the About page to inspect raw role / watts.
-- **Sleep / hibernate** *(to be fixed in v0.3.0)*: Previously, the fan-speed control could stop responding correctly after the system resumed from sleep or hibernation. v0.3.0 detects `WM_POWERBROADCAST` resume events (resetting the EC client, `CurveStepper` state, and thermal history) and additionally re-asserts the fan duty every 30 s, so the fans spin back up even if the resume event is missed. Consecutive EC read / write failures also trigger automatic client reinitialization.
+- **Fan Curve Coordinates Issue (to be fixed in v0.3.0)**: Editing curve points with sliders can leave the canvas axes / line segments misaligned until the next full redraw. Fan duty still follows the numeric points, not the glitched drawing.
+- **USB Expansion Card Classification Issue (to be fixed in v0.3.0)**: Port type (USB-C / USB-A / HDMI / DP) is inferred from EC PD state. Since v0.3.0, ports that ever reported a Sink role are permanently classified as USB-C, so USB-C vs USB-A is no longer flipped when a device is plugged into an expansion-card port. HDMI/DP cards that omit DP-alt may still be mislabeled — use Expansion Card Debug Mode on the About page to inspect raw role / watts.
+- **Sleep / Hibernate Fan Control Issue (to be fixed in v0.3.0)**: Previously, fan-speed control could stop responding correctly after the system resumed from sleep or hibernation. v0.3.0 detects `WM_POWERBROADCAST` resume events (resetting the EC client, `CurveStepper` state, and thermal history) and additionally re-asserts the fan duty every 30 s, so the fans spin back up even if the resume event is missed. Consecutive EC read / write failures also trigger automatic client reinitialization.
 - **Platform-specific**: This project has only been tested on Intel Core Ultra Series 1 (Meteor Lake) Framework laptops; broader support is not yet guaranteed.
 - **EC driver**: The Framework EC kernel driver must be installed for `framework_lib` to communicate with the hardware.
 

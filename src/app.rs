@@ -145,7 +145,9 @@ pub enum Message {
     FanDutyChanged(u32),
     FanCurvePointTempChanged(usize, u32),
     FanCurvePointDutyChanged(usize, u32),
-    FanCurvePollMsChanged(u64),
+    FanCurvePointMoved(usize, u32, u32),
+    ToggleCurveSettings,
+    CurveSensorToggled(usize, bool),
     FanCurveHysteresisChanged(u32),
     FanCurveRateLimitChanged(u32),
     FanUnifiedDutyToggled(bool),
@@ -177,6 +179,7 @@ pub enum Message {
     QuitDutyChanged(u32),
     QuitCanceled,
     CollectDebugInfo,
+    OpenProjectUrl,
     ToggleExpansionCardDebug,
     InstallPawnIO,
     PawnIOInstalled(Result<(), String>),
@@ -204,6 +207,7 @@ pub struct App {
     pub cli_present: bool,
     pub startup_error: Option<String>,
     pub show_sensor_settings: bool,
+    pub show_curve_settings: bool,
     pub show_cpu_power_settings: bool,
     pub show_battery_details: bool,
     pub show_settings: bool,
@@ -305,9 +309,6 @@ impl App {
             },
             fan: FanState {
                 mode: Arc::new(AtomicU64::new(loaded_config.fan.mode.to_u8() as u64)),
-                curve_poll_ms: Arc::new(AtomicU64::new(
-                    loaded_config.fan.curve.as_ref().map(|c| c.poll_ms).unwrap_or(1000)
-                )),
                 last_applied_duty: Arc::new(AtomicU64::new(0)),
                 fan_max_rpm: Arc::new(AtomicU64::new(0)),
                 last_fan_rpm_reset: Arc::new(AtomicU64::new(crate::util::monotonic_ms())),
@@ -362,6 +363,7 @@ impl App {
             cli_present: false,
             startup_error: None,
             show_sensor_settings: false,
+            show_curve_settings: false,
             show_cpu_power_settings: false,
             show_battery_details: false,
             show_settings: false,
@@ -647,20 +649,12 @@ impl App {
         match *message {
             Message::FanModeChanged(mode) => {
                 self.state.fan.mode.store(mode.to_u8() as u64, Ordering::Release);
-                let curve_poll = {
-                    let mut curve_poll_ms = None;
-                    self.mutate_config(|cfg| {
-                        if mode == FanControlMode::Curve && cfg.fan.curve.is_none() {
-                            cfg.fan.curve = Some(crate::types::GlobalCurveConfig::default());
-                        }
-                        cfg.fan.mode = mode;
-                        curve_poll_ms = cfg.fan.curve.as_ref().map(|c| c.poll_ms);
-                    });
-                    curve_poll_ms
-                };
-                if let Some(ms) = curve_poll {
-                    self.state.fan.curve_poll_ms.store(ms, Ordering::Release);
-                }
+                self.mutate_config(|cfg| {
+                    if mode == FanControlMode::Curve && cfg.fan.curve.is_none() {
+                        cfg.fan.curve = Some(crate::types::GlobalCurveConfig::default());
+                    }
+                    cfg.fan.mode = mode;
+                });
                 self.update_curve_full_points();
                 self.save_config();
                 Some(Task::none())
@@ -736,14 +730,18 @@ impl App {
                 self.save_config();
                 Some(Task::none())
             }
-            Message::FanCurvePollMsChanged(ms) => {
-                let clamped = ms.max(500);
-                self.state.fan.curve_poll_ms.store(clamped, Ordering::Release);
+            Message::FanCurvePointMoved(idx, temp, duty) => {
+                let temp = temp.clamp(1, 99);
+                let duty = duty.clamp(0, 100);
                 self.mutate_config(|cfg| {
-                    if let Some(ref mut curve) = cfg.fan.curve {
-                        curve.poll_ms = clamped;
+                    if let Some(ref mut curve) = cfg.fan.curve
+                        && idx < curve.curve.points.len()
+                    {
+                        curve.curve.points[idx] = [temp, duty];
                     }
                 });
+                self.pending_curve_update = true;
+                self.last_curve_edit_ts = Instant::now();
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
@@ -810,6 +808,30 @@ impl App {
                     }
                 });
                 self.rebuild_sensor_cache();
+                self.save_config();
+                Some(Task::none())
+            }
+            Message::CurveSensorToggled(idx, enabled) => {
+                let name = {
+                    let cache = read_lock(&self.state.thermal.sensor_cache);
+                    cache.keys.get(idx).cloned()
+                };
+                let Some(name) = name else {
+                    return Some(Task::none());
+                };
+                self.mutate_config(|cfg| {
+                    let Some(curve) = cfg.fan.curve.as_mut() else {
+                        return;
+                    };
+                    if enabled {
+                        if !curve.curve.sensors.contains(&name) {
+                            curve.curve.sensors.push(name);
+                        }
+                    } else {
+                        curve.curve.sensors.retain(|s| s != &name);
+                    }
+                });
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
             }
@@ -1062,6 +1084,11 @@ impl App {
                 self.show_sensor_settings = !self.show_sensor_settings;
                 Task::none()
             }
+            Message::ToggleCurveSettings => {
+                self.show_curve_settings = !self.show_curve_settings;
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
+            }
             Message::ToggleCpuPowerSettings => {
                 self.show_cpu_power_settings = !self.show_cpu_power_settings;
                 // This flag lives in the cached ViewSnapshot, so mark it dirty
@@ -1193,6 +1220,24 @@ impl App {
                     .spawn()
                 {
                     tracing::error!("Failed to open debug report {} in notepad: {}", path.display(), e);
+                }
+                Task::none()
+            }
+            Message::OpenProjectUrl => {
+                const URL: &str = "https://github.com/vincent-chang-rightfighter/Framework-Crate";
+                unsafe {
+                    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+                    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+                    let url_wide: Vec<u16> = URL.encode_utf16().chain(std::iter::once(0)).collect();
+                    let open_wide: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+                    ShellExecuteW(
+                        std::ptr::null_mut(),
+                        open_wide.as_ptr(),
+                        url_wide.as_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        SW_SHOWNORMAL,
+                    );
                 }
                 Task::none()
             }

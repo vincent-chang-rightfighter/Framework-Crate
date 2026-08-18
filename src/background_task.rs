@@ -445,7 +445,7 @@ pub fn spawn(state: AppState) {
                     );
                     let interval = match fan_mode {
                         crate::types::FanControlMode::Curve => {
-                            bg_state2.fan.curve_poll_ms.load(Ordering::Acquire).max(POLL_RATE_MIN_MS as u64)
+                            bg_state2.lifecycle.poll_ms.load(Ordering::Acquire).max(POLL_RATE_MIN_MS as u64)
                         }
                         _ => bg_state2.lifecycle.poll_ms.load(Ordering::Acquire).max(POLL_RATE_MIN_MS as u64),
                     };

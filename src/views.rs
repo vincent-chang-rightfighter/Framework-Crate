@@ -32,6 +32,7 @@ pub(crate) struct ViewSnapshot {
     pub cpu_power: Arc<crate::cpu_power::CpuPowerInfo>,
     pub sync_enabled: bool,
     pub show_cpu_power_settings: bool,
+    pub show_curve_settings: bool,
     pub pl_custom_applied: bool,
     pub modules_download_error: Option<String>,
     pub pl1_edit: String,
@@ -76,6 +77,7 @@ impl ViewSnapshot {
             cpu_power,
             sync_enabled,
             show_cpu_power_settings: app.show_cpu_power_settings,
+            show_curve_settings: app.show_curve_settings,
             pl_custom_applied: app.pl_custom_applied,
             modules_download_error: app.modules_download_error.clone(),
             pl1_edit: app.pl1_edit.clone(),
@@ -202,7 +204,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
                 card(cpu_power_section(snap)),
                 card(view_misc(snap)),
             ].spacing(8)
-        ).padding(iced::Padding::from([0, 8]))
+        ).padding(iced::Padding { top: 0.0, right: 20.0, bottom: 0.0, left: 8.0 })
     ).height(Length::Fill);
 
     let content = container(
@@ -325,7 +327,21 @@ fn view_settings(app: &App) -> Element<'_, Message> {
             button(text("Collect Debug Info").size(FONT_BODY))
                 .on_press(Message::CollectDebugInfo)
                 .style(btn_style),
+            button(text("Project on GitHub").size(FONT_BODY))
+                .on_press(Message::OpenProjectUrl)
+                .style(btn_style),
         ].spacing(8)
+    );
+
+    content = content.push(
+        column![
+            text("Framework Crate — MIT License").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
+            text("framework_lib — BSD-3-Clause").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
+            text("PawnIO (optional) — GPL-2.0").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
+            text("PawnIO Modules (optional) — LGPL-2.1").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
+            text("iced / tokio / tracing — MIT License").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
+            text("serde / windows-sys — MIT OR Apache-2.0").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
+        ].spacing(2)
     );
 
     container(content)
@@ -452,19 +468,18 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
                         ].align_y(iced::Alignment::Center).spacing(6)
                     );
                 }
-                container(settings_content)
-                    .padding(8)
-                    .style(|_theme| iced::widget::container::Style {
-                        background: Some(COLOR_SETTINGS_BG.into()),
-                        border: iced::Border::default().rounded(4).color(COLOR_DARK).width(1),
-                        ..Default::default()
-                    })
-                    .into()
-            } else {
-                // Always reserve the slot (same Container widget type) so the
-                // subtree below keeps its Tree state when the panel toggles.
-                container(column![]).into()
-            };
+                    container(settings_content)
+                        .width(Length::Fill)
+                        .padding(8)
+                        .style(|_theme| iced::widget::container::Style {
+                            background: Some(COLOR_SETTINGS_BG.into()),
+                            border: iced::Border::default().rounded(4).color(COLOR_DARK).width(1),
+                            ..Default::default()
+                        })
+                        .into()
+                } else {
+                    iced::widget::Space::new().into()
+                };
             content = content.push(settings_panel);
 
             let history = Arc::clone(&snap.temp_history);
@@ -611,45 +626,142 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
         }
         FanControlMode::Curve => {
             if let Some(ref curve) = config.fan.curve {
-                let poll = curve.poll_ms;
                 let hyst = curve.curve.hysteresis_c;
                 let rate = curve.curve.rate_limit_pct_per_step;
 
-                content = content.push(text(format!("Poll: {} ms", poll)).size(FONT_BODY));
-                content = content.push(iced::widget::slider(500u32..=10000, (poll as u32).clamp(500, 10000), |v| Message::FanCurvePollMsChanged(v as u64)));
+                let settings_label = if snap.show_curve_settings { "[-] Settings" } else { "[+] Settings" };
+                content = content.push(
+                    row![
+                        text("Curve").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+                        space::horizontal(),
+                        button(text(settings_label).size(FONT_SMALL))
+                            .on_press(Message::ToggleCurveSettings)
+                            .style(btn_style),
+                    ].align_y(iced::Alignment::Center)
+                );
 
-                content = content.push(text(format!("Hysteresis: {}°C", hyst)).size(FONT_BODY));
-                content = content.push(iced::widget::slider(0..=10, hyst, Message::FanCurveHysteresisChanged));
+                let settings_panel: Element<'_, Message> = if snap.show_curve_settings {
+                    let mut settings_content = column![].spacing(4).padding(4);
 
-                content = content.push(text(format!("Rate Limit: {} %/step", rate)).size(FONT_BODY));
-                content = content.push(iced::widget::slider(1..=100, rate, Message::FanCurveRateLimitChanged));
-
-                content = content.push(text("Curve Points (Temp C -> Duty %)").size(FONT_SECTION));
-
-                for (idx, point) in curve.curve.points.iter().enumerate() {
-                    let temp = point[0];
-                    let duty = point[1];
-                    content = content.push(
-                        column![
-                            row![
-                                text(format!("P{}:", idx + 1)).size(FONT_BODY),
-                                text("Temp:").size(FONT_BODY),
-                                iced::widget::slider(1..=99, temp, move |v| Message::FanCurvePointTempChanged(idx, v)),
-                                text(format!("{}°C", temp)).size(FONT_BODY),
-                            ].spacing(4).align_y(iced::Alignment::Center),
-                            row![
-                                space::horizontal().width(20),
-                                text("Duty:").size(FONT_BODY),
-                                iced::widget::slider(0..=100, duty, move |v| Message::FanCurvePointDutyChanged(idx, v)),
-                                text(format!("{}%", duty)).size(FONT_BODY),
-                            ].spacing(4).align_y(iced::Alignment::Center),
-                        ]
+                    settings_content = settings_content.push(text("Hysteresis").size(FONT_BODY));
+                    settings_content = settings_content.push(
+                        row![
+                            iced::widget::slider(0..=10, hyst, Message::FanCurveHysteresisChanged),
+                            text(format!("{}°C", hyst)).size(FONT_BODY),
+                        ].spacing(8).align_y(iced::Alignment::Center)
                     );
+
+                    settings_content = settings_content.push(text("Rate Limit").size(FONT_BODY));
+                    settings_content = settings_content.push(
+                        row![
+                            iced::widget::slider(1..=100, rate, Message::FanCurveRateLimitChanged),
+                            text(format!("{} %/step", rate)).size(FONT_BODY),
+                        ].spacing(8).align_y(iced::Alignment::Center)
+                    );
+
+                    settings_content = settings_content.push(text("Temperature sensor(s)").size(FONT_BODY));
+                    let cache = &snap.sensor_cache;
+                    let curve_sensors: std::collections::HashSet<&str> =
+                        curve.curve.sensors.iter().map(|s| s.as_str()).collect();
+                    if cache.keys.is_empty() {
+                        settings_content = settings_content.push(
+                            text("No sensors detected yet").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+                        );
+                    } else {
+                        for (idx, name) in cache.keys.iter().enumerate() {
+                            let is_on = curve_sensors.contains(name.as_str());
+                            let color = SENSOR_COLORS[idx % SENSOR_COLORS.len()];
+                            let on_off = if is_on { "On" } else { "Off" };
+                            let on_color = if is_on { COLOR_GREEN } else { COLOR_GRAY };
+                            let bg_color = if is_on { color } else { COLOR_DARK };
+                            settings_content = settings_content.push(
+                                row![
+                                    button(
+                                        container(text(" ").size(FONT_SMALL))
+                                            .width(16).height(16).center_x(16).center_y(16)
+                                            .style(move |_theme| iced::widget::container::Style {
+                                                background: Some(bg_color.into()),
+                                                border: iced::Border::default().rounded(8),
+                                                ..Default::default()
+                                            })
+                                     ).on_press(Message::CurveSensorToggled(idx, !is_on))
+                                      .style(btn_style).padding(0),
+                                    text(name.as_str()).size(FONT_BODY),
+                                    space::horizontal(),
+                                    text(on_off).size(FONT_SMALL).style(move |_theme| iced::widget::text::Style { color: Some(on_color) }),
+                                ].align_y(iced::Alignment::Center).spacing(6)
+                            );
+                        }
+                    }
+
+                    container(settings_content)
+                        .width(Length::Fill)
+                        .padding(8)
+                        .style(|_theme| iced::widget::container::Style {
+                            background: Some(COLOR_SETTINGS_BG.into()),
+                            border: iced::Border::default().rounded(4).color(COLOR_DARK).width(1),
+                            ..Default::default()
+                        })
+                        .into()
+                } else {
+                    iced::widget::Space::new().into()
+                };
+                content = content.push(settings_panel);
+
+                for (chunk_idx, chunk) in curve.curve.points.chunks(3).enumerate() {
+                    let items: Vec<Element<'_, Message>> = chunk.iter().enumerate().map(|(offset, point)| {
+                        let idx = chunk_idx * 3 + offset;
+                        text(format!("P{}: {}°C -> {}%", idx + 1, point[0], point[1]))
+                            .size(FONT_BODY)
+                            .into()
+                    }).collect();
+                    content = content.push(row(items).spacing(12));
                 }
 
                 let pts = &curve.curve.points;
                 let all_pts = Arc::clone(&snap.curve_full_points);
-                let canvas = crate::curve_canvas::view_curve(pts, &all_pts);
+
+                // Live sensor markers: whichever sensors drive the curve
+                // (configured list, or the hottest non-battery fallback).
+                let marks: std::sync::Arc<Vec<crate::curve_canvas::SensorMark>> = {
+                    let mut marks = Vec::new();
+                    if let Some(thermal) = snap.thermal.as_ref().as_ref() {
+                        let keys = &snap.sensor_cache.keys;
+                        let sensors: Vec<&str> = if curve.curve.sensors.is_empty() {
+                            // Fallback matches curve_control_temp: hottest
+                            // non-battery sensor, else any hottest sensor.
+                            let mut best: Option<(&str, i32)> = None;
+                            for (name, t) in thermal.temps.iter() {
+                                let name: &str = name;
+                                if crate::types::is_battery_sensor(name) {
+                                    continue;
+                                }
+                                if best.is_none_or(|(_, bt)| *t > bt) {
+                                    best = Some((name, *t));
+                                }
+                            }
+                            if best.is_none() {
+                                best = thermal.temps.iter()
+                                    .max_by_key(|(_, t)| **t)
+                                    .map(|(name, t)| (name.as_str(), *t));
+                            }
+                            best.into_iter().map(|(n, _)| n).collect()
+                        } else {
+                            curve.curve.sensors.iter().map(|s| s.as_str()).collect()
+                        };
+                        for name in sensors {
+                            if let Some(t) = thermal.temps.get(name) {
+                                let idx = keys.iter().position(|k| k == name).unwrap_or(0);
+                                marks.push(crate::curve_canvas::SensorMark {
+                                    temp: *t,
+                                    color: SENSOR_COLORS[idx % SENSOR_COLORS.len()],
+                                });
+                            }
+                        }
+                    }
+                    Arc::new(marks)
+                };
+                let canvas = crate::curve_canvas::view_curve(pts, &all_pts, &marks);
 
                 let mut curve_area = column![].spacing(2);
                 curve_area = curve_area.push(canvas);
@@ -1203,6 +1315,7 @@ fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
 
         content = content.push(
             container(settings_content)
+                .width(Length::Fill)
                 .padding(8)
                 .style(|_theme| iced::widget::container::Style {
                     background: Some(COLOR_SETTINGS_BG.into()),
