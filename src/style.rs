@@ -33,9 +33,10 @@ pub const IDLE_INTERVAL_MS: u64 = 2_000;
 pub const UI_IDLE_INTERVAL_MS: u64 = 1_000;
 /// UI tick interval when the window is hidden (minimized to tray) (ms).
 /// Hidden windows receive no WM_PAINT, so no presents/view() run while hidden
-/// (each tick is just a trivial update + RedrawWindow syscall). 500ms keeps
-/// tray restore / shutdown responsive without meaningful CPU cost.
-pub const UI_HIDDEN_INTERVAL_MS: u64 = 500;
+/// (each tick is just a trivial update + RedrawWindow syscall). The snapshot
+/// rebuild is skipped while hidden (view_dirty is reset without rebuilding),
+/// so 2s only needs to keep tray liveness / restore / shutdown responsive.
+pub const UI_HIDDEN_INTERVAL_MS: u64 = 2_000;
 
 /// Expansion card / PD port scan interval (ms). Runs on a fixed wall-clock
 /// interval independent of idle state, so hotplug stays detectable while the

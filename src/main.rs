@@ -25,22 +25,42 @@ pub use style::*;
 
 include!(concat!(env!("OUT_DIR"), "/icon_rgba.rs"));
 
-fn main() {
-    // Keep the async runtime small for a tray app. The Win32 tray message pump
-    // already owns a native thread; Tokio should not spin up a large worker pool.
-    // Respect an explicit override from the environment but default to two workers.
-    if std::env::var_os("TOKIO_WORKER_THREADS").is_none() {
-        // SAFETY: This is called at the very start of main(), before any user
-        // threads are created and before Tokio initializes its worker pool.
-        // The only code that has run is core_affinity::get_core_ids() which
-        // may create threads on Windows, but they complete before this line.
-        // No other thread can observe the environment change because Tokio
-        // has not started yet. After this point, set_var is never called again.
-        unsafe {
-            std::env::set_var("TOKIO_WORKER_THREADS", "2");
-        }
+/// Tokio executor limited to two worker threads. This is a tray app: the
+/// Win32 tray message pump owns a native thread, and the background loop is
+/// one async task whose EC calls all run via `spawn_blocking` (which uses
+/// tokio's separate blocking pool, not these workers). Two workers cover the
+/// async loop and the iced runtime tasks, and keep the whole background
+/// pipeline pinned onto the LP-E core (see `pin_to_slowest_core`).
+struct SmallTokioExecutor {
+    rt: tokio::runtime::Runtime,
+}
+
+impl iced::Executor for SmallTokioExecutor {
+    fn new() -> Result<Self, iced::futures::io::Error> {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(8)
+            .enable_all()
+            .build()
+            .map_err(iced::futures::io::Error::other)
+            .map(|rt| Self { rt })
     }
 
+    fn spawn(&self, future: impl std::future::Future<Output = ()> + Send + 'static) {
+        drop(self.rt.spawn(future));
+    }
+
+    fn block_on<T>(&self, future: impl std::future::Future<Output = T>) -> T {
+        self.rt.block_on(future)
+    }
+
+    fn enter<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _guard = self.rt.enter();
+        f()
+    }
+}
+
+fn main() {
     background_task::pin_to_slowest_core();
 
     #[cfg(not(test))]
@@ -73,6 +93,7 @@ fn main() {
         .title(app_title)
         .subscription(App::subscription)
         .theme(app_theme)
+        .executor::<SmallTokioExecutor>()
         .window(iced::window::Settings {
             // NOTE: `.window(...)` overrides any earlier `.window_size()`
             // / `.resizable()` calls, so the size must be set here.

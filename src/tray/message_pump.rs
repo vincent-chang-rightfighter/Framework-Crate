@@ -20,6 +20,13 @@ const WM_RBUTTONUP: u32 = 0x0205;
 thread_local! {
     static EVENT_TX: std::cell::RefCell<Option<mpsc::Sender<TrayEvent>>> = const { std::cell::RefCell::new(None) };
     static TRAY_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    /// Main window HWND, used to restore the window immediately on a tray
+    /// show event. The UI tick interval is much slower while hidden (2s), so
+    /// waiting for the tick to process the event would delay the restore by
+    /// up to 2s; the pump thread restores the window right away (all the
+    /// Win32 calls in restore_window_from_tray are thread-safe) and the main
+    /// thread only synchronizes its visible/view_dirty state afterwards.
+    static APP_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
 }
 
 static TRAY_THREAD_ID: AtomicU32 = AtomicU32::new(0);
@@ -105,6 +112,12 @@ unsafe extern "system" fn tray_wnd_proc(
     if msg == WM_TRAYICON {
         let lparam_u32 = lparam as u32;
         if lparam_u32 == WM_LBUTTONUP {
+            APP_HWND.with(|hwnd| {
+                let app_hwnd = hwnd.get();
+                if app_hwnd != 0 {
+                    system_info::restore_window_from_tray(app_hwnd);
+                }
+            });
             EVENT_TX.with(|tx| {
                 if let Some(sender) = tx.borrow().as_ref() {
                     let _ = sender.send(TrayEvent::Show);
@@ -139,9 +152,10 @@ pub fn spawn_message_pump(
     command_rx: mpsc::Receiver<TrayCommand>,
     icon_ready_tx: mpsc::SyncSender<bool>,
     thread_ready_tx: mpsc::SyncSender<()>,
+    app_hwnd: isize,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        message_pump_loop(event_tx, command_rx, icon_ready_tx, thread_ready_tx);
+        message_pump_loop(event_tx, command_rx, icon_ready_tx, thread_ready_tx, app_hwnd);
     })
 }
 
@@ -173,6 +187,7 @@ fn message_pump_loop(
     command_rx: mpsc::Receiver<TrayCommand>,
     icon_ready_tx: mpsc::SyncSender<bool>,
     thread_ready_tx: mpsc::SyncSender<()>,
+    app_hwnd: isize,
 ) {
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -182,6 +197,9 @@ fn message_pump_loop(
 
     EVENT_TX.with(|tx| {
         *tx.borrow_mut() = Some(event_tx.clone());
+    });
+    APP_HWND.with(|hwnd| {
+        hwnd.set(app_hwnd);
     });
 
     let tray_hwnd = create_hidden_window();
@@ -351,7 +369,15 @@ fn handle_tray_right_click(event_tx: &mpsc::Sender<TrayEvent>) {
 
     if let Some(cmd) = system_info::show_tray_menu(tray_hwnd, point.x, point.y) {
         match cmd {
-            ID_SHOW => { let _ = event_tx.send(TrayEvent::MenuShow); }
+            ID_SHOW => {
+                APP_HWND.with(|hwnd| {
+                    let app_hwnd = hwnd.get();
+                    if app_hwnd != 0 {
+                        system_info::restore_window_from_tray(app_hwnd);
+                    }
+                });
+                let _ = event_tx.send(TrayEvent::MenuShow);
+            }
             ID_QUIT => { let _ = event_tx.send(TrayEvent::MenuQuit); }
             _ => {}
         }

@@ -85,7 +85,7 @@ impl TrayManager {
         let (icon_ready_tx, icon_ready_rx) = mpsc::sync_channel(1);
         let (thread_ready_tx, thread_ready_rx) = mpsc::sync_channel(1);
 
-        let handle = spawn_message_pump(event_tx, command_rx, icon_ready_tx, thread_ready_tx);
+        let handle = spawn_message_pump(event_tx, command_rx, icon_ready_tx, thread_ready_tx, hwnd);
 
         self.command_tx = Some(command_tx);
         self.event_rx = Some(event_rx);

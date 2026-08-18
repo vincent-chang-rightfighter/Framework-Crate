@@ -503,6 +503,14 @@ impl App {
         if self.init_complete
             && (self.state.lifecycle.view_dirty.load(Ordering::Acquire) || self.cached_snapshot.is_none())
         {
+            if !self.state.lifecycle.visible.load(Ordering::Acquire) {
+                // Hidden to tray: the UI cannot be seen, so skip the snapshot
+                // rebuild even though the background loop keeps setting
+                // view_dirty. The Show action sets view_dirty again when the
+                // window returns, so the snapshot is rebuilt on restore.
+                self.state.lifecycle.view_dirty.store(false, Ordering::Release);
+                return;
+            }
             self.cached_snapshot = Some(crate::views::ViewSnapshot::from_app(self));
             self.state.lifecycle.view_dirty.store(false, Ordering::Release);
         }
