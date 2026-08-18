@@ -54,6 +54,13 @@ impl Config {
                 curve.curve.points = default_points();
                 debug!("Curve points were empty — restored default points");
             }
+            if curve.curve.sensors.len() > 1 {
+                // The curve is driven by exactly one temperature sensor
+                // (single selection in the UI). Older configs could carry
+                // multiple sensors; keep the first one.
+                curve.curve.sensors.truncate(1);
+                debug!("Curve sensors were multi-select — kept first ({})", curve.curve.sensors[0]);
+            }
             for point in &mut curve.curve.points {
                 // Both axes are canvas coordinates too: values outside 0..=100
                 // would draw off-plot, so clamp instead of trusting the editor.
@@ -435,5 +442,24 @@ mod tests {
         let pts = &c.fan.curve.as_ref().unwrap().curve.points;
         assert_eq!(pts, &default_points());
         assert!(!pts.is_empty());
+    }
+
+    #[test]
+    fn validate_truncates_curve_sensors_to_single_selection() {
+        let mut c = Config::default();
+        c.fan.curve = Some(GlobalCurveConfig {
+            curve: CurveConfig {
+                sensors: vec!["CPU".into(), "Battery".into(), "SSD".into()],
+                points: default_points(),
+                hysteresis_c: 2,
+                rate_limit_pct_per_step: 10,
+                rate_limit_down_pct_per_step: None,
+            },
+            poll_ms: 1000,
+        });
+        c.validate();
+        let sensors = &c.fan.curve.as_ref().unwrap().curve.sensors;
+        assert_eq!(sensors.len(), 1);
+        assert_eq!(sensors[0], "CPU");
     }
 }

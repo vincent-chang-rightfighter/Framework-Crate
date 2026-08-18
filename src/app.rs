@@ -143,11 +143,9 @@ pub enum Message {
     StartupError(String),
     FanModeChanged(FanControlMode),
     FanDutyChanged(u32),
-    FanCurvePointTempChanged(usize, u32),
-    FanCurvePointDutyChanged(usize, u32),
     FanCurvePointMoved(usize, u32, u32),
     ToggleCurveSettings,
-    CurveSensorToggled(usize, bool),
+    CurveSensorSelected(usize),
     FanCurveHysteresisChanged(u32),
     FanCurveRateLimitChanged(u32),
     FanUnifiedDutyToggled(bool),
@@ -700,36 +698,6 @@ impl App {
                 self.save_config();
                 Some(Task::none())
             }
-            Message::FanCurvePointTempChanged(idx, temp) => {
-                let temp = temp.clamp(0, 99);
-                self.mutate_config(|cfg| {
-                    if let Some(ref mut curve) = cfg.fan.curve
-                        && idx < curve.curve.points.len()
-                    {
-                        curve.curve.points[idx][0] = temp;
-                    }
-                });
-                self.pending_curve_update = true;
-                self.last_curve_edit_ts = Instant::now();
-                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
-                self.save_config();
-                Some(Task::none())
-            }
-            Message::FanCurvePointDutyChanged(idx, duty) => {
-                let duty = duty.clamp(0, 100);
-                self.mutate_config(|cfg| {
-                    if let Some(ref mut curve) = cfg.fan.curve
-                        && idx < curve.curve.points.len()
-                    {
-                        curve.curve.points[idx][1] = duty;
-                    }
-                });
-                self.pending_curve_update = true;
-                self.last_curve_edit_ts = Instant::now();
-                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
-                self.save_config();
-                Some(Task::none())
-            }
             Message::FanCurvePointMoved(idx, temp, duty) => {
                 let temp = temp.clamp(1, 99);
                 let duty = duty.clamp(0, 100);
@@ -811,7 +779,7 @@ impl App {
                 self.save_config();
                 Some(Task::none())
             }
-            Message::CurveSensorToggled(idx, enabled) => {
+            Message::CurveSensorSelected(idx) => {
                 let name = {
                     let cache = read_lock(&self.state.thermal.sensor_cache);
                     cache.keys.get(idx).cloned()
@@ -820,15 +788,10 @@ impl App {
                     return Some(Task::none());
                 };
                 self.mutate_config(|cfg| {
-                    let Some(curve) = cfg.fan.curve.as_mut() else {
-                        return;
-                    };
-                    if enabled {
-                        if !curve.curve.sensors.contains(&name) {
-                            curve.curve.sensors.push(name);
-                        }
-                    } else {
-                        curve.curve.sensors.retain(|s| s != &name);
+                    if let Some(curve) = cfg.fan.curve.as_mut() {
+                        // Single-sensor selection: the curve is driven by
+                        // exactly one temperature sensor.
+                        curve.curve.sensors = vec![name];
                     }
                 });
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
@@ -1230,7 +1193,7 @@ impl App {
                     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
                     let url_wide: Vec<u16> = URL.encode_utf16().chain(std::iter::once(0)).collect();
                     let open_wide: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
-                    ShellExecuteW(
+                    let result = ShellExecuteW(
                         std::ptr::null_mut(),
                         open_wide.as_ptr(),
                         url_wide.as_ptr(),
@@ -1238,6 +1201,10 @@ impl App {
                         std::ptr::null(),
                         SW_SHOWNORMAL,
                     );
+                    let result_code = result as isize;
+                    if result_code <= 32 {
+                        tracing::warn!("Failed to open project URL (ShellExecuteW error {})", result_code);
+                    }
                 }
                 Task::none()
             }

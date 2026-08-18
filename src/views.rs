@@ -659,17 +659,17 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                         ].spacing(8).align_y(iced::Alignment::Center)
                     );
 
-                    settings_content = settings_content.push(text("Temperature sensor(s)").size(FONT_BODY));
+                    settings_content = settings_content.push(text("Temperature sensor").size(FONT_BODY));
                     let cache = &snap.sensor_cache;
-                    let curve_sensors: std::collections::HashSet<&str> =
-                        curve.curve.sensors.iter().map(|s| s.as_str()).collect();
+                    let curve_sensor: Option<&str> =
+                        curve.curve.sensors.first().map(|s| s.as_str());
                     if cache.keys.is_empty() {
                         settings_content = settings_content.push(
                             text("No sensors detected yet").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
                         );
                     } else {
                         for (idx, name) in cache.keys.iter().enumerate() {
-                            let is_on = curve_sensors.contains(name.as_str());
+                            let is_on = curve_sensor == Some(name.as_str());
                             let color = SENSOR_COLORS[idx % SENSOR_COLORS.len()];
                             let on_off = if is_on { "On" } else { "Off" };
                             let on_color = if is_on { COLOR_GREEN } else { COLOR_GRAY };
@@ -684,7 +684,7 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                                                 border: iced::Border::default().rounded(8),
                                                 ..Default::default()
                                             })
-                                     ).on_press(Message::CurveSensorToggled(idx, !is_on))
+                                     ).on_press(Message::CurveSensorSelected(idx))
                                       .style(btn_style).padding(0),
                                     text(name.as_str()).size(FONT_BODY),
                                     space::horizontal(),
@@ -727,27 +727,32 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                     let mut marks = Vec::new();
                     if let Some(thermal) = snap.thermal.as_ref().as_ref() {
                         let keys = &snap.sensor_cache.keys;
-                        let sensors: Vec<&str> = if curve.curve.sensors.is_empty() {
-                            // Fallback matches curve_control_temp: hottest
+                        let sensors: Vec<&str> = {
+                            // Matches curve_control_temp: configured sensors
+                            // if any have a reading, otherwise the hottest
                             // non-battery sensor, else any hottest sensor.
-                            let mut best: Option<(&str, i32)> = None;
-                            for (name, t) in thermal.temps.iter() {
-                                let name: &str = name;
-                                if crate::types::is_battery_sensor(name) {
-                                    continue;
+                            let configured: Vec<&str> = curve.curve.sensors.iter().map(|s| s.as_str()).collect();
+                            let has_reading = configured.iter().any(|s| thermal.temps.contains_key(*s));
+                            if has_reading {
+                                configured
+                            } else {
+                                let mut best: Option<(&str, i32)> = None;
+                                for (name, t) in thermal.temps.iter() {
+                                    let name: &str = name;
+                                    if crate::types::is_battery_sensor(name) {
+                                        continue;
+                                    }
+                                    if best.is_none_or(|(_, bt)| *t > bt) {
+                                        best = Some((name, *t));
+                                    }
                                 }
-                                if best.is_none_or(|(_, bt)| *t > bt) {
-                                    best = Some((name, *t));
+                                if best.is_none() {
+                                    best = thermal.temps.iter()
+                                        .max_by_key(|(_, t)| **t)
+                                        .map(|(name, t)| (name.as_str(), *t));
                                 }
+                                best.into_iter().map(|(n, _)| n).collect()
                             }
-                            if best.is_none() {
-                                best = thermal.temps.iter()
-                                    .max_by_key(|(_, t)| **t)
-                                    .map(|(name, t)| (name.as_str(), *t));
-                            }
-                            best.into_iter().map(|(n, _)| n).collect()
-                        } else {
-                            curve.curve.sensors.iter().map(|s| s.as_str()).collect()
                         };
                         for name in sensors {
                             if let Some(t) = thermal.temps.get(name) {

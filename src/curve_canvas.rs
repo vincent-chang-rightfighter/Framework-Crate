@@ -53,9 +53,13 @@ struct CurveState {
     /// Snapshot of the sensor marks from the previous draw — used to detect
     /// live temperature changes that need a cache clear.
     last_marks: std::cell::RefCell<Option<Arc<Vec<SensorMark>>>>,
-    /// Index (into sorted order) of the point currently being dragged.
+    /// Index (into the config's original point order) being dragged.
+    /// Storing the config index (not the sorted position) keeps the drag
+    /// identity stable when a dragged point crosses another point: the
+    /// sorted position changes every frame during a drag, but the identity
+    /// of the point under the cursor must not.
     dragging: Cell<Option<usize>>,
-    /// Index (into sorted order) of the point under the cursor (hover).
+    /// Index (into the config's original point order) under the cursor.
     hover: Cell<Option<usize>>,
     /// Previous hover/drag values — used to detect when the highlight
     /// needs a cache clear so the circles redraw with updated colours.
@@ -120,25 +124,56 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
         cursor: iced::mouse::Cursor,
     ) -> Option<iced::widget::canvas::Action<crate::Message>> {
         let layout = Layout::new(bounds.size());
-        // During a drag the cursor may leave the canvas bounds; keep the
-        // drag alive using the absolute position minus the canvas origin,
-        // and let the temp/duty clamps handle out-of-plot values.
-        let cursor_pos = match cursor.position_in(bounds) {
-            Some(p) => p,
-            None => match (state.dragging.get(), cursor.position()) {
-                (Some(_), Some(abs)) => Point::new(abs.x - bounds.x, abs.y - bounds.y),
-                _ => {
-                    // Cursor left the canvas — clear hover / drag.
-                    if state.hover.get().is_some() {
-                        state.hover.set(None);
+
+        // Drag in progress: keep it alive even when the cursor leaves the
+        // canvas, using the absolute position minus the canvas origin, and
+        // let the temp/duty clamps handle out-of-plot values. No hover or
+        // nearest-point work is done here — that keeps the drag path cheap
+        // under high-poll-rate mice (each CursorMoved still arrives here).
+        if let Some(config_idx) = state.dragging.get() {
+            let cursor_pos = match cursor.position_in(bounds) {
+                Some(p) => p,
+                None => match cursor.position() {
+                    Some(abs) => Point::new(abs.x - bounds.x, abs.y - bounds.y),
+                    None => {
+                        // Cursor left the window entirely — end the drag.
+                        state.dragging.set(None);
                         return Some(iced::widget::canvas::Action::request_redraw());
                     }
-                    if state.dragging.get().is_some() {
-                        state.dragging.set(None);
+                },
+            };
+            match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
+                    let (raw_temp, raw_duty) = layout.screen_to_canvas(cursor_pos);
+                    let temp = (raw_temp.round() as i32).clamp(1, 99) as u32;
+                    let duty = (raw_duty.round() as i32).clamp(0, 100) as u32;
+                    // Throttle: only publish when the rounded value actually
+                    // changes, otherwise every sub-pixel move triggers an app
+                    // update + view rebuild + cache redraw for nothing.
+                    if self.points[config_idx] != [temp, duty] {
+                        return Some(iced::widget::canvas::Action::publish(
+                            crate::Message::FanCurvePointMoved(config_idx, temp, duty),
+                        ));
                     }
                     return None;
                 }
-            },
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                    state.dragging.set(None);
+                    return Some(iced::widget::canvas::Action::request_redraw().and_capture());
+                }
+                _ => {}
+            }
+            return None;
+        }
+
+        // Not dragging: hover tracking, only while the cursor is over the
+        // canvas.
+        let Some(cursor_pos) = cursor.position_in(bounds) else {
+            if state.hover.get().is_some() {
+                state.hover.set(None);
+                return Some(iced::widget::canvas::Action::request_redraw());
+            }
+            return None;
         };
         let sorted: Vec<[u32; 2]> = {
             let mut v = self.points.to_vec();
@@ -146,46 +181,31 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
             v
         };
 
-        // Find nearest point (in sorted order) within HIT_RADIUS.
+        // Find nearest point within HIT_RADIUS, mapped back to the config
+        // point index so hover/drag identity survives re-sorting.
         let nearest = sorted.iter().enumerate().min_by(|(_, a), (_, b)| {
             let da = cursor_pos.distance(layout.to_screen(a[0] as f32, a[1] as f32));
             let db = cursor_pos.distance(layout.to_screen(b[0] as f32, b[1] as f32));
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
         }).filter(|(_, pt)| {
             cursor_pos.distance(layout.to_screen(pt[0] as f32, pt[1] as f32)) <= HIT_RADIUS
-        }).map(|(i, _)| i);
+        }).map(|(i, _)| self.sorted_indices[i]);
 
         match event {
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
                 if let Some(idx) = nearest {
                     state.dragging.set(Some(idx));
                     state.hover.set(Some(idx));
-                    return Some(iced::widget::canvas::Action::capture());
+                    return Some(iced::widget::canvas::Action::request_redraw().and_capture());
                 }
             }
             iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
-                if let Some(drag_idx) = state.dragging.get() {
-                    // Convert cursor to temp/duty, clamped to valid ranges.
-                    let (raw_temp, raw_duty) = layout.screen_to_canvas(cursor_pos);
-                    let temp = (raw_temp.round() as i32).clamp(1, 99) as u32;
-                    let duty = (raw_duty.round() as i32).clamp(0, 100) as u32;
-                    let config_idx = self.sorted_indices[drag_idx];
-                    return Some(iced::widget::canvas::Action::publish(
-                        crate::Message::FanCurvePointMoved(config_idx, temp, duty),
-                    ));
-                }
                 // Hover tracking.
                 let old_hover = state.hover.get();
                 if old_hover != nearest {
                     state.hover.set(nearest);
                     return Some(iced::widget::canvas::Action::request_redraw());
                 }
-            }
-            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
-                if state.dragging.get().is_some() =>
-            {
-                state.dragging.set(None);
-                return Some(iced::widget::canvas::Action::capture());
             }
             _ => {}
         }
@@ -225,17 +245,15 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
         }
 
         let cache = state.cache.get_or_init(Cache::new);
-        let hover_idx = state.hover.get();
-        let drag_idx = state.dragging.get();
         let geo = cache.draw(renderer, size, |frame| {
             draw_curve_contents(
                 frame,
                 &self.all_pts,
                 &self.points,
+                &self.sorted_indices,
                 &self.marks,
                 size,
-                hover_idx,
-                drag_idx,
+                (state.hover.get(), state.dragging.get()),
             );
         });
         vec![geo]
@@ -272,14 +290,15 @@ fn draw_curve_contents(
     frame: &mut iced::widget::canvas::Frame<iced::Renderer>,
     all_pts: &Arc<Vec<[u32; 2]>>,
     points: &Arc<[[u32; 2]]>,
+    sorted_indices: &[usize],
     marks: &Arc<Vec<SensorMark>>,
     size: Size,
-    hover_idx: Option<usize>,
-    drag_idx: Option<usize>,
+    highlight: (Option<usize>, Option<usize>),
 ) {
     if all_pts.is_empty() {
         return;
     }
+    let (hover_idx, drag_idx) = highlight;
 
     let layout = Layout::new(size);
     let to_screen = |x: f32, y: f32| layout.to_screen(x, y);
@@ -337,9 +356,10 @@ fn draw_curve_contents(
     sorted_points.sort_by_key(|p| p[0]);
     for (sorted_pos, p) in sorted_points.iter().enumerate() {
         let center = to_screen(p[0] as f32, p[1] as f32);
-        let (fill_color, stroke_color, r) = if drag_idx == Some(sorted_pos) {
+        let config_idx = sorted_indices[sorted_pos];
+        let (fill_color, stroke_color, r) = if drag_idx == Some(config_idx) {
             (CURVE_COLOR, Color::WHITE, POINT_RADIUS + 2.0)
-        } else if hover_idx == Some(sorted_pos) {
+        } else if hover_idx == Some(config_idx) {
             (CURVE_COLOR, Color::WHITE, POINT_RADIUS + 1.0)
         } else {
             (CURVE_COLOR, Color::WHITE, POINT_RADIUS)
