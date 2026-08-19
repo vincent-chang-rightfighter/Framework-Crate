@@ -12,6 +12,9 @@ const WM_TRAYICON: u32 = WM_APP + 1;
 const WM_COMMAND_READY: u32 = WM_APP + 2;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONUP: u32 = 0x0205;
+/// Sent to top-level windows when the taskbar is created (e.g. Explorer
+/// restarts); the shell has destroyed our tray icon and it must be re-added.
+const WM_TASKBARCREATED: u32 = 0x0526;
 
 // SAFETY: These thread-locals are only accessed from the tray message pump thread.
 // tray_wnd_proc is a Windows callback that runs on the same thread that created
@@ -27,6 +30,9 @@ thread_local! {
     /// Win32 calls in restore_window_from_tray are thread-safe) and the main
     /// thread only synchronizes its visible/view_dirty state afterwards.
     static APP_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    /// HICON for the tray icon, kept so the wnd_proc can re-add the icon when
+    /// Explorer restarts (WM_TASKBARCREATED). Owned by the pump thread only.
+    static TRAY_HICON: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
 }
 
 static TRAY_THREAD_ID: AtomicU32 = AtomicU32::new(0);
@@ -42,7 +48,9 @@ pub fn notify_tray_thread() -> bool {
     }
     let ok = unsafe { PostThreadMessageW(tid, WM_COMMAND_READY, 0, 0) != 0 };
     if !ok {
-        tracing::warn!("PostThreadMessageW to tray thread {} failed (queue not ready?)", tid);
+        // Debug: the pump polls `notify_tray_thread` at 2 Hz while waiting for
+        // the thread's queue to exist, so a warn here would spam the log.
+        tracing::debug!("PostThreadMessageW to tray thread {} failed (queue not ready?)", tid);
     }
     ok
 }
@@ -132,15 +140,29 @@ unsafe extern "system" fn tray_wnd_proc(
         }
         return 0;
     }
+    if msg == WM_TASKBARCREATED {
+        // Explorer restarted and destroyed the tray icon; re-add it.
+        let hwnd = TRAY_HWND.with(|h| h.get());
+        let icon = TRAY_HICON.with(|h| h.get());
+        if hwnd != 0 && icon != 0 {
+            let ok = system_info::shell_notify_add(hwnd, icon, "Framework Crate", WM_TRAYICON);
+            tracing::info!("[TASKBAR] Explorer restarted, tray icon re-added: {}", ok);
+        }
+        return 0;
+    }
     if msg == WM_POWERBROADCAST {
         let wparam_u32 = wparam as u32;
-        if wparam_u32 == PBT_APMRESUMEAUTOMATIC || wparam_u32 == PBT_APMRESUMESUSPEND {
+        if wparam_u32 == PBT_APMRESUMEAUTOMATIC {
             tracing::info!("[POWER] System resumed from sleep/hibernate (wParam={:#x})", wparam_u32);
             EVENT_TX.with(|tx| {
                 if let Some(sender) = tx.borrow().as_ref() {
                     let _ = sender.send(TrayEvent::PowerResumed);
                 }
             });
+            return 0;
+        }
+        if wparam_u32 == PBT_APMRESUMESUSPEND {
+            tracing::info!("[POWER] System suspending (wParam={:#x})", wparam_u32);
             return 0;
         }
     }
@@ -205,6 +227,10 @@ fn message_pump_loop(
     let tray_hwnd = create_hidden_window();
     if tray_hwnd.is_null() {
         tracing::error!("Failed to create tray message window");
+        // Route every exit through cleanup_and_exit so TRAY_THREAD_ID is
+        // cleared and the window class is unregistered; otherwise a stale
+        // TID makes PostThreadMessageW fail and the class leaks.
+        cleanup_and_exit(false, tray_hwnd, None);
         return;
     }
     TRAY_HWND.with(|hwnd| {
@@ -218,6 +244,7 @@ fn message_pump_loop(
     match system_info::load_icon_from_bytes(icon_data) {
         Some(icon) => {
             hicon = Some(icon);
+            TRAY_HICON.with(|h| h.set(icon));
             tracing::info!("Tray icon loaded");
         }
         None => {
@@ -260,40 +287,46 @@ fn message_pump_loop(
         }
 
         if msg.message == WM_COMMAND_READY {
-            match command_rx.try_recv() {
-                Ok(TrayCommand::Shutdown) => {
-                    tracing::info!("Tray shutdown");
-                    cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
-                    return;
-                }
-                Ok(TrayCommand::CreateIcon) => {
-                    if !tray_icon_loaded {
-                        if let Some(icon) = hicon {
-                            let ok = system_info::shell_notify_add(
-                                tray_hwnd as isize, icon, "Framework Crate", WM_TRAYICON,
-                            );
-                            tray_icon_loaded = ok;
-                            // try_send: the channel is sync(1) and the UI re-posts
-                            // CreateIcon while the icon is pending — a blocking
-                            // send() would freeze this thread in GetMessageW and
-                            // the tray icon would stop responding to clicks.
-                            let _ = icon_ready_tx.try_send(ok);
-                            if ok {
-                                tracing::info!("Tray icon created");
+            // Drain ALL queued commands per wake. A single try_recv here lets
+            // the UI's 500ms CreateIcon re-posts (see tray/mod.rs) starve a
+            // queued Shutdown: the wake is consumed, the icon retried, and the
+            // shutdown is never processed — the pump would never exit.
+            loop {
+                match command_rx.try_recv() {
+                    Ok(TrayCommand::Shutdown) => {
+                        tracing::info!("Tray shutdown");
+                        cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
+                        return;
+                    }
+                    Ok(TrayCommand::CreateIcon) => {
+                        if !tray_icon_loaded {
+                            if let Some(icon) = hicon {
+                                let ok = system_info::shell_notify_add(
+                                    tray_hwnd as isize, icon, "Framework Crate", WM_TRAYICON,
+                                );
+                                tray_icon_loaded = ok;
+                                // try_send: the channel is sync(1) and the UI re-posts
+                                // CreateIcon while the icon is pending — a blocking
+                                // send() would freeze this thread in GetMessageW and
+                                // the tray icon would stop responding to clicks.
+                                let _ = icon_ready_tx.try_send(ok);
+                                if ok {
+                                    tracing::info!("Tray icon created");
+                                } else {
+                                    tracing::warn!("Shell_NotifyIconW failed");
+                                }
                             } else {
-                                tracing::warn!("Shell_NotifyIconW failed");
+                                let _ = icon_ready_tx.try_send(false);
                             }
                         } else {
-                            let _ = icon_ready_tx.try_send(false);
+                            let _ = icon_ready_tx.try_send(true);
                         }
-                    } else {
-                        let _ = icon_ready_tx.try_send(true);
                     }
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
-                    return;
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
+                        return;
+                    }
                 }
             }
             continue;

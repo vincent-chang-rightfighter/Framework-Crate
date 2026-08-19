@@ -151,6 +151,13 @@ fn mark_view_dirty(state: &AppState) {
     state.lifecycle.view_dirty.store(true, Ordering::Release);
 }
 
+/// A quit has begun (shutdown flag set). Fan writes must not be issued
+/// anymore — a write submitted after the quit-time duty/restore write would
+/// land on the EC after it, leaving the fans at the wrong duty on exit.
+fn shutdown_requested(state: &AppState) -> bool {
+    state.lifecycle.shutdown.load(Ordering::Acquire)
+}
+
 fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
     if fan_count == 0 {
         return;
@@ -162,14 +169,15 @@ fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
     let mut resized = false;
     with_write_lock(&state.fan.per_fan_duty, |guard| {
         let duties = Arc::make_mut(guard);
-        if duties.len() == fan_count {
+        if duties.len() >= fan_count {
+            // Never truncate: when the fan count drops (undock, module swap)
+            // the entries beyond the current count are the user's saved
+            // per-fan duties. Discarding them here and re-filling with the
+            // manual duty on the next dock would silently overwrite the
+            // saved values via FanPerDutyChanged's live->config copy.
             return;
         }
-        if duties.len() < fan_count {
-            duties.resize(fan_count, fill);
-        } else {
-            duties.truncate(fan_count);
-        }
+        duties.resize(fan_count, fill);
         resized = true;
     });
     // Note: the resize is deliberately NOT written back to config. It only
@@ -466,7 +474,15 @@ pub fn spawn(state: AppState) {
                     let ec: Arc<cli::EcClient> = match ec_opt.as_ref().as_ref() {
                         Some(c) => Arc::clone(c),
                         None => {
-                                let state_cl = bg_state2.clone();
+                            // Startup: the init task owns EC creation and is
+                            // still in flight — do not race it with a second
+                            // client. Once ec_init_done is set (success or
+                            // failure), the loop may create/recover the client
+                            // on its own (e.g. after reset_ec_after_failures).
+                            if !bg_state2.system.ec_init_done.load(Ordering::Acquire) {
+                                continue;
+                            }
+                            let state_cl = bg_state2.clone();
                                 match tokio::task::spawn_blocking(cli::EcClient::new).await {
                                     Ok(Ok(c)) => {
                                         let arc_ec = Arc::new(c);
@@ -648,6 +664,7 @@ pub fn spawn(state: AppState) {
                             // None (startup in Auto mode) counts as "entered
                             // Disabled": restore firmware fan control once.
                             if last_fan_mode.as_ref().is_none_or(|m| m != &crate::types::FanControlMode::Disabled) {
+                                if shutdown_requested(&bg_state2) { return; }
                                 let ec_clone = Arc::clone(&ec);
                                 match tokio::task::spawn_blocking(move || ec_clone.autofanctrl()).await {
                                     Ok(result) => {
@@ -692,10 +709,12 @@ pub fn spawn(state: AppState) {
                                     if converged && !reassert {
                                         manual_ramp_current = Some(next);
                                     } else {
+                                        if shutdown_requested(&bg_state2) { return; }
                                         let ec_clone = Arc::clone(&ec);
                                         match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, None)).await {
                                             Ok(result) => match result {
                                                 Ok(()) => {
+                                                    if shutdown_requested(&bg_state2) { return; }
                                                     let mode_now = crate::types::FanControlMode::from_u8(
                                                         bg_state2.fan.mode.load(Ordering::Acquire) as u8
                                                     );
@@ -744,7 +763,17 @@ pub fn spawn(state: AppState) {
                                         vec![seed; per_fan.len()]
                                     });
                                     let mut wrote_any = false;
+                                    let fan_count_now = bg_state2.fan.fan_count.load(Ordering::Acquire) as usize;
                                     for (idx, &target) in per_fan.iter().enumerate() {
+                                        // Never write to a fan index beyond the
+                                        // physical fan count: the vector keeps
+                                        // entries for docked fans that are
+                                        // currently unplugged (see
+                                        // ensure_per_fan_duty), and the EC
+                                        // wrapper must not be handed a bogus index.
+                                        if idx >= fan_count_now {
+                                            continue;
+                                        }
                                         let current = ramp.get(idx).copied().unwrap_or(target);
                                         let next_i = crate::fan_control::apply_rate_limit(current, target, 10);
                                         // On the resume cycle, still write when the
@@ -761,6 +790,7 @@ pub fn spawn(state: AppState) {
                                         if next_i == current && !just_resumed && !reassert {
                                             continue;
                                         }
+                                        if shutdown_requested(&bg_state2) { return; }
                                         // Re-check mode between fans to avoid setting duties
                                         // after the user has switched away from Manual mode.
                                         let mode_check = crate::types::FanControlMode::from_u8(
@@ -773,6 +803,7 @@ pub fn spawn(state: AppState) {
                                         let fan_idx = idx as u32;
                                         match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next_i, Some(fan_idx))).await {
                                             Ok(Ok(())) => {
+                                                if shutdown_requested(&bg_state2) { return; }
                                                 ramp[idx] = next_i;
                                                 wrote_any = true;
                                                 consecutive_ec_write_failures = 0;
@@ -838,6 +869,7 @@ pub fn spawn(state: AppState) {
                                             continue 'poll_loop;
                                         }
                                         if now_ms.saturating_sub(last_curve_failover_ms) >= CURVE_TEMP_FAILOVER_MS {
+                                            if shutdown_requested(&bg_state2) { return; }
                                             let ec_clone = Arc::clone(&ec);
                                             match tokio::task::spawn_blocking(move || ec_clone.autofanctrl()).await {
                                                 Ok(Ok(())) => {
@@ -879,6 +911,7 @@ pub fn spawn(state: AppState) {
                                         if write_each {
                                             let mut all_fans_applied = true;
                                             for fan_idx in 0..fan_count {
+                                                if shutdown_requested(&bg_state2) { return; }
                                                 let mode_check = crate::types::FanControlMode::from_u8(
                                                     bg_state2.fan.mode.load(Ordering::Acquire) as u8
                                                 );
@@ -916,10 +949,12 @@ pub fn spawn(state: AppState) {
                                                 bg_state2.fan.last_applied_duty.store(next as u64, Ordering::Release);
                                             }
                                         } else {
+                                            if shutdown_requested(&bg_state2) { return; }
                                             let ec_clone = Arc::clone(&ec);
                                             match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, None)).await {
                                                 Ok(result) => match result {
                                                     Ok(()) => {
+                                                        if shutdown_requested(&bg_state2) { return; }
                                                         let mode_now = crate::types::FanControlMode::from_u8(
                                                             bg_state2.fan.mode.load(Ordering::Acquire) as u8
                                                         );
@@ -1021,5 +1056,34 @@ mod tests {
 
         // Identical data — no write, not dirty.
         assert!(!record_thermal_sample(&state, sample(3200)));
+    }
+
+    #[test]
+    fn ensure_per_fan_duty_never_truncates_saved_values() {
+        use crate::app::AppState;
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        with_write_lock(&state.fan.per_fan_duty, |guard| {
+            *guard = Arc::new(vec![50, 50, 30, 30]);
+        });
+
+        // Undock: fan count drops to 2 — values for fans 3-4 must survive.
+        ensure_per_fan_duty(&state, 2);
+        assert_eq!(*read_lock(&state.fan.per_fan_duty), vec![50, 50, 30, 30]);
+
+        // Re-dock with 4 fans: length unchanged, no fill overwrites.
+        ensure_per_fan_duty(&state, 4);
+        assert_eq!(*read_lock(&state.fan.per_fan_duty), vec![50, 50, 30, 30]);
+
+        // Genuine growth still pads with the manual duty.
+        ensure_per_fan_duty(&state, 6);
+        assert_eq!(*read_lock(&state.fan.per_fan_duty), vec![50, 50, 30, 30, 50, 50]);
     }
 }

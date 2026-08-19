@@ -301,6 +301,7 @@ impl App {
             system: SystemState {
                 cli_available: Arc::new(AtomicBool::new(false)),
                 ec_client: Arc::new(RwLock::new(Arc::new(None))),
+                ec_init_done: Arc::new(AtomicBool::new(false)),
                 versions: Arc::new(RwLock::new(Arc::new(None))),
                 platform: Arc::new(RwLock::new(Arc::new(crate::cli::ec_wrapper::detect_platform()))),
                 intel_cpu: Arc::new(AtomicBool::new(system_info::is_intel_cpu())),
@@ -415,6 +416,9 @@ impl App {
                     with_write_lock(&state.system.ec_client, |guard| {
                         *guard = Arc::new(Some(Arc::clone(&arc_ec)));
                     });
+                    // Published the authoritative client; the background loop
+                    // may now use (or recover) it instead of racing one of its own.
+                    state.system.ec_init_done.store(true, Ordering::Release);
                     let versions = Arc::clone(&state.system.versions);
                     let ec_cl = Arc::clone(&arc_ec);
                     match tokio::task::spawn_blocking(move || ec_cl.versions()).await {
@@ -447,10 +451,12 @@ impl App {
                 }
                 Ok(Err(e)) => {
                     state.system.cli_available.store(false, Ordering::Release);
+                    state.system.ec_init_done.store(true, Ordering::Release);
                     Message::StartupError(format!("EC initialization failed: {}. Run as administrator.", e))
                 }
                 Err(e) => {
                     state.system.cli_available.store(false, Ordering::Release);
+                    state.system.ec_init_done.store(true, Ordering::Release);
                     Message::StartupError(format!("EC spawn failed: {}", e))
                 }
             }
@@ -482,7 +488,7 @@ impl App {
         let current = self.window_height?;
         let target = *self.content_height.lock();
         let target = target?;
-        let target = target.min(AUTO_MAX_HEIGHT) + 25.0;
+        let target = target.min(AUTO_MAX_HEIGHT + 25.0);
         if (target - current).abs() > 0.5 {
             Some(iced::window::resize(id, iced::Size::new(AUTO_WIDTH, target)))
         } else {
@@ -492,6 +498,12 @@ impl App {
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         let mut task = self.update_inner(message);
+        // Rebuild the snapshot again AFTER the handlers: many config/UI
+        // handlers set view_dirty during dispatch, and rebuilding only at
+        // the top of update_inner would leave the UI stale until the next
+        // Tick (up to a second when idle). The second call is a no-op when
+        // nothing changed.
+        self.maybe_rebuild_snapshot();
         if let Some(resize) = self.autosize_task() {
             self.height_set = true;
             task = Task::batch([task, resize]);
@@ -589,6 +601,10 @@ impl App {
                             self.tray.request_reinit(hwnd);
                             self.tray.show_icon_async();
                         } else {
+                            // Reset the pump state too: tray_initialized alone
+                            // would skip the init() branch above, and the old
+                            // pump would keep running against the dead HWND.
+                            self.tray.reset();
                             self.tray_initialized = false;
                             tracing::error!("Cannot find window after HWND invalidation");
                         }
@@ -707,7 +723,7 @@ impl App {
                 Some(Task::none())
             }
             Message::FanCurvePointMoved(idx, temp, duty) => {
-                let temp = temp.clamp(1, 99);
+                let temp = temp.clamp(0, 100);
                 let duty = duty.clamp(0, 100);
                 self.mutate_config(|cfg| {
                     if let Some(ref mut curve) = cfg.fan.curve
@@ -807,7 +823,7 @@ impl App {
                 Some(Task::none())
             }
             Message::PollRateChanged(ms) => {
-                let ms = ms.max(POLL_RATE_MIN_MS as u64);
+                let ms = ms.clamp(POLL_RATE_MIN_MS as u64, crate::types::POLL_MS_MAX);
                 self.mutate_config(|cfg| {
                     cfg.telemetry.poll_ms = ms;
                 });
@@ -885,7 +901,7 @@ impl App {
                 self.state.lifecycle.visible.store(true, Ordering::Release);
                 let config = read_lock(&self.state.lifecycle.config);
                 if matches!(config.fan.mode, FanControlMode::Manual | FanControlMode::Curve) {
-                    self.quit_duty_value = config.fan.manual.as_ref().map(|m| m.duty_pct).unwrap_or(45).clamp(0, 100);
+                    self.quit_duty_value = config.fan.manual.as_ref().map(|m| m.duty_pct).unwrap_or(50).clamp(0, 100);
                     self.show_quit_warning = true;
                 } else {
                     self.tray.shutdown();
@@ -1184,7 +1200,9 @@ impl App {
                     .unwrap_or_default()
                     .as_secs();
                 let path = std::env::temp_dir().join(format!("framework_crate_debug_{}.txt", ts));
-                let _ = std::fs::write(&path, &report);
+                if let Err(e) = std::fs::write(&path, &report) {
+                    tracing::error!("Failed to write debug report {}: {}", path.display(), e);
+                }
                 prune_debug_reports(std::env::temp_dir(), MAX_DEBUG_REPORTS);
                 if let Err(e) = std::process::Command::new("notepad.exe")
                     .arg(&path)
@@ -1547,6 +1565,15 @@ impl App {
         let pl1: f64 = self.pl1_edit.parse().map_err(|_| "PL1 is not a valid number".to_string())?;
         let pl2: f64 = self.pl2_edit.parse().map_err(|_| "PL2 is not a valid number".to_string())?;
         let pl1_time: f64 = self.pl1_time_edit.parse().map_err(|_| "PL1 time is not a valid number".to_string())?;
+        if !pl1.is_finite() {
+            return Err("PL1 must be a finite number".to_string());
+        }
+        if !pl2.is_finite() {
+            return Err("PL2 must be a finite number".to_string());
+        }
+        if !pl1_time.is_finite() {
+            return Err("PL1 time must be a finite number".to_string());
+        }
         if pl1 <= 0.0 {
             return Err("PL1 must be greater than 0W".to_string());
         }
@@ -1686,5 +1713,38 @@ mod tests {
         });
         assert_eq!(result, 20);
         assert_eq!(*read_lock(&lock), 20);
+    }
+
+    #[tokio::test]
+    async fn validate_cpu_power_rejects_nan_and_inf() {
+        let (mut app, _) = App::new();
+        app.pl1_edit = "nan".into();
+        app.pl2_edit = "50".into();
+        app.pl1_time_edit = "28".into();
+        assert!(app.validate_cpu_power_inputs().is_err());
+
+        app.pl1_edit = "inf".into();
+        assert!(app.validate_cpu_power_inputs().is_err());
+
+        app.pl1_edit = "-inf".into();
+        assert!(app.validate_cpu_power_inputs().is_err());
+
+        app.pl1_edit = "40".into();
+        app.pl2_edit = "nan".into();
+        assert!(app.validate_cpu_power_inputs().is_err());
+
+        app.pl2_edit = "40".into();
+        app.pl1_time_edit = "nan".into();
+        assert!(app.validate_cpu_power_inputs().is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_cpu_power_accepts_finite_values() {
+        let (mut app, _) = App::new();
+        app.pl1_edit = "40".into();
+        app.pl2_edit = "80".into();
+        app.pl1_time_edit = "28".into();
+        let (pl1, pl2, t) = app.validate_cpu_power_inputs().unwrap();
+        assert_eq!((pl1, pl2, t), (40.0, 80.0, 28.0));
     }
 }

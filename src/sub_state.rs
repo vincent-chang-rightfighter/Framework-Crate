@@ -166,6 +166,12 @@ pub struct SystemState {
     pub cli_available: Arc<AtomicBool>,
     /// The EC client instance.
     pub ec_client: Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
+    /// Whether the startup init task has finished publishing (or failing to
+    /// create) the EC client. While false, the background loop must NOT
+    /// create its own client — the init task owns startup EC creation, and
+    /// a concurrent second `EcClient` would issue parallel EC I/O and
+    /// clobber the "authoritative" client.
+    pub ec_init_done: Arc<AtomicBool>,
     /// Firmware/hardware version data.
     pub versions: Arc<RwLock<Arc<Option<cli::ec_wrapper::VersionsData>>>>,
     /// Detected platform family (for feature gating).
@@ -179,6 +185,7 @@ impl Default for SystemState {
         Self {
             cli_available: Arc::new(AtomicBool::new(false)),
             ec_client: Arc::new(RwLock::new(Arc::new(None))),
+            ec_init_done: Arc::new(AtomicBool::new(false)),
             versions: Arc::new(RwLock::new(Arc::new(None))),
             platform: Arc::new(RwLock::new(Arc::new(cli::ec_wrapper::PlatformFamily::Unknown))),
             intel_cpu: Arc::new(AtomicBool::new(false)),

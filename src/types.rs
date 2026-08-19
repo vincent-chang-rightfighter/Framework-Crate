@@ -5,9 +5,9 @@ use tracing::{debug, warn};
 // Validation constants for config values
 // POLL_MS_MIN reuses the public UI constant to avoid duplication.
 const POLL_MS_MIN: u64 = crate::style::POLL_RATE_MIN_MS as u64;
-const POLL_MS_MAX: u64 = 2000;
-const UI_REFRESH_MS_MIN: u64 = 50;
-const UI_REFRESH_MS_MAX: u64 = 1000;
+pub const POLL_MS_MAX: u64 = 2000;
+pub const UI_REFRESH_MS_MIN: u64 = 50;
+pub const UI_REFRESH_MS_MAX: u64 = 1000;
 const DUTY_PCT_MIN: u32 = 0;
 const DUTY_PCT_MAX: u32 = 100;
 const CURVE_POLL_MS_MIN: u64 = 500;
@@ -142,6 +142,9 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManualConfig {
+    /// Default: a legacy/partial `[fan.manual]` table degrades to 0% (fans
+    /// off — a safe neutral value) instead of rejecting the whole file.
+    #[serde(default)]
     pub duty_pct: u32,
 }
 
@@ -222,7 +225,9 @@ impl Default for TelemetryConfig {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
 pub struct SettingU8 {
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
     pub value: u8,
 }
 

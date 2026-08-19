@@ -92,8 +92,10 @@ struct Layout {
 impl Layout {
     fn new(size: Size) -> Self {
         let margin = 5.0f32;
-        let plot_w = size.width - margin * 2.0;
-        let plot_h = size.height - margin * 2.0 - 14.0;
+        // Guard against degenerate sizes: a negative/zero plot dimension would
+        // make screen_to_canvas produce inf/NaN.
+        let plot_w = (size.width - margin * 2.0).max(1.0);
+        let plot_h = (size.height - margin * 2.0 - 14.0).max(1.0);
         Self { origin: Point::new(margin, margin), plot_w, plot_h }
     }
 
@@ -144,8 +146,15 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
             };
             match event {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
+                    // Bounds-check the persistent drag index: if the point
+                    // count ever shrinks mid-drag (config reload restoring
+                    // defaults), end the drag instead of panicking.
+                    if config_idx >= self.points.len() {
+                        state.dragging.set(None);
+                        return Some(iced::widget::canvas::Action::request_redraw());
+                    }
                     let (raw_temp, raw_duty) = layout.screen_to_canvas(cursor_pos);
-                    let temp = (raw_temp.round() as i32).clamp(1, 99) as u32;
+                    let temp = (raw_temp.round() as i32).clamp(0, 100) as u32;
                     let duty = (raw_duty.round() as i32).clamp(0, 100) as u32;
                     // Throttle: only publish when the rounded value actually
                     // changes, otherwise every sub-pixel move triggers an app

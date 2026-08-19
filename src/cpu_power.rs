@@ -545,6 +545,12 @@ fn exec_ioctl(
     if hr != 0 {
         return Err("ioctl failed");
     }
+    // The driver reports how many u64 entries it wrote (bytes / 8); a short
+    // write leaves the output buffer stale/zeroed and must not be treated as
+    // valid data.
+    if return_size != outputs.len() {
+        return Err("ioctl short read");
+    }
     Ok(return_size)
 }
 
@@ -760,7 +766,17 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
         {
             warn!("Sync thread MMIO write failed: {}", e);
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        // Back off on persistent failures: a BIOS-locked register can never
+        // succeed, and hammering the driver at 4 Hz forever wastes CPU and
+        // kernel I/O for a write that will not land. Cap at 5s between tries.
+        let interval_ms = if write_failures >= 10 {
+            5000
+        } else if write_failures >= 4 {
+            1000
+        } else {
+            250
+        };
+        std::thread::sleep(std::time::Duration::from_millis(interval_ms));
     }
 
     debug!("Sync thread stopped");
@@ -788,6 +804,11 @@ pub struct CpuPowerState {
     pub available: Arc<AtomicBool>,
     pub sync_enabled: Arc<AtomicBool>,
     sync_thread: Arc<parking_lot::Mutex<SyncThread>>,
+    /// Lives OUTSIDE the sync_thread mutex so `is_sync_alive()` (called on
+    /// the UI tick) never blocks behind a stop/start that is joining the
+    /// thread (which can take seconds while the sync thread sleeps between
+    /// write attempts).
+    sync_alive: Arc<AtomicBool>,
     bios: Arc<parking_lot::RwLock<Arc<Option<BiosDefaults>>>>,
 }
 
@@ -798,6 +819,7 @@ impl Default for CpuPowerState {
             available: Arc::new(AtomicBool::new(false)),
             sync_enabled: Arc::new(AtomicBool::new(false)),
             sync_thread: Arc::new(parking_lot::Mutex::new(SyncThread::new())),
+            sync_alive: Arc::new(AtomicBool::new(false)),
             bios: Arc::new(parking_lot::RwLock::new(Arc::new(None))),
         }
     }
@@ -872,22 +894,46 @@ impl CpuPowerState {
             power_unit,
             time_unit,
         };
+        // Stop any previous thread, joining OUTSIDE the mutex: the old thread
+        // may be mid-sleep (up to 5s during write-failure backoff) and holding
+        // the lock across that join would block is_sync_alive() on the UI tick.
+        let old_handle = {
+            let mut thread = self.sync_thread.lock();
+            thread.running.store(false, Ordering::Release);
+            thread.handle.take()
+        };
+        if let Some(old) = old_handle {
+            let _ = old.join();
+        }
         let mut thread = self.sync_thread.lock();
         thread.start(params)?;
+        self.sync_alive.store(true, Ordering::Release);
         self.sync_enabled.store(true, Ordering::Release);
         Ok(())
     }
 
     /// Check if the sync thread is still alive (hasn't exited on its own).
+    /// Lock-free: reads a dedicated atomic, never blocks on the mutex that
+    /// stop/start hold while joining.
     pub fn is_sync_alive(&self) -> bool {
-        let thread = self.sync_thread.lock();
-        thread.alive.load(Ordering::Acquire)
+        self.sync_alive.load(Ordering::Acquire)
     }
 
     /// Stop the sync thread.
     pub fn stop_sync(&self) {
-        let mut thread = self.sync_thread.lock();
-        thread.stop();
+        let old_handle = {
+            let mut thread = self.sync_thread.lock();
+            thread.running.store(false, Ordering::Release);
+            thread.handle.take()
+        };
+        if let Some(old) = old_handle {
+            let _ = old.join();
+        }
+        {
+            let thread = self.sync_thread.lock();
+            thread.alive.store(false, Ordering::Release);
+        }
+        self.sync_alive.store(false, Ordering::Release);
         self.sync_enabled.store(false, Ordering::Release);
     }
 }
@@ -932,6 +978,12 @@ fn fetch_pawnio_version_from_dll() -> Option<String> {
             &mut ffi_len,
         ) == 0 || ffi_ptr.is_null()
         {
+            return None;
+        }
+
+        // VS_FIXEDFILEINFO is 52 bytes (13 u32s); the product version fields
+        // we read live at offsets 16/20, so require at least 24 bytes.
+        if ffi_len < 24 {
             return None;
         }
 

@@ -16,7 +16,7 @@ Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-c
 - **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card, and USB-C / HDMI / DP port classification
 - **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download). AMD and other vendors are not supported.
 - **About Page** — Hardware info (CPU, RAM, display, BIOS), software settings (poll rate, refresh interval), GitHub link, and third-party license notices
-- **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit)
+- **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit), icon restored automatically if Explorer restarts
 
 ## Requirements
 
@@ -68,7 +68,7 @@ src/
   views.rs             — UI layout (sensors, fan control, battery, misc, settings)
   types.rs             — Config structs, FanControlMode, CurveConfig, validation
   style.rs             — Colors, fonts, layout constants
-  config.rs            — TOML config load/save (atomic write via tmp+rename)
+  config.rs            — TOML config load/save (atomic write via tmp+rename, write-through)
   config_save_task.rs  — Debounced config save (100ms) with battery apply
   background_task.rs   — EC polling loop, fan control, expansion/PD scans
   cpu_power.rs         — PawnIO RAPL read/write (PL1/PL2) and sync thread
@@ -98,7 +98,7 @@ framework_lib (CrosEc) → background_task → Arc<RwLock> → UI (view reads)
 - **Hardware access**: `framework_lib` crate calls EC directly via kernel driver (no subprocess)
 - **Config**: `dirs::config_dir() / framework-crate/config.toml`
 - **Background polling**: tokio task on LP-E core, 200ms–2s interval (idle slowdown)
-- **UI refresh**: self-rescheduling tick (50–1000ms), idle 1s, hidden 500ms
+- **UI refresh**: self-rescheduling tick (50–1000ms), idle 1s, hidden 2s
 - **Lock strategy**: `Arc<RwLock<Arc<T>>>` for shared state, narrow lock scope (<1µs)
 - **State organization**: `AppState` split into `FanState`, `ThermalState`, `PeripheralState`, `BatteryState`, `SystemState`, `LifecycleState`, plus `CpuPowerState`
 
@@ -147,9 +147,9 @@ selected_sensors = []
 ## Known Limitations
 
 - **AMD CPU Power**: CPU Power (PL1/PL2 via PawnIO) is Intel-only. On AMD and other CPUs the card stays visible and shows **Not Supported**; no RAPL / PawnIO access is attempted.
-- **Fan Curve Coordinates Issue (to be fixed in v0.3.0)**: Earlier versions edited curve points with sliders and could leave the canvas axes / line segments misaligned until the next full redraw. v0.3.0 replaced the sliders with direct drag editing on the canvas — points keep their identity when dragged across each other, and the cached rendering invalidates on content changes, so the drawing always matches the numeric points used for fan duty.
-- **USB Expansion Card Classification Issue (to be fixed in v0.3.0)**: Port type (USB-C / USB-A / HDMI / DP) is inferred from EC PD state. Since v0.3.0, ports that ever reported a Sink role are permanently classified as USB-C, so USB-C vs USB-A is no longer flipped when a device is plugged into an expansion-card port. HDMI/DP cards that omit DP-alt may still be mislabeled — use Expansion Card Debug Mode on the About page to inspect raw role / watts.
-- **Sleep / Hibernate Fan Control Issue (to be fixed in v0.3.0)**: Previously, fan-speed control could stop responding correctly after the system resumed from sleep or hibernation. v0.3.0 detects `WM_POWERBROADCAST` resume events (resetting the EC client, `CurveStepper` state, and thermal history) and additionally re-asserts the fan duty every 30 s, so the fans spin back up even if the resume event is missed. Consecutive EC read / write failures also trigger automatic client reinitialization.
+- **Fan Curve Coordinates (resolved in v0.3.0)**: Earlier versions edited curve points with sliders and could leave the canvas axes / line segments misaligned until the next full redraw. v0.3.0 replaced the sliders with direct drag editing on the canvas — points keep their identity when dragged across each other, and the cached rendering invalidates on content changes, so the drawing always matches the numeric points used for fan duty.
+- **USB Expansion Card Classification (resolved in v0.3.0)**: Port type (USB-C / USB-A / HDMI / DP) is inferred from EC PD state. Since v0.3.0, ports that ever reported a Sink role are permanently classified as USB-C, so USB-C vs USB-A is no longer flipped when a device is plugged into an expansion-card port. HDMI/DP cards that omit DP-alt may still be mislabeled — use Expansion Card Debug Mode on the About page to inspect raw role / watts.
+- **Sleep / Hibernate Fan Control (resolved in v0.3.0)**: Previously, fan-speed control could stop responding correctly after the system resumed from sleep or hibernation. v0.3.0 detects `WM_POWERBROADCAST` resume events (resetting the EC client, `CurveStepper` state, and thermal history) and additionally re-asserts the fan duty every 30 s, so the fans spin back up even if the resume event is missed. Consecutive EC read / write failures also trigger automatic client reinitialization.
 - **Platform-specific**: This project has only been tested on Intel Core Ultra Series 1 (Meteor Lake) Framework laptops; broader support is not yet guaranteed.
 - **EC driver**: The Framework EC kernel driver must be installed for `framework_lib` to communicate with the hardware.
 

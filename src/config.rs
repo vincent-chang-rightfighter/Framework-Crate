@@ -140,7 +140,7 @@ fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
          # Edit values below; the app validates on load.\n\
          #\n\
          # [fan]\n\
-         # mode = \"Disabled\" | \"Manual\" | \"Curve\"\n\
+         # mode = \"disabled\" | \"manual\" | \"curve\"\n\
          # [fan.manual]\n\
          # duty_pct = 0..100\n\
          # [fan.curve]\n\
@@ -189,6 +189,10 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path) -> Result<(), S
         use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
 
         const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+        // Write-through: flush the directory entry so the rename survives a
+        // power loss right after the call (config files are small and saves
+        // are rare, so the cost is negligible).
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
 
         let tmp_wide: Vec<u16> = OsStr::new(tmp).encode_wide().chain(std::iter::once(0)).collect();
         let dest_wide: Vec<u16> = OsStr::new(dest).encode_wide().chain(std::iter::once(0)).collect();
@@ -198,7 +202,7 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path) -> Result<(), S
         // SAFETY: MoveFileExW atomically replaces dest with tmp on the same volume.
         // Both paths are null-terminated UTF-16 wide strings. tmp and dest are on
         // the same directory (same volume), so MOVEFILE_REPLACE_EXISTING is atomic.
-        let success = unsafe { MoveFileExW(tmp_wide.as_ptr(), dest_wide.as_ptr(), MOVEFILE_REPLACE_EXISTING) };
+        let success = unsafe { MoveFileExW(tmp_wide.as_ptr(), dest_wide.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
         if success != 0 {
             return Ok(());
         }

@@ -215,16 +215,27 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
             ].width(Length::FillPortion(1)).spacing(8),
             right_column.width(Length::FillPortion(1)),
         ].spacing(12)
-    ).padding(12).width(Length::Fill);
+    ).padding(iced::Padding {
+        top: 4.0,
+        right: 12.0,
+        bottom: 12.0,
+        left: 12.0,
+    }).width(Length::Fill);
 
-    let mut root = column![header].spacing(8);
-    // Always reserve the banner slots (same Container widget type) so the
+    let mut root = column![header].spacing(5);
+    // The banner slot is always present (same Container widget type) so the
     // content subtree keeps its Tree state (canvas cache, scroll offsets)
-    // when a warning appears/disappears mid-session.
-    // Note: cannot extract to named function — Container<'a> is invariant,
-    // so `|| container(space())` inline closures are required for type inference.
-    root = root.push(config_warning.unwrap_or_else(|| container(space()).into()));
-    root = root.push(cli_warning.unwrap_or_else(|| container(space())));
+    // when a warning appears/disappears mid-session. Root spacing is 0, so an
+    // empty slot adds no dead gap between the header and the cards.
+    let banner_slot: Element<'_, Message> = match (config_warning, cli_warning) {
+        (Some(w), None) => container(w).padding(iced::Padding::from([4, 0])).into(),
+        (None, Some(w)) => container(w).padding(iced::Padding::from([4, 0])).into(),
+        (Some(w1), Some(w2)) => container(column![w1, w2].spacing(4))
+            .padding(iced::Padding::from([4, 0]))
+            .into(),
+        (None, None) => container(space()).into(),
+    };
+    root = root.push(banner_slot);
     let root = root.push(content);
     // The window height follows the content: the probe reports the laid-out
     // height of this column to App, which resizes the window to match.
@@ -294,7 +305,7 @@ fn view_settings(app: &App) -> Element<'_, Message> {
     let poll_ms = config.telemetry.poll_ms as u32;
     sw_content = sw_content.push(
         row![
-            iced::widget::slider(POLL_RATE_MIN_MS..=2000, poll_ms, |v| Message::PollRateChanged(v as u64)).step(10u32),
+            iced::widget::slider(POLL_RATE_MIN_MS..=crate::types::POLL_MS_MAX as u32, poll_ms, |v| Message::PollRateChanged(v as u64)).step(10u32),
             text(format!("{} ms", poll_ms)).size(FONT_BODY),
         ].spacing(4)
     );
@@ -303,7 +314,7 @@ fn view_settings(app: &App) -> Element<'_, Message> {
     let refresh_ms = config.telemetry.ui_refresh_ms as u32;
     sw_content = sw_content.push(
         row![
-            iced::widget::slider(50..=1000, refresh_ms, |v| Message::UiRefreshRateChanged(v as u64)).step(50u32),
+            iced::widget::slider(crate::types::UI_REFRESH_MS_MIN as u32..=crate::types::UI_REFRESH_MS_MAX as u32, refresh_ms, |v| Message::UiRefreshRateChanged(v as u64)).step(50u32),
             text(format!("{} ms", refresh_ms)).size(FONT_BODY),
         ].spacing(4)
     );

@@ -198,6 +198,13 @@ static SAVED_PLACEMENT: std::sync::Mutex<Option<WINDOWPLACEMENT>> = std::sync::M
 /// stays WS_VISIBLE, so WM_PAINT keeps arriving and the swapchain stays valid
 /// while hidden — on restore there is no white/blank frame.
 pub fn hide_window_to_tray(hwnd: isize) {
+    if !is_window(hwnd) {
+        // The winit window may already be destroyed (or the handle is stale
+        // from a reinit in progress); operating on a dead/reused handle can
+        // mutate an unrelated window.
+        tracing::debug!("hide_window_to_tray: HWND {} no longer valid, skipping", hwnd);
+        return;
+    }
     let h = hwnd as *mut core::ffi::c_void;
     // SAFETY: hwnd is a valid window handle from FindWindowW/CreateWindowExW.
     unsafe {
@@ -238,6 +245,10 @@ pub fn hide_window_to_tray(hwnd: isize) {
 
 /// Restore a parked window back on screen at its saved position.
 pub fn restore_window_from_tray(hwnd: isize) {
+    if !is_window(hwnd) {
+        tracing::debug!("restore_window_from_tray: HWND {} no longer valid, skipping", hwnd);
+        return;
+    }
     let h = hwnd as *mut core::ffi::c_void;
     // SAFETY: hwnd is a valid window handle from FindWindowW/CreateWindowExW.
     unsafe {

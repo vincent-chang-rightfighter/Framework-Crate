@@ -10,7 +10,7 @@ pub const HISTORY_SECONDS: i64 = 30;
 /// History window in milliseconds (used for sample pruning and timestamps).
 pub const HISTORY_MS: i64 = HISTORY_SECONDS * 1_000;
 const Y_LABELS: [&str; 6] = ["0", "20", "40", "60", "80", "100"];
-const X_LABELS: [&str; 4] = ["0s", "10s", "20s", "30s"];
+const X_LABELS: [&str; 4] = ["30s", "20s", "10s", "0s"];
 
 #[derive(Clone)]
 pub struct TempSample {
@@ -242,9 +242,11 @@ fn draw_temp_chart_contents(
         });
     }
 
-    // X-axis time labels (0s, 10s, 20s, 30s)
-    for (i, sec) in [0, 10, 20, 30].iter().enumerate() {
-        let x = origin.x + (*sec as f32 / HISTORY_SECONDS as f32) * plot_w;
+    // X-axis time labels. Samples are plotted newest-first: t_ratio = 1.0
+    // (the right edge) is "now", so the labels must run 30s at the left to
+    // 0s at the right to match the data.
+    for (i, sec) in [30, 20, 10, 0].iter().enumerate() {
+        let x = origin.x + (1.0 - *sec as f32 / HISTORY_SECONDS as f32) * plot_w;
         frame.fill_text(iced::widget::canvas::Text {
             content: X_LABELS[i].to_owned(),
             position: Point::new(x, origin.y + plot_h + 4.0),

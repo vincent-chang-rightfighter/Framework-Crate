@@ -92,6 +92,12 @@ pub fn calculate_duty_from_curve(temp: i32, full_points: &[[u32; 2]]) -> u32 {
 }
 
 pub fn apply_rate_limit(current: u32, target: u32, max_change: u32) -> u32 {
+    // A zero step would stall the ramp forever (every call returns the same
+    // value, so the caller keeps resubmitting and the fan never moves).
+    // Treat 0 as "no rate limit": jump straight to the target.
+    if max_change == 0 {
+        return target;
+    }
     if target > current {
         current.saturating_add(max_change).min(target)
     } else {
@@ -157,6 +163,13 @@ mod tests {
     #[test]
     fn apply_rate_limit_saturate_sub() {
         assert_eq!(apply_rate_limit(5, 0, 10), 0);
+    }
+
+    #[test]
+    fn apply_rate_limit_zero_step_jumps_to_target() {
+        assert_eq!(apply_rate_limit(40, 60, 0), 60);
+        assert_eq!(apply_rate_limit(60, 40, 0), 40);
+        assert_eq!(apply_rate_limit(40, 40, 0), 40);
     }
 
     #[test]

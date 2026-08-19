@@ -457,6 +457,10 @@ impl EcClient {
     }
 
     pub fn set_fan_duty(&self, percent: u32, fan_index: Option<u32>) -> Result<(), String> {
+        // Clamp at the wrapper boundary so no caller can write an invalid
+        // duty to the EC (all current callers clamp, but a future one must
+        // not be able to send >100).
+        let percent = percent.min(100);
         self.ec
             .fan_set_duty(fan_index, percent)
             .map_err(|e| format!("Failed to set fan duty: {:?}", e))
@@ -507,6 +511,12 @@ impl EcClient {
     }
 
     pub fn charge_limit_set(&self, min_pct: u8, max_pct: u8) -> Result<(), String> {
+        if min_pct > max_pct {
+            return Err(format!(
+                "Invalid charge limit range: min ({}) > max ({})",
+                min_pct, max_pct
+            ));
+        }
         self.ec
             .set_charge_limit(min_pct, max_pct)
             .map_err(|e| format!("Failed to set charge limit: {:?}", e))
