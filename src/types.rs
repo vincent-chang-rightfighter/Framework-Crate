@@ -10,11 +10,14 @@ pub const UI_REFRESH_MS_MIN: u64 = 50;
 pub const UI_REFRESH_MS_MAX: u64 = 1000;
 const DUTY_PCT_MIN: u32 = 0;
 const DUTY_PCT_MAX: u32 = 100;
-const CURVE_POLL_MS_MIN: u64 = 500;
-const CURVE_POLL_MS_MAX: u64 = 10000;
+pub const CURVE_POLL_MS_MIN: u64 = 500;
+pub const CURVE_POLL_MS_MAX: u64 = 5000;
 const HYSTERESIS_C_MAX: u32 = 10;
 const RATE_LIMIT_MIN: u32 = 1;
 const RATE_LIMIT_MAX: u32 = 100;
+/// Maximum temperature (°C) of the curve editor domain and the plots. The
+/// legacy 0–100 range left readings above 100°C pinned to the plot edge.
+pub const CURVE_TEMP_MAX: u32 = 110;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Config {
@@ -62,9 +65,10 @@ impl Config {
                 debug!("Curve sensors were multi-select — kept first ({})", curve.curve.sensors[0]);
             }
             for point in &mut curve.curve.points {
-                // Both axes are canvas coordinates too: values outside 0..=100
-                // would draw off-plot, so clamp instead of trusting the editor.
-                point[0] = point[0].clamp(0, 100);
+                // Both axes are canvas coordinates too: values outside the
+                // plot domain would draw off-plot, so clamp instead of
+                // trusting the editor.
+                point[0] = point[0].clamp(0, CURVE_TEMP_MAX);
                 point[1] = point[1].clamp(0, 100);
             }
         }
@@ -186,10 +190,13 @@ fn default_rate_limit_pct_per_step() -> u32 {
 pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
     let mut full = Vec::with_capacity(points.len() + 2);
     let has_zero = points.iter().any(|p| p[0] == 0);
-    let has_hundred = points.iter().any(|p| p[0] == 100);
+    // Span the full plot domain: a point at the max temperature guarantees
+    // the fan ramps to 100% before the edge instead of jumping at the last
+    // defined point.
+    let has_max = points.iter().any(|p| p[0] == CURVE_TEMP_MAX);
     if !has_zero { full.push([0, 0]); }
     full.extend(points.iter().copied());
-    if !has_hundred { full.push([100, 100]); }
+    if !has_max { full.push([CURVE_TEMP_MAX, 100]); }
     full.sort_by_key(|p| p[0]);
     let before = full.len();
     // dedup_by_key keeps the first of equal keys; reverse first so the
@@ -426,7 +433,7 @@ mod tests {
         });
         c.validate();
         let pts = &c.fan.curve.as_ref().unwrap().curve.points;
-        assert_eq!(pts[0], [100, 100]);
+        assert_eq!(pts[0], [110, 100]);
         assert_eq!(pts[1], [40, 10]);
     }
 

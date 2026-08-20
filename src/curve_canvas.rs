@@ -3,11 +3,15 @@ use std::sync::Arc;
 use iced::{Color, Element, Length, Point, Size};
 use iced::widget::canvas::Cache;
 
-const AXIS_LABELS: [&str; 6] = ["0", "20", "40", "60", "80", "100"];
+// Unit suffix only on the last label of each axis ("110°C", "100%").
+// "100" is right-aligned (see below) so it never crowds "110°C".
+const AXIS_LABELS_X: [&str; 7] = ["0", "20", "40", "60", "80", "100", "110°C"];
+const AXIS_LABELS_Y: [&str; 6] = ["0", "20", "40", "60", "80", "100%"];
+/// Temperature axis range: extends past the config domain (0–100°C) so
+/// sensor readings above 100°C stay visible on the plot.
+const TEMP_RANGE: f32 = crate::types::CURVE_TEMP_MAX as f32;
 const POINT_RADIUS: f32 = 3.0;
 const HIT_RADIUS: f32 = 12.0;
-/// Curve line and control point color (#6b75ff).
-const CURVE_COLOR: Color = Color::from_rgb(0x6B as f32 / 255.0, 0x75 as f32 / 255.0, 0xFF as f32 / 255.0);
 
 /// A live sensor reading drawn on the curve: the sensor's current
 /// temperature projected onto the curve, using its sensor color.
@@ -90,26 +94,34 @@ struct Layout {
 }
 
 impl Layout {
+    /// Left gutter reserved for the Y-axis labels (room for a right-aligned
+    /// "100%" plus breathing room).
+    const LEFT_GUTTER: f32 = 34.0;
+    /// Top margin so the top Y-axis label is not clipped by the canvas edge.
+    const TOP_MARGIN: f32 = 10.0;
+    const RIGHT_MARGIN: f32 = 5.0;
+    /// Vertical space below the plot reserved for the X-axis labels.
+    const AXIS_LABEL_SPACE: f32 = 14.0;
+
     fn new(size: Size) -> Self {
-        let margin = 5.0f32;
         // Guard against degenerate sizes: a negative/zero plot dimension would
         // make screen_to_canvas produce inf/NaN.
-        let plot_w = (size.width - margin * 2.0).max(1.0);
-        let plot_h = (size.height - margin * 2.0 - 14.0).max(1.0);
-        Self { origin: Point::new(margin, margin), plot_w, plot_h }
+        let plot_w = (size.width - Self::LEFT_GUTTER - Self::RIGHT_MARGIN).max(1.0);
+        let plot_h = (size.height - Self::TOP_MARGIN - Self::RIGHT_MARGIN - Self::AXIS_LABEL_SPACE).max(1.0);
+        Self { origin: Point::new(Self::LEFT_GUTTER, Self::TOP_MARGIN), plot_w, plot_h }
     }
 
-    /// Convert canvas-space (temp 0–100, duty 0–100) to screen coordinates.
+    /// Convert canvas-space (temp 0–110, duty 0–100) to screen coordinates.
     fn to_screen(&self, x: f32, y: f32) -> Point {
         Point::new(
-            self.origin.x + (x / 100.0) * self.plot_w,
+            self.origin.x + (x / TEMP_RANGE) * self.plot_w,
             self.origin.y + self.plot_h - (y / 100.0) * self.plot_h,
         )
     }
 
     /// Convert screen coordinates back to canvas-space (temp, duty).
     fn screen_to_canvas(&self, p: Point) -> (f32, f32) {
-        let temp = (p.x - self.origin.x) / self.plot_w * 100.0;
+        let temp = (p.x - self.origin.x) / self.plot_w * TEMP_RANGE;
         let duty = (self.origin.y + self.plot_h - p.y) / self.plot_h * 100.0;
         (temp, duty)
     }
@@ -154,7 +166,7 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
                         return Some(iced::widget::canvas::Action::request_redraw());
                     }
                     let (raw_temp, raw_duty) = layout.screen_to_canvas(cursor_pos);
-                    let temp = (raw_temp.round() as i32).clamp(0, 100) as u32;
+                    let temp = (raw_temp.round() as i32).clamp(0, crate::types::CURVE_TEMP_MAX as i32) as u32;
                     let duty = (raw_duty.round() as i32).clamp(0, 100) as u32;
                     // Throttle: only publish when the rounded value actually
                     // changes, otherwise every sub-pixel move triggers an app
@@ -312,105 +324,133 @@ fn draw_curve_contents(
     let layout = Layout::new(size);
     let to_screen = |x: f32, y: f32| layout.to_screen(x, y);
 
-    frame.fill_rectangle(layout.origin, Size::new(layout.plot_w, layout.plot_h), Color::from_rgb(0.12, 0.12, 0.15));
+    // Everything drawn inside the plot is clipped to the plot rectangle, so
+    // thick strokes (curve, point rings, marker dots) can never bleed past
+    // the border. Axis labels are drawn afterwards, outside the clip.
+    let plot_rect = iced::Rectangle::new(layout.origin, Size::new(layout.plot_w, layout.plot_h));
+    frame.with_clip(plot_rect, |f| {
+        f.fill_rectangle(layout.origin, Size::new(layout.plot_w, layout.plot_h), Color::from_rgb(0.12, 0.12, 0.15));
 
-    let grid_stroke = iced::widget::canvas::Stroke::default()
-        .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.1))
-        .with_width(0.5);
-    for v in [20.0, 40.0, 60.0, 80.0] {
-        frame.stroke(&iced::widget::canvas::Path::line(to_screen(v, 0.0), to_screen(v, 100.0)), grid_stroke);
-        frame.stroke(&iced::widget::canvas::Path::line(to_screen(0.0, v), to_screen(100.0, v)), grid_stroke);
-    }
+        let grid_stroke = iced::widget::canvas::Stroke::default()
+            .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.1))
+            .with_width(0.5);
+        for v in [20.0, 40.0, 60.0, 80.0, 100.0] {
+            f.stroke(&iced::widget::canvas::Path::line(to_screen(v, 0.0), to_screen(v, 100.0)), grid_stroke);
+        }
+        for v in [20.0, 40.0, 60.0, 80.0] {
+            f.stroke(&iced::widget::canvas::Path::line(to_screen(0.0, v), to_screen(TEMP_RANGE, v)), grid_stroke);
+        }
 
-    frame.stroke_rectangle(layout.origin, Size::new(layout.plot_w, layout.plot_h),
-        iced::widget::canvas::Stroke::default().with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.3)).with_width(1.0));
+        f.stroke_rectangle(layout.origin, Size::new(layout.plot_w, layout.plot_h),
+            iced::widget::canvas::Stroke::default().with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.3)).with_width(1.0));
 
-    let curve_path = iced::widget::canvas::Path::new(|b| {
-        b.move_to(to_screen(all_pts[0][0] as f32, all_pts[0][1] as f32));
-        for p in all_pts.iter().skip(1) { b.line_to(to_screen(p[0] as f32, p[1] as f32)); }
+        let curve_path = iced::widget::canvas::Path::new(|b| {
+            b.move_to(to_screen(all_pts[0][0] as f32, all_pts[0][1] as f32));
+            for p in all_pts.iter().skip(1) { b.line_to(to_screen(p[0] as f32, p[1] as f32)); }
+        });
+        f.stroke(&curve_path, iced::widget::canvas::Stroke::default()
+            .with_color(crate::style::COLOR_CURVE).with_width(2.0));
+
+        // Draw control points as circles, in sorted temperature order.
+        let mut sorted_points: Vec<[u32; 2]> = points.to_vec();
+        sorted_points.sort_by_key(|p| p[0]);
+        for (sorted_pos, p) in sorted_points.iter().enumerate() {
+            let center = to_screen(p[0] as f32, p[1] as f32);
+            let config_idx = sorted_indices[sorted_pos];
+            let (fill_color, stroke_color, r) = if drag_idx == Some(config_idx) {
+                (crate::style::COLOR_CURVE, Color::WHITE, POINT_RADIUS + 2.0)
+            } else if hover_idx == Some(config_idx) {
+                (crate::style::COLOR_CURVE, Color::WHITE, POINT_RADIUS + 1.0)
+            } else {
+                (crate::style::COLOR_CURVE, Color::WHITE, POINT_RADIUS)
+            };
+            let circle = iced::widget::canvas::Path::circle(center, r);
+            f.fill(&circle, fill_color);
+            f.stroke(&circle, iced::widget::canvas::Stroke::default()
+                .with_color(stroke_color).with_width(2.0));
+        }
+
+        // Live sensor markers drawn on top: dashed crosshair through the curve
+        // position at the sensor's current temperature, plus a dot in the
+        // sensor color.
+        let plot_top = layout.origin.y;
+        let plot_bottom = layout.origin.y + layout.plot_h;
+        let plot_left = layout.origin.x;
+        let plot_right = layout.origin.x + layout.plot_w;
+        for mark in marks.iter() {
+            let temp = (mark.temp as f32).clamp(0.0, TEMP_RANGE);
+            let duty = crate::fan_control::calculate_duty_from_curve(mark.temp, all_pts) as f32;
+            let pos = to_screen(temp, duty);
+            let dash = iced::widget::canvas::Stroke {
+                style: iced::widget::canvas::Style::Solid(mark.color),
+                width: 1.0,
+                line_cap: iced::widget::canvas::LineCap::Round,
+                line_join: iced::widget::canvas::LineJoin::Round,
+                line_dash: iced::widget::canvas::LineDash {
+                    segments: &[4.0, 4.0],
+                    offset: 0,
+                },
+            };
+            f.stroke(&iced::widget::canvas::Path::line(
+                Point::new(pos.x, plot_top),
+                Point::new(pos.x, plot_bottom),
+            ), dash);
+            f.stroke(&iced::widget::canvas::Path::line(
+                Point::new(plot_left, pos.y),
+                Point::new(plot_right, pos.y),
+            ), dash);
+            let dot = iced::widget::canvas::Path::circle(pos, 4.0);
+            f.fill(&dot, mark.color);
+            f.stroke(&dot, iced::widget::canvas::Stroke::default()
+                .with_color(Color::WHITE).with_width(1.5));
+        }
     });
-    frame.stroke(&curve_path, iced::widget::canvas::Stroke::default()
-        .with_color(CURVE_COLOR).with_width(2.0));
 
+    // Axis labels, drawn outside the clipped region.
     let font = iced::Font::with_name("Consolas");
-    for (i, v) in [0u32, 20, 40, 60, 80, 100].iter().enumerate() {
-        let x = layout.origin.x + (*v as f32 / 100.0) * layout.plot_w;
+    // X-axis (temperature) labels: 0..110. The "110" sits on the plot's
+    // right edge; right-align it so the trailing "0" stays inside the
+    // canvas instead of being clipped.
+    for (i, v) in [0u32, 20, 40, 60, 80, 100, 110].iter().enumerate() {
+        // Corner "0" left-aligns with the Y-axis column; "100"/"110°C"
+        // right-align so they never crowd the right edge.
+        let (align_x, x) = if *v == 0 {
+            (iced::alignment::Horizontal::Left, 2.0)
+        } else if *v >= 100 {
+            (iced::alignment::Horizontal::Right, layout.origin.x + (*v as f32 / TEMP_RANGE) * layout.plot_w)
+        } else {
+            (iced::alignment::Horizontal::Center, layout.origin.x + (*v as f32 / TEMP_RANGE) * layout.plot_w)
+        };
         frame.fill_text(iced::widget::canvas::Text {
-            content: AXIS_LABELS[i].to_owned(),
+            content: AXIS_LABELS_X[i].to_owned(),
             position: Point::new(x, layout.origin.y + layout.plot_h + 4.0),
             color: Color::from_rgb(0.6, 0.6, 0.6),
             size: iced::Pixels(9.0), font,
-            align_x: iced::alignment::Horizontal::Center.into(),
+            align_x: align_x.into(),
             align_y: iced::alignment::Vertical::Top,
             line_height: iced::widget::text::LineHeight::default(),
             shaping: iced::widget::text::Shaping::Basic,
             max_width: f32::INFINITY,
         });
+    }
+    // Y-axis (duty) labels: 0..100 with a % sign, left-aligned at the gutter
+    // edge so every label starts on the same line. Skip the "0": the X-axis
+    // "0" at the bottom-left corner already marks the origin, so drawing
+    // both would overlap.
+    for (i, v) in [0u32, 20, 40, 60, 80, 100].iter().enumerate() {
         let y = layout.origin.y + layout.plot_h - (*v as f32 / 100.0) * layout.plot_h;
-        frame.fill_text(iced::widget::canvas::Text {
-            content: AXIS_LABELS[i].to_owned(),
-            position: Point::new(layout.origin.x - 4.0, y),
-            color: Color::from_rgb(0.6, 0.6, 0.6),
-            size: iced::Pixels(9.0), font,
-            align_x: iced::alignment::Horizontal::Right.into(),
-            align_y: iced::alignment::Vertical::Center,
-            line_height: iced::widget::text::LineHeight::default(),
-            shaping: iced::widget::text::Shaping::Basic,
-            max_width: f32::INFINITY,
-        });
-    }
-
-    // Draw control points as circles, in sorted temperature order.
-    let mut sorted_points: Vec<[u32; 2]> = points.to_vec();
-    sorted_points.sort_by_key(|p| p[0]);
-    for (sorted_pos, p) in sorted_points.iter().enumerate() {
-        let center = to_screen(p[0] as f32, p[1] as f32);
-        let config_idx = sorted_indices[sorted_pos];
-        let (fill_color, stroke_color, r) = if drag_idx == Some(config_idx) {
-            (CURVE_COLOR, Color::WHITE, POINT_RADIUS + 2.0)
-        } else if hover_idx == Some(config_idx) {
-            (CURVE_COLOR, Color::WHITE, POINT_RADIUS + 1.0)
-        } else {
-            (CURVE_COLOR, Color::WHITE, POINT_RADIUS)
-        };
-        let circle = iced::widget::canvas::Path::circle(center, r);
-        frame.fill(&circle, fill_color);
-        frame.stroke(&circle, iced::widget::canvas::Stroke::default()
-            .with_color(stroke_color).with_width(2.0));
-    }
-
-    // Live sensor markers drawn on top: dashed crosshair through the curve
-    // position at the sensor's current temperature, plus a dot in the
-    // sensor color.
-    let plot_top = layout.origin.y;
-    let plot_bottom = layout.origin.y + layout.plot_h;
-    let plot_left = layout.origin.x;
-    let plot_right = layout.origin.x + layout.plot_w;
-    for mark in marks.iter() {
-        let temp = (mark.temp as f32).clamp(0.0, 100.0);
-        let duty = crate::fan_control::calculate_duty_from_curve(mark.temp, all_pts) as f32;
-        let pos = to_screen(temp, duty);
-        let dash = iced::widget::canvas::Stroke {
-            style: iced::widget::canvas::Style::Solid(mark.color),
-            width: 1.0,
-            line_cap: iced::widget::canvas::LineCap::Round,
-            line_join: iced::widget::canvas::LineJoin::Round,
-            line_dash: iced::widget::canvas::LineDash {
-                segments: &[4.0, 4.0],
-                offset: 0,
-            },
-        };
-        frame.stroke(&iced::widget::canvas::Path::line(
-            Point::new(pos.x, plot_top),
-            Point::new(pos.x, plot_bottom),
-        ), dash);
-        frame.stroke(&iced::widget::canvas::Path::line(
-            Point::new(plot_left, pos.y),
-            Point::new(plot_right, pos.y),
-        ), dash);
-        let dot = iced::widget::canvas::Path::circle(pos, 4.0);
-        frame.fill(&dot, mark.color);
-        frame.stroke(&dot, iced::widget::canvas::Stroke::default()
-            .with_color(Color::WHITE).with_width(1.5));
+        if *v != 0 {
+            frame.fill_text(iced::widget::canvas::Text {
+                content: AXIS_LABELS_Y[i].to_owned(),
+                position: Point::new(2.0, y),
+                color: Color::from_rgb(0.6, 0.6, 0.6),
+                size: iced::Pixels(9.0), font,
+                align_x: iced::alignment::Horizontal::Left.into(),
+                align_y: iced::alignment::Vertical::Center,
+                line_height: iced::widget::text::LineHeight::default(),
+                shaping: iced::widget::text::Shaping::Basic,
+                max_width: f32::INFINITY,
+            });
+        }
     }
 }

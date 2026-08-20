@@ -204,15 +204,29 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
                 card(cpu_power_section(snap)),
                 card(view_misc(snap)),
             ].spacing(8)
-        ).padding(iced::Padding { top: 0.0, right: 20.0, bottom: 0.0, left: 8.0 })
-    ).height(Length::Fill);
+        ).padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 8.0 })
+    )
+    // Embedded scrollbar: reserves its own strip (6px rail + 4px spacing =
+    // 10px, matching the left column's 10px inset) so it never floats over
+    // or abuts the cards.
+    .direction(scrollable::Direction::Vertical(
+        scrollable::Scrollbar::new().width(6.0).scroller_width(6.0).spacing(4.0)
+    ))
+    .height(Length::Fill);
 
     let content = container(
         row![
-            column![
-                card(view_sensors(app, snap)),
-                card(view_battery(app, snap)),
-            ].width(Length::FillPortion(1)).spacing(8),
+            container(
+                column![
+                    card(view_sensors(app, snap)),
+                    card(view_battery(app, snap)),
+                ].width(Length::FillPortion(1)).spacing(8)
+            )
+            // Match the right column's halved inset (10px inner padding +
+            // the scrollbar area), so the left cards sit as far from the
+            // window edge as the right ones.
+            .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 })
+            .width(Length::FillPortion(1)),
             right_column.width(Length::FillPortion(1)),
         ].spacing(12)
     ).padding(iced::Padding {
@@ -305,7 +319,7 @@ fn view_settings(app: &App) -> Element<'_, Message> {
     let poll_ms = config.telemetry.poll_ms as u32;
     sw_content = sw_content.push(
         row![
-            iced::widget::slider(POLL_RATE_MIN_MS..=crate::types::POLL_MS_MAX as u32, poll_ms, |v| Message::PollRateChanged(v as u64)).step(10u32),
+            iced::widget::slider(POLL_RATE_MIN_MS..=crate::types::POLL_MS_MAX as u32, poll_ms, |v| Message::PollRateChanged(v as u64)).step(10u32).style(slider_style),
             text(format!("{} ms", poll_ms)).size(FONT_BODY),
         ].spacing(4)
     );
@@ -314,7 +328,7 @@ fn view_settings(app: &App) -> Element<'_, Message> {
     let refresh_ms = config.telemetry.ui_refresh_ms as u32;
     sw_content = sw_content.push(
         row![
-            iced::widget::slider(crate::types::UI_REFRESH_MS_MIN as u32..=crate::types::UI_REFRESH_MS_MAX as u32, refresh_ms, |v| Message::UiRefreshRateChanged(v as u64)).step(50u32),
+            iced::widget::slider(crate::types::UI_REFRESH_MS_MIN as u32..=crate::types::UI_REFRESH_MS_MAX as u32, refresh_ms, |v| Message::UiRefreshRateChanged(v as u64)).step(50u32).style(slider_style),
             text(format!("{} ms", refresh_ms)).size(FONT_BODY),
         ].spacing(4)
     );
@@ -382,7 +396,7 @@ fn view_quit_warning(app: &App) -> Element<'_, Message> {
 
     content = content.push(iced::widget::row![
         text("Set duty to:").size(FONT_BODY),
-        iced::widget::slider(0..=100, set_duty, Message::QuitDutyChanged),
+        iced::widget::slider(0..=100, set_duty, Message::QuitDutyChanged).style(slider_style),
         text(format!("{}%", set_duty)).size(FONT_BODY),
     ].spacing(4).align_y(iced::Alignment::Center));
 
@@ -431,19 +445,33 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
             let all_empty = config.telemetry.selected_sensors.is_empty();
 
             let settings_label = if app.show_sensor_settings { "[-] Settings" } else { "[+] Settings" };
-            content = content.push(
-                row![
-                    text("Sensors").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
-                    space::horizontal(),
-                    button(text(settings_label).size(FONT_SMALL))
-                        .on_press(Message::ToggleSensorSettings)
-                        .style(btn_style),
-                ]
-            );
+            let header = row![
+                text("Sensors").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+                space::horizontal(),
+                button(text(settings_label).size(FONT_SMALL))
+                    .on_press(Message::ToggleSensorSettings)
+                    .style(btn_style),
+            ];
+            content = content.push(header);
 
             let settings_panel: Element<'_, Message> = if app.show_sensor_settings {
                 let mut settings_content = column![].spacing(4).padding(4);
                 settings_content = settings_content.push(text("Sensors").size(FONT_BODY));
+
+                // History window selector: same segmented style as the fan
+                // mode buttons, highlighting the active length.
+                let mut window_row = row![
+                    text("Chart Window:").size(FONT_BODY),
+                ].spacing(8).align_y(iced::Alignment::Center);
+                for opt in crate::temp_chart::HISTORY_WINDOW_OPTIONS {
+                    let selected = app.chart_window_seconds == opt;
+                    window_row = window_row.push(
+                        button(text(format!("{}s", opt)).size(FONT_SMALL))
+                            .on_press(Message::ChartWindowChanged(opt))
+                            .style(move |_theme, _status| mode_style(selected)),
+                    );
+                }
+                settings_content = settings_content.push(window_row);
 
                 // Build a lookup set once instead of a linear scan per row
                 // (selected_sensors is small, but the panel rebuilds every frame).
@@ -465,10 +493,14 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
                         row![
                             button(
                                 container(text(" ").size(FONT_SMALL))
-                                    .width(16).height(16).center_x(16).center_y(16)
+                                    .width(14).height(14).center_x(14).center_y(14)
                                     .style(move |_theme| iced::widget::container::Style {
                                         background: Some(bg_color.into()),
-                                        border: iced::Border::default().rounded(8),
+                                        // White ring matching the slider
+                                        // thumbs / curve control points;
+                                        // dot + 1px ring keep the same visual
+                                        // footprint as the original 16px dot.
+                                        border: iced::Border::default().rounded(7).color(iced::Color::WHITE).width(1),
                                         ..Default::default()
                                     })
                              ).on_press(Message::SensorToggled(idx, !is_on))
@@ -520,6 +552,7 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
                     samples: history,
                     colors: chart_colors,
                     sensor_names: Arc::clone(&cache.sorted),
+                    window_seconds: app.chart_window_seconds,
                 }))
                     .width(Length::Fill)
                     .height(150)
@@ -616,14 +649,14 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                 );
                 if unified {
                     content = content.push(
-                        iced::widget::slider(0..=100, duty, Message::FanDutyChanged)
+                        iced::widget::slider(0..=100, duty, Message::FanDutyChanged).style(slider_style)
                     );
                 } else {
                     for (idx, &per_duty) in snap.per_fan_duty.iter().enumerate() {
                         content = content.push(
                             row![
                                 text(format!("Fan {}:", idx + 1)).size(FONT_BODY),
-                                iced::widget::slider(0..=100, per_duty, move |d| Message::FanPerDutyChanged(idx, d)),
+                                iced::widget::slider(0..=100, per_duty, move |d| Message::FanPerDutyChanged(idx, d)).style(slider_style),
                                 text(format!("{}%", per_duty)).size(FONT_BODY),
                             ].spacing(8).align_y(iced::Alignment::Center)
                         );
@@ -631,7 +664,7 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                 }
             } else {
                 content = content.push(
-                    iced::widget::slider(0..=100, duty, Message::FanDutyChanged)
+                    iced::widget::slider(0..=100, duty, Message::FanDutyChanged).style(slider_style)
                 );
             }
         }
@@ -657,7 +690,7 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                     settings_content = settings_content.push(text("Hysteresis").size(FONT_BODY));
                     settings_content = settings_content.push(
                         row![
-                            iced::widget::slider(0..=10, hyst, Message::FanCurveHysteresisChanged),
+                            iced::widget::slider(0..=10, hyst, Message::FanCurveHysteresisChanged).style(slider_style),
                             text(format!("{}°C", hyst)).size(FONT_BODY),
                         ].spacing(8).align_y(iced::Alignment::Center)
                     );
@@ -665,8 +698,17 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                     settings_content = settings_content.push(text("Rate Limit").size(FONT_BODY));
                     settings_content = settings_content.push(
                         row![
-                            iced::widget::slider(1..=100, rate, Message::FanCurveRateLimitChanged),
+                            iced::widget::slider(1..=100, rate, Message::FanCurveRateLimitChanged).style(slider_style),
                             text(format!("{} %/step", rate)).size(FONT_BODY),
+                        ].spacing(8).align_y(iced::Alignment::Center)
+                    );
+
+                    let curve_poll_ms = curve.poll_ms as u32;
+                    settings_content = settings_content.push(text("Curve Poll").size(FONT_BODY));
+                    settings_content = settings_content.push(
+                        row![
+                            iced::widget::slider(crate::types::CURVE_POLL_MS_MIN as u32..=crate::types::CURVE_POLL_MS_MAX as u32, curve_poll_ms, |v| Message::CurvePollMsChanged(v as u64)).step(100u32).style(slider_style),
+                            text(format!("{} ms", curve_poll_ms)).size(FONT_BODY),
                         ].spacing(8).align_y(iced::Alignment::Center)
                     );
 
@@ -689,10 +731,12 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                                 row![
                                     button(
                                         container(text(" ").size(FONT_SMALL))
-                                            .width(16).height(16).center_x(16).center_y(16)
+                                            .width(14).height(14).center_x(14).center_y(14)
                                             .style(move |_theme| iced::widget::container::Style {
                                                 background: Some(bg_color.into()),
-                                                border: iced::Border::default().rounded(8),
+                                                // White ring matching the
+                                                // sensor-settings toggles.
+                                                border: iced::Border::default().rounded(7).color(iced::Color::WHITE).width(1),
                                                 ..Default::default()
                                             })
                                      ).on_press(Message::CurveSensorSelected(idx))
@@ -800,7 +844,7 @@ fn view_charge_limit_section(enabled: bool, value: u32) -> Element<'static, Mess
             space::horizontal(),
             text(format!("{}%", value)).size(FONT_BODY),
         ].spacing(4),
-        iced::widget::slider(CHARGE_LIMIT_MIN..=CHARGE_LIMIT_MAX, value, Message::ChargeLimitChanged),
+        iced::widget::slider(CHARGE_LIMIT_MIN..=CHARGE_LIMIT_MAX, value, Message::ChargeLimitChanged).style(slider_style),
     ].spacing(4).into()
 }
 
@@ -1071,7 +1115,7 @@ fn kblight_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             text(format!("{}%", kb)).size(FONT_BODY),
         ].align_y(iced::Alignment::Center));
         content = content.push(
-            iced::widget::slider(0..=100, kb, Message::KblightChanged).step(10u32)
+            iced::widget::slider(0..=100, kb, Message::KblightChanged).step(10u32).style(slider_style)
         );
     } else {
         content = content.push(text("Keyboard Backlight").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }));

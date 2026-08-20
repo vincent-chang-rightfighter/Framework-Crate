@@ -12,7 +12,7 @@ Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-c
 
 - **Fan Control** — Auto (firmware), manual (0–100% duty, optional per-fan), and curve mode with draggable points on a canvas (default 5 points, hysteresis, and rate limiting; live sensor markers shown on the curve)
 - **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity
-- **Live Telemetry** — Real-time temperature chart (30s sliding window), per-sensor display with colored indicators, and fan RPM in the header
+- **Live Telemetry** — Real-time temperature chart (selectable 15/30/60s window, default 30s), per-sensor display with colored indicators, and fan RPM in the header
 - **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card, and USB-C / HDMI / DP port classification
 - **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download). AMD and other vendors are not supported.
 - **About Page** — Hardware info (CPU, RAM, display, BIOS), software settings (poll rate, refresh interval), GitHub link, and third-party license notices
@@ -72,7 +72,7 @@ src/
   config_save_task.rs  — Debounced config save (100ms) with battery apply
   background_task.rs   — EC polling loop, fan control, expansion/PD scans
   cpu_power.rs         — PawnIO RAPL read/write (PL1/PL2) and sync thread
-  temp_chart.rs        — Canvas-based temperature line chart (30s history)
+  temp_chart.rs        — Canvas-based temperature line chart (selectable history window)
   curve_canvas.rs      — Interactive canvas-based fan curve editor (drag points, sensor markers)
   fan_control.rs       — CurveStepper, rate limiting, duty calculation
   system_info.rs       — Windows API FFI (CPU, RAM, OS, display, tray)
@@ -128,7 +128,7 @@ per_fan_duty = []
 duty_pct = 50
 
 [fan.curve]
-poll_ms = 500           # deprecated — retained for compatibility; curve polling follows telemetry.poll_ms
+poll_ms = 500           # curve polling interval in ms (500–5000)
 sensors = []                 # empty = hottest non-battery sensor
 points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]]
 hysteresis_c = 2

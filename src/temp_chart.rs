@@ -3,14 +3,16 @@ use std::cell::{Cell, OnceCell};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-const TEMP_MAX: f32 = 100.0;
+const TEMP_MAX: f32 = 110.0;
 const TEMP_MIN: f32 = 0.0;
-/// History window in seconds (used for x-axis labels and float calculations).
+/// Default history window in seconds (used for the x-axis scale).
 pub const HISTORY_SECONDS: i64 = 30;
-/// History window in milliseconds (used for sample pruning and timestamps).
-pub const HISTORY_MS: i64 = HISTORY_SECONDS * 1_000;
-const Y_LABELS: [&str; 6] = ["0", "20", "40", "60", "80", "100"];
-const X_LABELS: [&str; 4] = ["30s", "20s", "10s", "0s"];
+/// Selectable history window lengths in seconds.
+pub const HISTORY_WINDOW_OPTIONS: [i64; 3] = [15, 30, 60];
+/// Buffer retention in milliseconds: keep the longest selectable window so
+/// switching windows never shows a gap.
+pub const HISTORY_MAX_MS: i64 = 60_000;
+const Y_LABELS: [&str; 7] = ["0", "20", "40", "60", "80", "100", "110°C"];
 
 #[derive(Clone)]
 pub struct TempSample {
@@ -55,7 +57,7 @@ impl ThermalHistory {
     /// Caller must hold the write lock.
     pub fn push_sample(&mut self, sample: TempSample, now_ms: i64) {
         self.draft.push_back(sample);
-        let cutoff = now_ms - HISTORY_MS;
+        let cutoff = now_ms - HISTORY_MAX_MS;
         while let Some(front) = self.draft.front() {
             if front.ts_ms <= cutoff {
                 self.draft.pop_front();
@@ -81,6 +83,8 @@ pub struct TempHistory {
     pub samples: Arc<std::collections::VecDeque<TempSample>>,
     pub colors: Arc<Vec<Color>>,
     pub sensor_names: Arc<Vec<String>>,
+    /// Length of the displayed window in seconds.
+    pub window_seconds: i64,
 }
 
 pub fn view_temp_chart(history: TempHistory) -> Element<'static, crate::Message> {
@@ -88,6 +92,7 @@ pub fn view_temp_chart(history: TempHistory) -> Element<'static, crate::Message>
         samples: history.samples,
         colors: history.colors,
         sensor_names: history.sensor_names,
+        window_seconds: history.window_seconds,
     })
     .width(Length::Fill)
     .height(140)
@@ -98,6 +103,7 @@ struct TempChartRenderer {
     samples: Arc<std::collections::VecDeque<TempSample>>,
     colors: Arc<Vec<Color>>,
     sensor_names: Arc<Vec<String>>,
+    window_seconds: i64,
 }
 
 /// Persistent state living in the widget `Tree` — survives `view()` rebuilds.
@@ -111,7 +117,7 @@ struct TempChartState {
     /// when `ViewSnapshot` clones a new `Arc` (i.e. new data arrived), which
     /// is exactly when the canvas needs re-drawing. This avoids hashing or
     /// deep-comparing the entire sample deque on every frame.
-    cached_key: Cell<(*const (), usize, *const ())>,
+    cached_key: Cell<(*const (), usize, *const (), i64)>,
     /// Reused line-point buffer, kept in the tree so it is not re-allocated
     /// on every `view()` rebuild.
     points_buf: std::cell::RefCell<Vec<(f32, f32)>>,
@@ -121,7 +127,7 @@ impl Default for TempChartState {
     fn default() -> Self {
         Self {
             cache: OnceCell::new(),
-            cached_key: Cell::new((std::ptr::null::<()>(), 0, std::ptr::null::<()>())),
+            cached_key: Cell::new((std::ptr::null::<()>(), 0, std::ptr::null::<()>(), 0)),
             points_buf: std::cell::RefCell::new(Vec::new()),
         }
     }
@@ -153,6 +159,7 @@ impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
             Arc::as_ptr(&self.samples) as *const (),
             self.samples.len(),
             Arc::as_ptr(&self.sensor_names) as *const (),
+            self.window_seconds,
         );
         if state.cached_key.get() != key {
             state.cached_key.set(key);
@@ -169,6 +176,7 @@ impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
                 &self.samples,
                 &self.sensor_names,
                 &self.colors,
+                self.window_seconds,
                 &mut points_buf,
                 size,
             );
@@ -182,12 +190,14 @@ fn draw_temp_chart_contents(
     samples: &Arc<std::collections::VecDeque<TempSample>>,
     sensor_names: &Arc<Vec<String>>,
     colors: &Arc<Vec<Color>>,
+    window_seconds: i64,
     points_buf: &mut Vec<(f32, f32)>,
     size: Size,
 ) {
-    let margin_left = 30.0f32;
+    let margin_left = 36.0f32;
     let margin_right = 8.0f32;
-    let margin_top = 4.0f32;
+    // Top margin tall enough for the "110" label at the top edge.
+    let margin_top = 10.0f32;
     let margin_bottom = 18.0f32;
     let plot_w = size.width - margin_left - margin_right;
     let plot_h = size.height - margin_top - margin_bottom;
@@ -204,7 +214,7 @@ fn draw_temp_chart_contents(
     let grid_stroke = iced::widget::canvas::Stroke::default()
         .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.08))
         .with_width(0.5);
-    for temp in [20.0, 40.0, 60.0, 80.0] {
+    for temp in [20.0, 40.0, 60.0, 80.0, 100.0] {
         let y = origin.y + plot_h - ((temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h;
         frame.stroke(
             &iced::widget::canvas::Path::line(
@@ -224,17 +234,18 @@ fn draw_temp_chart_contents(
             .with_width(1.0),
     );
 
-    // Y-axis labels
+    // Y-axis labels, left-aligned at the gutter edge so every label starts
+    // on the same line.
     let font = iced::Font::with_name("Consolas");
-    for (i, temp) in [0, 20, 40, 60, 80, 100].iter().enumerate() {
+    for (i, temp) in [0, 20, 40, 60, 80, 100, 110].iter().enumerate() {
         let y = origin.y + plot_h - ((*temp as f32 - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h;
         frame.fill_text(iced::widget::canvas::Text {
             content: Y_LABELS[i].to_owned(),
-            position: Point::new(origin.x - 4.0, y),
+            position: Point::new(2.0, y),
             color: Color::from_rgb(0.5, 0.5, 0.5),
             size: iced::Pixels(8.0),
             font,
-            align_x: iced::alignment::Horizontal::Right.into(),
+            align_x: iced::alignment::Horizontal::Left.into(),
             align_y: iced::alignment::Vertical::Center,
             line_height: iced::widget::text::LineHeight::default(),
             shaping: iced::widget::text::Shaping::Basic,
@@ -243,12 +254,17 @@ fn draw_temp_chart_contents(
     }
 
     // X-axis time labels. Samples are plotted newest-first: t_ratio = 1.0
-    // (the right edge) is "now", so the labels must run 30s at the left to
-    // 0s at the right to match the data.
-    for (i, sec) in [30, 20, 10, 0].iter().enumerate() {
-        let x = origin.x + (1.0 - *sec as f32 / HISTORY_SECONDS as f32) * plot_w;
+    // (the right edge) is "now", so the labels must run from the window
+    // length at the left down to "now" at the right. The "0" coordinate is
+    // not labeled — "now" takes its place.
+    let step = (window_seconds / 3).max(5);
+    // Skip the window-boundary label (e.g. "30s" on a 30s window): it would
+    // sit on the plot's left edge. Only interior ticks + "now" are shown.
+    let mut secs = window_seconds - step;
+    while secs > 0 {
+        let x = origin.x + (1.0 - secs as f32 / window_seconds as f32) * plot_w;
         frame.fill_text(iced::widget::canvas::Text {
-            content: X_LABELS[i].to_owned(),
+            content: format!("{}s", secs),
             position: Point::new(x, origin.y + plot_h + 4.0),
             color: Color::from_rgb(0.5, 0.5, 0.5),
             size: iced::Pixels(8.0),
@@ -259,7 +275,21 @@ fn draw_temp_chart_contents(
             shaping: iced::widget::text::Shaping::Basic,
             max_width: f32::INFINITY,
         });
+        secs -= step;
     }
+    // "now" at the right edge, right-aligned so it is never clipped.
+    frame.fill_text(iced::widget::canvas::Text {
+        content: "now".to_string(),
+        position: Point::new(origin.x + plot_w, origin.y + plot_h + 4.0),
+        color: Color::from_rgb(0.5, 0.5, 0.5),
+        size: iced::Pixels(8.0),
+        font,
+        align_x: iced::alignment::Horizontal::Right.into(),
+        align_y: iced::alignment::Vertical::Top,
+        line_height: iced::widget::text::LineHeight::default(),
+        shaping: iced::widget::text::Shaping::Basic,
+        max_width: f32::INFINITY,
+    });
 
     if samples.is_empty() || sensor_names.is_empty() {
         frame.fill_text(iced::widget::canvas::Text {
@@ -278,7 +308,7 @@ fn draw_temp_chart_contents(
     }
 
     let now_ms = samples.back().map(|s| s.ts_ms).unwrap_or(0);
-    let start_ms = now_ms - HISTORY_MS;
+    let start_ms = now_ms - window_seconds * 1_000;
 
     // Draw lines per sensor
     for (sensor_idx, sensor_name) in sensor_names.iter().enumerate() {

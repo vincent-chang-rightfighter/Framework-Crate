@@ -483,16 +483,24 @@ impl EcClient {
         let percent = percent.min(100) as u8;
         // framework_lib swallows the EC write error (only debug_asserts), so
         // verify the write by reading the value back. duty<->percent rounding
-        // can be off by one, hence the tolerance.
+        // is off by at most one, hence the ±1 tolerance. The EC applies the
+        // new duty asynchronously, so retry the readback briefly before
+        // declaring a genuine mismatch (an immediate read can return stale
+        // data right after the write).
         self.ec.set_keyboard_backlight(percent);
-        match self.ec.get_keyboard_backlight() {
-            Ok(actual) if (actual as i32 - percent as i32).abs() <= 1 => Ok(()),
-            Ok(actual) => Err(format!(
-                "Keyboard backlight write failed: wrote {}%, read back {}%",
-                percent, actual
-            )),
-            Err(e) => Err(format!("Failed to set keyboard backlight: {:?}", e)),
+        let mut last: Option<u8> = None;
+        for _ in 0..5 {
+            match self.ec.get_keyboard_backlight() {
+                Ok(actual) if (actual as i32 - percent as i32).abs() <= 1 => return Ok(()),
+                Ok(actual) => last = Some(actual),
+                Err(e) => return Err(format!("Failed to set keyboard backlight: {:?}", e)),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
+        Err(format!(
+            "Keyboard backlight write failed: wrote {}%, read back {:?}",
+            percent, last
+        ))
     }
 
     pub fn fp_led_level_set(&self, level: &str) -> Result<(), String> {

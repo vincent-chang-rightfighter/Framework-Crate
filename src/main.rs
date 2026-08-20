@@ -249,6 +249,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chart_window_changed_validates_option() {
+        let _guard = app_config_lock();
+        let (mut app, _) = App::new();
+        assert_eq!(app.chart_window_seconds, 30, "default window is 30s");
+        let _ = app.update(Message::ChartWindowChanged(60));
+        assert_eq!(app.chart_window_seconds, 60);
+        let _ = app.update(Message::ChartWindowChanged(45));
+        assert_eq!(app.chart_window_seconds, 60, "invalid windows must be rejected");
+    }
+
+    #[tokio::test]
     async fn battery_details_toggle_flips_flag() {
         let _guard = app_config_lock();
         let (mut app, _) = App::new();

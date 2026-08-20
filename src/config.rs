@@ -144,7 +144,7 @@ fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
          # [fan.manual]\n\
          # duty_pct = 0..100\n\
          # [fan.curve]\n\
-         # poll_ms = 500..10000            (fan curve step interval)\n\
+         # poll_ms = 500..5000            (fan curve step interval)\n\
          # hysteresis_c = 0..10            (temperature hysteresis)\n\
          # rate_limit_pct_per_step = 1..100\n\
          # rate_limit_down_pct_per_step = 1..100   (optional; defaults to rate_limit_pct_per_step)\n\

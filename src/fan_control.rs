@@ -137,7 +137,9 @@ mod tests {
     #[test]
     fn calculate_duty_from_curve_empty_uses_full() {
         let points = types::curve_full_points(&[]);
-        assert_eq!(calculate_duty_from_curve(50, &points), 50);
+        // The fallback spans 0°C..110°C, so 50°C sits at 50/110 of the ramp.
+        assert_eq!(calculate_duty_from_curve(50, &points), 45);
+        assert_eq!(calculate_duty_from_curve(110, &points), 100);
     }
 
     #[test]

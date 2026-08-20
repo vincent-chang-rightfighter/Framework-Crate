@@ -148,6 +148,7 @@ pub enum Message {
     CurveSensorSelected(usize),
     FanCurveHysteresisChanged(u32),
     FanCurveRateLimitChanged(u32),
+    CurvePollMsChanged(u64),
     FanUnifiedDutyToggled(bool),
     FanPerDutyChanged(usize, u32),
     ChargeLimitToggled(bool),
@@ -155,6 +156,7 @@ pub enum Message {
     ToggleSensorSettings,
     ToggleCpuPowerSettings,
     SensorToggled(usize, bool),
+    ChartWindowChanged(i64),
     PollRateChanged(u64),
     UiRefreshRateChanged(u64),
     SettingsToggled,
@@ -205,6 +207,7 @@ pub struct App {
     pub cli_present: bool,
     pub startup_error: Option<String>,
     pub show_sensor_settings: bool,
+    pub chart_window_seconds: i64,
     pub show_curve_settings: bool,
     pub show_cpu_power_settings: bool,
     pub show_battery_details: bool,
@@ -362,6 +365,7 @@ impl App {
             cli_present: false,
             startup_error: None,
             show_sensor_settings: false,
+            chart_window_seconds: crate::temp_chart::HISTORY_SECONDS,
             show_curve_settings: false,
             show_cpu_power_settings: false,
             show_battery_details: false,
@@ -723,7 +727,7 @@ impl App {
                 Some(Task::none())
             }
             Message::FanCurvePointMoved(idx, temp, duty) => {
-                let temp = temp.clamp(0, 100);
+                let temp = temp.clamp(0, crate::types::CURVE_TEMP_MAX);
                 let duty = duty.clamp(0, 100);
                 self.mutate_config(|cfg| {
                     if let Some(ref mut curve) = cfg.fan.curve
@@ -754,6 +758,19 @@ impl App {
                         curve.curve.rate_limit_pct_per_step = r;
                     }
                 });
+                self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                self.save_config();
+                Some(Task::none())
+            }
+            Message::CurvePollMsChanged(ms) => {
+                let ms = ms.clamp(crate::types::CURVE_POLL_MS_MIN, crate::types::CURVE_POLL_MS_MAX);
+                self.mutate_config(|cfg| {
+                    if let Some(ref mut curve) = cfg.fan.curve {
+                        curve.poll_ms = ms;
+                    }
+                });
+                // No tick reschedule needed: the background loop reads the
+                // curve poll interval from the config each iteration.
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
@@ -1069,6 +1086,12 @@ impl App {
             }
             Message::ToggleSensorSettings => {
                 self.show_sensor_settings = !self.show_sensor_settings;
+                Task::none()
+            }
+            Message::ChartWindowChanged(secs) => {
+                if crate::temp_chart::HISTORY_WINDOW_OPTIONS.contains(&secs) {
+                    self.chart_window_seconds = secs;
+                }
                 Task::none()
             }
             Message::ToggleCurveSettings => {

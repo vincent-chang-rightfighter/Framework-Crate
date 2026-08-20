@@ -7,6 +7,9 @@ pub const COLOR_CARD_BG: iced::Color = iced::Color { r: 0.14, g: 0.14, b: 0.17, 
 pub const COLOR_CARD_BORDER: iced::Color = iced::Color { r: 0.25, g: 0.25, b: 0.28, a: 1.0 };
 pub const COLOR_NOT_SUPPORTED_BG: iced::Color = iced::Color { r: 0.25, g: 0.12, b: 0.12, a: 0.4 };
 pub const COLOR_NOT_SUPPORTED_TEXT: iced::Color = iced::Color { r: 0.7, g: 0.4, b: 0.4, a: 1.0 };
+/// Curve line / control-point color (#6b75ff). Shared by the curve canvas
+/// and the slider thumbs styled to match the curve's draggable points.
+pub const COLOR_CURVE: iced::Color = iced::Color { r: 107.0 / 255.0, g: 117.0 / 255.0, b: 1.0, a: 1.0 };
 
 /// Minimum hardware poll interval (ms). framework_tool takes ~50-100ms to run,
 /// so 200ms prevents overlapping subprocess calls while keeping UI responsive.
@@ -115,6 +118,33 @@ pub fn mode_style(selected: bool) -> iced::widget::button::Style {
             border: iced::Border::default().rounded(6).width(1).color(iced::Color::from_rgb(0.4, 0.4, 0.4)),
             ..iced::widget::button::Style::default()
         }
+    }
+}
+
+pub fn slider_style(_theme: &iced::Theme, status: iced::widget::slider::Status) -> iced::widget::slider::Style {
+    use iced::widget::slider::{Handle, HandleShape, Rail};
+    // Mirrors the curve canvas control points: a round handle in the curve
+    // color with a white ring, growing slightly on hover and while dragging.
+    let (radius, border_width) = match status {
+        iced::widget::slider::Status::Active => (5.0, 2.0),
+        iced::widget::slider::Status::Hovered => (6.0, 2.0),
+        iced::widget::slider::Status::Dragged => (7.0, 2.0),
+    };
+    iced::widget::slider::Style {
+        rail: Rail {
+            // First background: the filled side (before the handle); second:
+            // the remaining track. The filled side uses the curve color so
+            // the slider reads like the curve line.
+            backgrounds: (COLOR_CURVE.into(), COLOR_DARK.into()),
+            width: 4.0,
+            border: iced::Border::default().rounded(2),
+        },
+        handle: Handle {
+            shape: HandleShape::Circle { radius },
+            background: COLOR_CURVE.into(),
+            border_width,
+            border_color: iced::Color::WHITE,
+        },
     }
 }
 

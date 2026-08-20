@@ -19,25 +19,30 @@ fn battery_key(cfg: &Config) -> BatteryKey {
     cfg.battery.charge_limit_max_pct
 }
 
-async fn apply_battery_when_ready(cfg: &Config, state: &AppState) {
+async fn apply_battery_when_ready(cfg: &Config, state: &AppState) -> bool {
     for _ in 0..50 {
         if state.lifecycle.shutdown.load(Ordering::Acquire) {
-            return;
+            return false;
         }
         {
             let ec = read_lock(&state.system.ec_client);
             if ec.as_ref().is_some() {
-                break;
+                return apply_battery_settings(cfg, state).await;
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    apply_battery_settings(cfg, state).await;
+    false
 }
 
-async fn apply_battery_settings(cfg: &Config, state: &AppState) {
+async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
+    // Never write battery EC registers during shutdown: a quit initiated
+    // while this task is mid-flight must not be followed by EC writes.
+    if state.lifecycle.shutdown.load(Ordering::Acquire) {
+        return false;
+    }
     let ec = { read_lock(&state.system.ec_client) };
-    let Some(ref ec) = *ec else { return };
+    let Some(ref ec) = *ec else { return false };
     if let Some(ref limit) = cfg.battery.charge_limit_max_pct {
         let pct = if limit.enabled { limit.value } else { 100 };
         let ec_clone = ec.clone();
@@ -47,8 +52,10 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) {
         // 0 tells the EC "no software minimum" — the hardware minimum still applies.
         if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.charge_limit_set(0, pct)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
             warn!("Failed to set charge limit: {}", e);
+            return false;
         }
     }
+    true
 }
 
 pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState) {
@@ -62,8 +69,12 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
             let (cfg, _ver) = config_rx.borrow().clone();
             let key = battery_key(&cfg);
             last_battery = Some(key);
-            if key.is_some() {
-                apply_battery_when_ready(&cfg, &state).await;
+            // A bounded startup wait must not silently drop a persisted
+            // charge limit: if the EC never became ready in time, keep
+            // last_battery out of sync so the next config change re-attempts
+            // the apply.
+            if key.is_some() && !apply_battery_when_ready(&cfg, &state).await {
+                last_battery = None;
             }
         }
 
@@ -121,8 +132,13 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
 
             let key = battery_key(&cfg_for_battery);
             if last_battery.as_ref() != Some(&key) {
-                last_battery = Some(key);
-                apply_battery_settings(&cfg_for_battery, &state).await;
+                // Retry failed applies on the next change (EC not ready yet,
+                // or a transient write failure) instead of dropping the
+                // charge limit silently. last_battery only advances on success
+                // so the next change re-attempts the apply.
+                if apply_battery_settings(&cfg_for_battery, &state).await {
+                    last_battery = Some(key);
+                }
             }
         }
     });
