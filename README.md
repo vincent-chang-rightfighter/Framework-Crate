@@ -6,7 +6,9 @@ Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-c
 
 ## Screenshot
 
-![Framework Crate running](Framework-Crate.png)
+![Framework Crate v0.3.0](images/Framework-Crate-v0.3.0.png)
+
+![Framework Crate v0.3.0 fan curve and sensors](images/Framework-Crate-v0.3.0-2.png)
 
 ## Features
 
@@ -33,7 +35,7 @@ cargo build --release
 ## Binary Size Checks
 
 ```powershell
-# Debug build (larger because it keeps unoptimized code and full debuginfo)
+# Debug build (larger because it keeps unoptimized code and full debug symbols)
 cargo build
 Get-Item .\target\debug\framework-crate.exe | Select-Object Name,Length
 
@@ -69,7 +71,7 @@ src/
   types.rs             — Config structs, FanControlMode, CurveConfig, validation
   style.rs             — Colors, fonts, layout constants
   config.rs            — TOML config load/save (atomic write via tmp+rename, write-through)
-  config_save_task.rs  — Debounced config save (100ms) with battery apply
+  config_save_task.rs  — Debounced config save (100ms) and applies battery settings
   background_task.rs   — EC polling loop, fan control, expansion/PD scans
   cpu_power.rs         — PawnIO RAPL read/write (PL1/PL2) and sync thread
   temp_chart.rs        — Canvas-based temperature line chart (selectable history window)
@@ -95,7 +97,7 @@ framework_lib (CrosEc) → background_task → Arc<RwLock> → UI (view reads)
                             config_save_task → config.toml
 ```
 
-- **Hardware access**: `framework_lib` crate calls EC directly via kernel driver (no subprocess)
+- **Hardware access**: The `framework_lib` crate calls the EC directly via the kernel driver (no subprocess)
 - **Config**: `dirs::config_dir() / framework-crate/config.toml`
 - **Background polling**: tokio task on LP-E core, 200ms–2s interval (idle slowdown)
 - **UI refresh**: self-rescheduling tick (50–1000ms), idle 1s, hidden 2s
@@ -128,8 +130,8 @@ per_fan_duty = []
 duty_pct = 50
 
 [fan.curve]
-poll_ms = 500           # curve polling interval in ms (500–5000)
-sensors = []                 # empty = hottest non-battery sensor
+poll_ms = 500            # curve polling interval in ms (500–5000)
+sensors = []             # empty = hottest non-battery sensor
 points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]]
 hysteresis_c = 2
 rate_limit_pct_per_step = 10
@@ -170,7 +172,7 @@ The section reads and optionally writes PL1/PL2 via official PawnIO Modules. Tho
 2. Open **CPU Power** and click **Download Modules**.
 3. The app fetches `IntelMSR.bin` and `IntelMCHBAR.bin` from [PawnIO Modules Releases](https://github.com/namazso/PawnIO.Modules/releases) (version 0.2.10), checks pinned SHA-256 hashes, and caches them in `%APPDATA%/framework-crate/modules/`.
 
-A mismatch or failed download is rejected; the files are deleted and CPU Power stays unavailable until you retry.
+A hash mismatch or failed download is rejected; the files are deleted and CPU Power stays unavailable until you retry.
 
 **Requirements:**
 - PawnIO installed

@@ -1,0 +1,26 @@
+[changelog]
+header = ""
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.breaking %}**BREAKING** {% endif %}{{ commit.message | upper_first }}
+{% endfor %}
+{% endfor %}
+"""
+footer = ""
+
+[git]
+conventional_commits = false
+breaking_commits = "^(feat|fix|refactor|perf)(\\([^)]*\\))?!:|BREAKING CHANGE:"
+commit_parsers = [
+  { message = "^feat(\\([^)]*\\))?:", group = "Features" },
+  { message = "^fix(\\([^)]*\\))?:", group = "Bug Fixes" },
+  { message = "^perf(\\([^)]*\\))?:", group = "Performance" },
+  { message = "^refactor(\\([^)]*\\))?:", group = "Refactoring" },
+  { message = "^docs(\\([^)]*\\))?:", group = "Documentation" },
+  { message = "^test(\\([^)]*\\))?:", group = "Testing" },
+  { message = "^ci(\\([^)]*\\))?:", group = "CI/CD" },
+  { message = "^chore(\\([^)]*\\))?:", group = "Maintenance" },
+  { message = ".*", group = "Other" },
+]

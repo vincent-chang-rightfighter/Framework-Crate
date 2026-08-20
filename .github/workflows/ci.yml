@@ -46,26 +46,43 @@ jobs:
           name: framework-crate-windows-release
           path: target/release/framework-crate.exe
 
-      - name: Build release notes
+      - name: Install git-cliff
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
+          $ver = "2.13.1"
+          $url = "https://github.com/orhun/git-cliff/releases/download/v${ver}/git-cliff-${ver}-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest $url -OutFile gitcliff.zip
+          Expand-Archive gitcliff.zip -DestinationPath gitcliff
+          $exe = Get-ChildItem -Recurse -Filter git-cliff.exe gitcliff | Select-Object -First 1
+          Write-Output "git-cliff installed at $($exe.DirectoryName)"
+
+      - name: Generate changelog
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter git-cliff.exe gitcliff | Select-Object -First 1
+          & $exe.FullName --config cliff.toml --latest --strip header --output release_notes.md
+          Get-Content release_notes.md
+
+      - name: Append contributors
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           $tag = $env:GITHUB_REF_NAME
           $prev = git describe --tags --abbrev=0 "$tag^" 2>$null
-          $notes = New-Object System.Collections.Generic.List[string]
-          $notes.Add("## What's Changed")
-          $notes.Add("")
-          if ($prev) {
-            git log --pretty=format:"- %s (%h)" "$prev..$tag" | ForEach-Object { $notes.Add($_) }
-            $notes.Add("")
-            $notes.Add("**Full Changelog**: https://github.com/${env:GITHUB_REPOSITORY}/compare/${prev}...${tag}")
-          } else {
-            git log --pretty=format:"- %s (%h)" $tag | ForEach-Object { $notes.Add($_) }
-            $notes.Add("")
-            $notes.Add("**Full Changelog**: https://github.com/${env:GITHUB_REPOSITORY}/commits/${tag}")
+          if ($prev) { $range = "${prev}...${tag}" } else { $range = $tag }
+          $owner = $env:GITHUB_REPOSITORY_OWNER
+          $logins = gh api "repos/$env:GITHUB_REPOSITORY/compare/$range" --jq '.commits[].author.login' 2>$null
+          $contribs = $logins |
+            Where-Object { $_ -and $_ -ne "github-actions[bot]" -and $_ -ne $owner } |
+            Sort-Object -Unique
+          if ($contribs) {
+            $line = "`n**Contributors**: " + (($contribs | ForEach-Object { "@$_" }) -join ", ")
+            Add-Content -Path release_notes.md -Value $line -Encoding utf8
           }
-          $notes -join "`n" | Set-Content -Encoding utf8 release_notes.md
-          Get-Content release_notes.md
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
