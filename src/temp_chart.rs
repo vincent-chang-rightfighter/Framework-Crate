@@ -47,8 +47,13 @@ impl Default for ThermalHistory {
 
 impl ThermalHistory {
     pub fn new() -> Self {
+        let mut draft = std::collections::VecDeque::new();
+        // Pre-reserve for the max retention window (60s / 200ms poll ≈ 300
+        // samples) so the deque never re-allocates its ring buffer while the
+        // window slides.
+        draft.reserve(350);
         Self {
-            draft: std::collections::VecDeque::new(),
+            draft,
             published: Arc::new(std::collections::VecDeque::new()),
             last_publish_ms: 0,
             window_ms: HISTORY_SECONDS * 1_000,

@@ -41,6 +41,7 @@ impl iced::Executor for SmallTokioExecutor {
             .worker_threads(2)
             .max_blocking_threads(8)
             .enable_all()
+            .on_thread_start(crate::background_task::pin_to_slowest_core)
             .build()
             .map_err(iced::futures::io::Error::other)
             .map(|rt| Self { rt })
@@ -61,7 +62,6 @@ impl iced::Executor for SmallTokioExecutor {
 }
 
 fn main() {
-    background_task::pin_to_slowest_core();
 
     #[cfg(not(test))]
     {

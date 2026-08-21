@@ -1,4 +1,4 @@
-use std::cell::{Cell, OnceCell};
+use std::cell::Cell;
 use std::sync::Arc;
 use iced::{Color, Element, Length, Point, Size};
 use iced::widget::canvas::Cache;
@@ -50,7 +50,7 @@ struct CurveRenderer {
 
 /// Persistent state living in the widget `Tree` — survives `view()` rebuilds.
 struct CurveState {
-    cache: OnceCell<Cache<iced::Renderer>>,
+    cache: Cache<iced::Renderer>,
     cached_key: Cell<(*const (), usize)>,
     last_points: std::cell::RefCell<Option<Arc<[[u32; 2]]>>>,
     /// Snapshot of the sensor marks from the previous draw — used to detect
@@ -73,7 +73,7 @@ struct CurveState {
 impl Default for CurveState {
     fn default() -> Self {
         Self {
-            cache: OnceCell::new(),
+            cache: Cache::new(),
             cached_key: Cell::new((std::ptr::null::<()>(), 0)),
             last_points: std::cell::RefCell::new(None),
             last_marks: std::cell::RefCell::new(None),
@@ -256,13 +256,10 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
             }
             state.last_hover.set(state.hover.get());
             state.last_drag.set(state.dragging.get());
-            if let Some(cache) = state.cache.get() {
-                cache.clear();
-            }
+            state.cache.clear();
         }
 
-        let cache = state.cache.get_or_init(Cache::new);
-        let geo = cache.draw(renderer, size, |frame| {
+        let geo = state.cache.draw(renderer, size, |frame| {
             draw_curve_contents(
                 frame,
                 &self.all_pts,

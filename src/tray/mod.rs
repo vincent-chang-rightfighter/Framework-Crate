@@ -127,6 +127,10 @@ impl TrayManager {
                     .is_none_or(|t| t.elapsed() >= NOTIFY_RETRY_INTERVAL);
                 if due {
                     self.last_notify_at = Some(std::time::Instant::now());
+                    // The pump drains all queued commands per wake, so a
+                    // duplicate CreateIcon would only add a no-op command.
+                    // Re-posting the idempotent command every 500ms is the
+                    // documented lost-wakeup recovery; keep it simple.
                     if let Some(tx) = &self.command_tx {
                         let _ = tx.send(TrayCommand::CreateIcon);
                     }

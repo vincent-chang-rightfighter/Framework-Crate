@@ -195,25 +195,24 @@ fn default_rate_limit_pct_per_step() -> u32 {
 }
 
 pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
-    let mut full = Vec::with_capacity(points.len() + 2);
+    // BTreeMap keyed by temperature: later points override earlier ones
+    // ("last wins" on duplicate temps) and iteration is naturally sorted.
+    let mut map: BTreeMap<u32, u32> = BTreeMap::new();
     let has_zero = points.iter().any(|p| p[0] == 0);
     // Span the full plot domain: a point at the max temperature guarantees
     // the fan ramps to 100% before the edge instead of jumping at the last
     // defined point.
     let has_max = points.iter().any(|p| p[0] == CURVE_TEMP_MAX);
-    if !has_zero { full.push([0, 0]); }
-    full.extend(points.iter().copied());
-    if !has_max { full.push([CURVE_TEMP_MAX, 100]); }
-    full.sort_by_key(|p| p[0]);
-    let before = full.len();
-    // dedup_by_key keeps the first of equal keys; reverse first so the
-    // LAST point of a duplicate temperature wins ("later overrides earlier").
-    full.reverse();
-    full.dedup_by_key(|p| p[0]);
-    full.reverse();
-    if full.len() < before {
-        debug!("Curve has duplicate temperatures — later points override earlier ones");
+    if !has_zero {
+        map.insert(0, 0);
     }
+    for &[temp, duty] in points {
+        map.insert(temp, duty);
+    }
+    if !has_max {
+        map.insert(CURVE_TEMP_MAX, 100);
+    }
+    let full: Vec<[u32; 2]> = map.into_iter().map(|(t, d)| [t, d]).collect();
     full
 }
 
