@@ -333,6 +333,23 @@ fn view_settings(app: &App) -> Element<'_, Message> {
         ].spacing(4)
     );
 
+    let startup_enabled = app.startup_launch_enabled;
+    let startup_error = app.startup_launch_error.clone();
+    let startup_err_el: Element<'_, Message> = if let Some(err) = startup_error {
+        text(err).size(FONT_SMALL).style(|_theme: &iced::Theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }).into()
+    } else {
+        iced::widget::Space::new().into()
+    };
+    sw_content = sw_content.push(
+        row![
+            text("Launch at Startup:").size(FONT_BODY),
+            button(text(if startup_enabled { "ON" } else { "OFF" }).size(FONT_BODY))
+                .on_press(Message::StartupLaunchToggled(!startup_enabled))
+                .style(move |_theme, _status| mode_style(startup_enabled)),
+            startup_err_el,
+        ].spacing(8).align_y(iced::Alignment::Center)
+    );
+
     let mut content = column![].spacing(12).padding(20);
     content = content.push(title_row);
     content = content.push(hw_content);

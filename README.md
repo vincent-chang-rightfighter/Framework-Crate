@@ -17,7 +17,7 @@ Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-c
 - **Live Telemetry** — Real-time temperature chart (selectable 15/30/60s window, default 30s), per-sensor display with colored indicators, and fan RPM in the header
 - **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card, and USB-C / HDMI / DP port classification
 - **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download). AMD and other vendors are not supported.
-- **About Page** — Hardware info (CPU, RAM, display, BIOS), software settings (poll rate, refresh interval), GitHub link, and third-party license notices
+- **About Page** — Hardware info (CPU, RAM, display, BIOS), software settings (poll rate, refresh interval, launch at startup), GitHub link, and third-party license notices
 - **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit), icon restored automatically if Explorer restarts
 
 ## Requirements

@@ -12,6 +12,7 @@ fn main() {
     let lock_path = Path::new(&manifest_dir).join("Cargo.lock");
     let lock = std::fs::read_to_string(&lock_path).expect("Failed to read Cargo.lock");
     let mut current_name = String::new();
+    let mut found = false;
     for line in lock.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("name = ") {
@@ -20,8 +21,13 @@ fn main() {
             && current_name == "framework_lib"
         {
             println!("cargo:rustc-env=FRAMEWORK_LIB_VERSION={}", rest.trim_matches('"'));
+            found = true;
             break;
         }
+    }
+    if !found {
+        println!("cargo:warning=framework_lib version not found in Cargo.lock");
+        println!("cargo:rustc-env=FRAMEWORK_LIB_VERSION=unknown");
     }
 
     if cfg!(target_os = "windows") {

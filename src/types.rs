@@ -60,9 +60,16 @@ impl Config {
             if curve.curve.sensors.len() > 1 {
                 // The curve is driven by exactly one temperature sensor
                 // (single selection in the UI). Older configs could carry
-                // multiple sensors; keep the first one.
-                curve.curve.sensors.truncate(1);
-                debug!("Curve sensors were multi-select — kept first ({})", curve.curve.sensors[0]);
+                // multiple sensors; prefer a non-battery sensor so Battery
+                // never drives the fan (matches curve_control_temp).
+                if let Some(idx) = curve.curve.sensors.iter().position(|s| !is_battery_sensor(s)) {
+                    let keep = curve.curve.sensors[idx].clone();
+                    debug!("Curve sensors were multi-select — kept {} (Battery removed)", keep);
+                    curve.curve.sensors = vec![keep];
+                } else {
+                    curve.curve.sensors.truncate(1);
+                    debug!("Curve sensors were multi-select — kept first ({})", curve.curve.sensors[0]);
+                }
             }
             for point in &mut curve.curve.points {
                 // Both axes are canvas coordinates too: values outside the

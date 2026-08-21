@@ -22,14 +22,15 @@ const INTEL_MCHBAR_SHA256: &str = "3f82b832d99b4aac37d2a20fdb7c9baa2a3bc0488612c
 
 /// Get the local modules directory path (%APPDATA%/framework-crate/modules/).
 fn modules_dir() -> std::path::PathBuf {
-    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(appdata).join("framework-crate").join(MODULES_DIR_NAME)
+    let base = dirs::config_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join("framework-crate").join(MODULES_DIR_NAME)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn verify_module_hash(path: &std::path::Path, expected: &str) -> Result<(), &'static str> {
@@ -95,14 +96,20 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
         std::process::id(),
         crate::util::monotonic_ms(),
     ));
+    // PowerShell single-quoted strings escape ' as ''.  zip/dir come from
+    // %APPDATA% and could contain ' — without escaping the script would
+    // break or allow injection.  url is pinned but escaped for completeness.
+    let esc = |s: &str| s.replace('\'', "''");
     let script = format!(
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n\
-         Invoke-WebRequest -Uri '{url}' -OutFile '{zip}'\n\
+         Invoke-WebRequest -Uri '{url}' -OutFile '{zip}' -UseBasicParsing\n\
+         Remove-Item -Path '{dir}\\IntelMSR.bin' -Force -ErrorAction SilentlyContinue\n\
+         Remove-Item -Path '{dir}\\IntelMCHBAR.bin' -Force -ErrorAction SilentlyContinue\n\
          Expand-Archive -Path '{zip}' -DestinationPath '{dir}' -Force\n\
          Remove-Item '{zip}' -ErrorAction SilentlyContinue",
-        url = url,
-        zip = zip_path.display(),
-        dir = dir.display(),
+        url = esc(&url),
+        zip = esc(&zip_path.display().to_string()),
+        dir = esc(&dir.display().to_string()),
     );
     std::fs::write(&script_path, &script).map_err(|_| "failed to write script")?;
 
@@ -405,6 +412,56 @@ pub fn write_msr_pl1_pl2_public(
     let msr_blob = load_intel_msr_blob()?;
     let msr_handle = open_handle(&msr_blob)?;
     write_msr_pl1_pl2(&msr_handle, &params)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_mmio_pl1_pl2_public(
+    pl1_watts: f64,
+    pl1_enabled: bool,
+    pl1_clamped: bool,
+    pl1_time_s: f64,
+    pl2_watts: f64,
+    pl2_enabled: bool,
+    pl2_clamped: bool,
+    pl2_time_s: f64,
+    power_unit: f64,
+    time_unit: f64,
+) -> Result<(), &'static str> {
+    let params = PowerLimitParams {
+        pl1_watts,
+        pl1_enabled,
+        pl1_clamped,
+        pl1_time_s,
+        pl2_watts,
+        pl2_enabled,
+        pl2_clamped,
+        pl2_time_s,
+        power_unit,
+        time_unit,
+    };
+    let mchbar_blob = load_intel_mchbar_blob()?;
+    let mchbar_handle = open_handle(&mchbar_blob)?;
+    write_mmio_pl1_pl2(&mchbar_handle, &params)
+}
+
+/// Write both MSR and MMIO from a persisted `BiosDefaults` so Reset fully
+/// restores the original factory `min(MSR, MMIO)` state.
+pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<(), &'static str> {
+    write_msr_pl1_pl2_public(
+        bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
+        bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
+        bios.power_unit, bios.time_unit,
+    )?;
+    // MMIO may be absent on older persisted files (defaults 0) or on systems
+    // where MCHBAR was unreadable at first run — best-effort only.
+    if bios.pl1_mmio_watts > 0.0 || bios.pl2_mmio_watts > 0.0 {
+        let _ = write_mmio_pl1_pl2_public(
+            bios.pl1_mmio_watts, bios.pl1_mmio_enabled, bios.pl1_mmio_clamped, bios.pl1_mmio_time_s,
+            bios.pl2_mmio_watts, bios.pl2_mmio_enabled, bios.pl2_mmio_clamped, bios.pl2_mmio_time_s,
+            bios.power_unit, bios.time_unit,
+        );
+    }
+    Ok(())
 }
 
 /// Loaded PawnIO handle with associated DLL functions.
@@ -782,8 +839,11 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
     debug!("Sync thread stopped");
 }
 
-/// BIOS power limit defaults — captured once at startup, never overwritten by refresh().
-#[derive(Clone, Copy)]
+/// BIOS power limit defaults — captured once at first run and persisted to disk,
+/// never overwritten by subsequent refreshes so Reset always returns to the
+/// original factory values.  Stores both MSR and MMIO so the effective
+/// `min(MSR, MMIO)` is fully restored.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BiosDefaults {
     pub pl1_watts: f64,
     pub pl1_enabled: bool,
@@ -793,8 +853,83 @@ pub struct BiosDefaults {
     pub pl2_enabled: bool,
     pub pl2_clamped: bool,
     pub pl2_time_s: f64,
+    #[serde(default)]
+    pub pl1_mmio_watts: f64,
+    #[serde(default)]
+    pub pl1_mmio_enabled: bool,
+    #[serde(default)]
+    pub pl1_mmio_clamped: bool,
+    #[serde(default)]
+    pub pl1_mmio_time_s: f64,
+    #[serde(default)]
+    pub pl2_mmio_watts: f64,
+    #[serde(default)]
+    pub pl2_mmio_enabled: bool,
+    #[serde(default)]
+    pub pl2_mmio_clamped: bool,
+    #[serde(default)]
+    pub pl2_mmio_time_s: f64,
     pub power_unit: f64,
     pub time_unit: f64,
+}
+
+fn bios_defaults_path() -> Result<std::path::PathBuf, String> {
+    let cfg_path = crate::config::config_path()?;
+    Ok(cfg_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("bios_defaults.toml"))
+}
+
+fn load_persisted_bios_defaults() -> Option<BiosDefaults> {
+    let path = bios_defaults_path().ok()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let parsed: BiosDefaults = toml::from_str(&content).ok()?;
+    Some(parsed)
+}
+
+fn persist_bios_defaults(defaults: &BiosDefaults) -> Result<(), String> {
+    let path = bios_defaults_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create bios_defaults dir failed: {}", e))?;
+    }
+    let content = toml::to_string_pretty(defaults).map_err(|e| e.to_string())?;
+    // Write via temp file and atomic replace so a crash mid-write never leaves
+    // a corrupt bios_defaults.toml (same pattern as config.rs).
+    let tmp = path.with_extension(format!("tmp.{}", crate::util::current_time_ms()));
+    std::fs::write(&tmp, content.as_bytes())
+        .map_err(|e| format!("write tmp bios_defaults failed: {}", e))?;
+    // Use MoveFileExW on Windows for atomic replace; fallback to rename.
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+        let tmp_w: Vec<u16> = OsStr::new(&tmp).encode_wide().chain(std::iter::once(0)).collect();
+        let dst_w: Vec<u16> = OsStr::new(&path).encode_wide().chain(std::iter::once(0)).collect();
+        let ok = unsafe { MoveFileExW(tmp_w.as_ptr(), dst_w.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
+        if ok != 0 {
+            Ok(())
+        } else {
+            let _ = std::fs::remove_file(&path);
+            std::fs::rename(&tmp, &path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("rename bios_defaults failed: {}", e)
+            })?;
+            Ok(())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("rename bios_defaults failed: {}", e)
+        })?;
+        Ok(())
+    }
 }
 
 /// Shared CPU power state for background task and UI.
@@ -828,15 +963,38 @@ impl Default for CpuPowerState {
 impl CpuPowerState {
     pub fn refresh(&self) {
         let info = read_cpu_power();
-        self.available.store(info.available, Ordering::Release);
+        let is_available = info.available;
+        self.available.store(is_available, Ordering::Release);
         with_write_lock(&self.info, |guard| {
             *guard = Arc::new(info);
         });
+        // If we still lack the original BIOS snapshot and now have live data,
+        // capture it — on first ever run this persists the true factory values
+        // so Reset stays correct after the user has modified them.
+        if is_available && self.bios_defaults().is_none() {
+            self.init_bios_defaults();
+        }
     }
 
-    /// Capture BIOS defaults from current MSR read. Call once at startup
-    /// after the first `refresh()`. Never overwritten by subsequent refreshes.
+    /// Capture BIOS defaults from current MSR read. On first ever run the
+    /// values are persisted to `bios_defaults.toml` alongside `config.toml`;
+    /// subsequent runs load the persisted file so Reset always returns to the
+    /// original factory values even after the user has modified PL1/PL2.
+    /// Safe to call multiple times — only the first successful capture writes.
     pub fn init_bios_defaults(&self) {
+        // Already in memory — nothing to do.
+        if self.bios_defaults().is_some() {
+            return;
+        }
+        // Try to load previously persisted originals.
+        if let Some(persisted) = load_persisted_bios_defaults() {
+            with_write_lock(&self.bios, |guard| {
+                *guard = Arc::new(Some(persisted));
+            });
+            info!("Loaded persisted BIOS defaults: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s)",
+                persisted.pl1_watts, persisted.pl1_time_s, persisted.pl2_watts, persisted.pl2_time_s);
+            return;
+        }
         let info = self.snapshot();
         if !info.available { return; }
         let defaults = BiosDefaults {
@@ -848,9 +1006,23 @@ impl CpuPowerState {
             pl2_enabled: info.pl2_msr_enabled,
             pl2_clamped: info.pl2_msr_clamped,
             pl2_time_s: info.pl2_time_s,
+            pl1_mmio_watts: info.pl1_mmio,
+            pl1_mmio_enabled: info.pl1_mmio_enabled,
+            pl1_mmio_clamped: info.pl1_mmio_clamped,
+            pl1_mmio_time_s: info.pl1_mmio_time_s,
+            pl2_mmio_watts: info.pl2_mmio,
+            pl2_mmio_enabled: info.pl2_mmio_enabled,
+            pl2_mmio_clamped: info.pl2_mmio_clamped,
+            pl2_mmio_time_s: info.pl2_mmio_time_s,
             power_unit: info.power_unit,
             time_unit: info.time_unit,
         };
+        if let Err(e) = persist_bios_defaults(&defaults) {
+            warn!("Failed to persist BIOS defaults: {}", e);
+        } else {
+            info!("Persisted original BIOS defaults: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s)",
+                defaults.pl1_watts, defaults.pl1_time_s, defaults.pl2_watts, defaults.pl2_time_s);
+        }
         with_write_lock(&self.bios, |guard| {
             *guard = Arc::new(Some(defaults));
         });
@@ -1051,5 +1223,74 @@ mod tests {
         std::fs::write(&path, b"not-a-module").unwrap();
         assert!(verify_module_hash(&path, INTEL_MSR_SHA256).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bios_defaults_toml_roundtrip() {
+        let defaults = BiosDefaults {
+            pl1_watts: 30.0,
+            pl1_enabled: true,
+            pl1_clamped: false,
+            pl1_time_s: 28.0,
+            pl2_watts: 60.0,
+            pl2_enabled: true,
+            pl2_clamped: true,
+            pl2_time_s: 2.5,
+            pl1_mmio_watts: 30.0,
+            pl1_mmio_enabled: true,
+            pl1_mmio_clamped: false,
+            pl1_mmio_time_s: 28.0,
+            pl2_mmio_watts: 60.0,
+            pl2_mmio_enabled: true,
+            pl2_mmio_clamped: true,
+            pl2_mmio_time_s: 2.5,
+            power_unit: 0.125,
+            time_unit: 0.00098,
+        };
+        let toml_str = toml::to_string_pretty(&defaults).unwrap();
+        let parsed: BiosDefaults = toml::from_str(&toml_str).unwrap();
+        assert_eq!(defaults, parsed);
+    }
+
+    #[test]
+    fn bios_defaults_persist_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR");
+        unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", dir.path()) };
+        let defaults = BiosDefaults {
+            pl1_watts: 15.0,
+            pl1_enabled: true,
+            pl1_clamped: true,
+            pl1_time_s: 56.0,
+            pl2_watts: 45.0,
+            pl2_enabled: false,
+            pl2_clamped: false,
+            pl2_time_s: 8.0,
+            pl1_mmio_watts: 15.0,
+            pl1_mmio_enabled: true,
+            pl1_mmio_clamped: true,
+            pl1_mmio_time_s: 56.0,
+            pl2_mmio_watts: 45.0,
+            pl2_mmio_enabled: false,
+            pl2_mmio_clamped: false,
+            pl2_mmio_time_s: 8.0,
+            power_unit: 0.125,
+            time_unit: 0.001,
+        };
+        persist_bios_defaults(&defaults).unwrap();
+        let loaded = load_persisted_bios_defaults().expect("should load persisted");
+        assert_eq!(defaults, loaded);
+        // Second persist should overwrite (but init_bios_defaults would not call it if already loaded)
+        let defaults2 = BiosDefaults { pl1_watts: 99.0, ..defaults };
+        persist_bios_defaults(&defaults2).unwrap();
+        let loaded2 = load_persisted_bios_defaults().unwrap();
+        assert_eq!(loaded2.pl1_watts, 99.0);
+        unsafe {
+            if let Some(v) = prev {
+                std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", v);
+            } else {
+                std::env::remove_var("FRAMEWORK_CONTROL_CONFIG_DIR");
+            }
+        }
     }
 }

@@ -9,6 +9,7 @@ static CONFIG_SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Unique suffix per save call so concurrent writers (background task and
 /// exit-time sync save) never collide on the same temp file.
+/// Uses SeqCst for clarity; also correct under `CONFIG_SAVE_LOCK` with Relaxed.
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Version of the newest config snapshot written to disk. Writers bump and
@@ -21,7 +22,7 @@ static LAST_SAVED_VERSION: AtomicU64 = AtomicU64::new(0);
 /// running instances (each starts its counter at 0, so timestamp+counter
 /// alone can collide when two instances save in the same millisecond).
 fn unique_tmp_extension() -> String {
-    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let counter = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
     let timestamp = crate::util::current_time_ms();
     let pid = std::process::id();
     format!("toml.{}.{}.{}.tmp", timestamp, pid, counter)
@@ -56,8 +57,10 @@ fn default_config_dir() -> PathBuf {
 /// (invalid TOML).
 fn backup_corrupt_config(path: &std::path::Path) {
     let backup = path.with_extension(format!(
-        "toml.corrupt-{}",
-        crate::util::current_time_ms()
+        "toml.corrupt-{}-{}-{}",
+        crate::util::current_time_ms(),
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
     ));
     match std::fs::copy(path, &backup) {
         Ok(_) => tracing::warn!(
@@ -111,14 +114,14 @@ pub fn load() -> Result<Config, String> {
 /// newer shutdown-time save_config_now() and rolls the file back.
 pub fn save_versioned(config: &Config, ver: u64, sync: bool) -> Result<(), String> {
     let _guard = CONFIG_SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let newest = LAST_SAVED_VERSION.load(Ordering::Relaxed);
+    let newest = LAST_SAVED_VERSION.load(Ordering::SeqCst);
     if ver < newest {
         tracing::debug!("Skipping config save v{} (v{} already on disk)", ver, newest);
         return Ok(());
     }
     let result = save_impl(config, sync);
     if result.is_ok() {
-        LAST_SAVED_VERSION.store(ver, Ordering::Relaxed);
+        LAST_SAVED_VERSION.store(ver, Ordering::SeqCst);
     }
     result
 }
@@ -206,19 +209,26 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path) -> Result<(), S
         if success != 0 {
             return Ok(());
         }
-        // Fallback: back up dest → bak, then rename tmp → dest.
-        // .bak is preserved after success so users can manually recover if needed.
+        // Fallback: copy dest → bak (not rename) so dest remains until the
+        // final replace succeeds; if power is lost after copy, dest is still
+        // intact.  .bak is preserved after success so users can manually
+        // recover if needed.
         let bak = dest.with_extension("toml.bak");
         if dest.exists() {
-            let _ = std::fs::remove_file(&bak);
-            std::fs::rename(dest, &bak)
-                .map_err(|e| format!("backup rename failed: {}", e))?;
+            // Copy, not rename — dest stays in place until the atomic
+            // MoveFileExW/rename below succeeds.
+            if let Err(e) = std::fs::copy(dest, &bak) {
+                tracing::warn!("Failed to back up config to {:?}: {}", bak, e);
+            }
+            // Windows rename fails if dest exists, so remove it only after a
+            // successful backup copy.
+            let _ = std::fs::remove_file(dest);
         }
         match std::fs::rename(tmp, dest) {
             Ok(()) => Ok(()),
             Err(e) => {
                 if bak.exists()
-                    && let Err(restore_err) = std::fs::rename(&bak, dest)
+                    && let Err(restore_err) = std::fs::copy(&bak, dest)
                 {
                     tracing::warn!("Failed to restore config backup {:?} → {:?}: {}", bak, dest, restore_err);
                 }

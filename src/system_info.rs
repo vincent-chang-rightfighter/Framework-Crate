@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
+use std::os::windows::process::CommandExt;
 use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW};
 
 #[allow(clippy::upper_case_acronyms)]
@@ -560,6 +561,68 @@ fn registry_query_dword_from(hkey: HKEY, value_name: *const u16) -> Option<u32> 
     Some(u32::from_le_bytes(buf))
 }
 
+const STARTUP_TASK_NAME: &str = "FrameworkCrate";
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Whether the app is registered to launch at Windows startup via a
+/// scheduled task (ONLOGON with highest privileges, so it starts elevated
+/// without a UAC prompt).
+pub fn startup_launch_enabled() -> bool {
+    std::process::Command::new("schtasks")
+        .args(["/Query", "/TN", STARTUP_TASK_NAME])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Register (enabled) or remove (disabled) the Windows startup scheduled
+/// task. `/RL HIGHEST` runs the app elevated at logon without a UAC prompt;
+/// registering such a task requires the app itself to be running elevated.
+pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
+    let output = if enabled {
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("cannot resolve exe path: {e}"))?;
+        let exe_str = exe.to_str().ok_or("exe path is not valid UTF-8")?;
+        // Reject characters that would break the schtasks command line or allow
+        // injection via the /TR value. current_exe() is trusted, but a path
+        // containing quotes or shell metachars would produce a malformed task.
+        if exe_str.contains('"') || exe_str.contains('\'') || exe_str.contains('&') || exe_str.contains('|') || exe_str.contains(';') || exe_str.contains('%') || exe_str.contains('^') {
+            return Err("exe path contains invalid characters".to_string());
+        }
+        // Use raw_arg for the /TR value so a path with spaces is passed as a
+        // single quoted argument without double-escaping.  Command::args would
+        // escape the inner quotes as \" and the task would store literal
+        // backslashes, failing to launch on paths like `C:\Program Files\...`.
+        let mut cmd = std::process::Command::new("schtasks");
+        cmd.args(["/Create", "/TN", STARTUP_TASK_NAME, "/TR"]);
+        cmd.raw_arg(format!("\"{}\"", exe_str));
+        cmd.args(["/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.output()
+            .map_err(|e| format!("failed to run schtasks: {e}"))?
+    } else {
+        std::process::Command::new("schtasks")
+            .args(["/Delete", "/TN", STARTUP_TASK_NAME, "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("failed to run schtasks: {e}"))?
+    };
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = if !stderr.trim().is_empty() {
+        stderr.trim().to_string()
+    } else if !stdout.trim().is_empty() {
+        stdout.trim().to_string()
+    } else {
+        format!("exit code {}", output.status.code().unwrap_or(-1))
+    };
+    Err(detail)
+}
+
 // --- Tray icon functions ---
 //
 // SAFETY: All tray functions take `hwnd: isize` which is a window handle
@@ -874,6 +937,23 @@ mod tests {
     #[test]
     fn is_intel_cpu_does_not_panic() {
         let _ = super::is_intel_cpu();
+    }
+
+    #[test]
+    fn startup_launch_scheduled_task_round_trip() {
+        // Round-trip: enable creates the ONLOGON task, disable deletes it.
+        // Registering a /RL HIGHEST task requires elevation, so skip
+        // silently when running unelevated (debug tests / CI).
+        match super::set_startup_launch(true) {
+            Ok(()) => {
+                assert!(super::startup_launch_enabled(), "task should exist after enable");
+                super::set_startup_launch(false).expect("disable should succeed");
+                assert!(!super::startup_launch_enabled(), "task should be gone after disable");
+            }
+            Err(_) => {
+                eprintln!("skipping startup task round-trip: not elevated");
+            }
+        }
     }
 }
 

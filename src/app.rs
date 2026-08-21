@@ -181,6 +181,7 @@ pub enum Message {
     CollectDebugInfo,
     OpenProjectUrl,
     ToggleExpansionCardDebug,
+    StartupLaunchToggled(bool),
     InstallPawnIO,
     PawnIOInstalled(Result<(), String>),
     DownloadPawnIOModules,
@@ -215,6 +216,8 @@ pub struct App {
     pub init_complete: bool,
     pub config_save_failed: bool,
     pub expansion_card_debug: bool,
+    pub startup_launch_enabled: bool,
+    pub startup_launch_error: Option<String>,
     pub config_load_warning: Option<String>,
     pub show_quit_warning: bool,
     pub closing_window_id: Option<iced::window::Id>,
@@ -373,6 +376,8 @@ impl App {
             init_complete: false,
             config_save_failed: false,
             expansion_card_debug: false,
+            startup_launch_enabled: system_info::startup_launch_enabled(),
+            startup_launch_error: None,
             config_load_warning,
             show_quit_warning: false,
             closing_window_id: None,
@@ -977,13 +982,9 @@ impl App {
                                 } else {
                                     cpu_power.stop_sync();
                                     if let Some(bios) = bios
-                                        && let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
-                                            bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
-                                            bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
-                                            bios.power_unit, bios.time_unit,
-                                        )
+                                        && let Err(e) = crate::cpu_power::write_bios_defaults(&bios)
                                     {
-                                        warn!("Resume MSR write failed: {}", e);
+                                        warn!("Resume write failed: {}", e);
                                     }
                                 }
                             }
@@ -1148,6 +1149,17 @@ impl App {
                 self.expansion_card_debug = !self.expansion_card_debug;
                 // Also snapshot-backed (view_misc reads it from the snapshot).
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
+                Task::none()
+            }
+            Message::StartupLaunchToggled(enabled) => {
+                self.startup_launch_error = None;
+                match crate::system_info::set_startup_launch(enabled) {
+                    Ok(()) => self.startup_launch_enabled = enabled,
+                    Err(e) => {
+                        warn!("Failed to {} startup launch: {}", if enabled { "enable" } else { "disable" }, e);
+                        self.startup_launch_error = Some(e);
+                    }
+                }
                 Task::none()
             }
             Message::DismissConfigWarning => {
@@ -1569,12 +1581,8 @@ impl App {
                     // 250ms sync interval) — off the UI thread — then write the
                     // BIOS defaults so the thread cannot race the reset.
                     cpu_power.stop_sync();
-                    if let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(
-                        bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
-                        bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
-                        bios.power_unit, bios.time_unit,
-                    ) {
-                        warn!("Reset MSR write failed: {}", e);
+                    if let Err(e) = crate::cpu_power::write_bios_defaults(&bios) {
+                        warn!("Reset write failed: {}", e);
                     }
                 }).await;
                 Message::CpuPowerResetDone(write_result.is_ok())

@@ -46,10 +46,18 @@ impl CurveStepper {
                 self.transition_start_temp = temp;
             }
             Some(current) if curve_target != current => {
-                let should_apply = curve_target > current
-                    || hysteresis_c == 0
-                    || temp >= self.transition_start_temp
-                    || temp <= self.transition_start_temp.saturating_sub(hysteresis_c as i32);
+                let should_apply = if hysteresis_c == 0 {
+                    true
+                } else if curve_target > current {
+                    // Rising target: re-apply as soon as temp is back at/above
+                    // the start point. A small dip is tolerated, only a rise
+                    // should immediately raise the fan.
+                    temp >= self.transition_start_temp
+                } else {
+                    // Falling target: require temp to have dropped at least
+                    // hysteresis below the start point before lowering the fan.
+                    temp <= self.transition_start_temp.saturating_sub(hysteresis_c as i32)
+                };
                 if should_apply {
                     self.active_target = Some(curve_target);
                     self.transition_start_temp = temp;
@@ -74,6 +82,11 @@ impl CurveStepper {
 }
 
 pub fn calculate_duty_from_curve(temp: i32, full_points: &[[u32; 2]]) -> u32 {
+    if full_points.len() < 2 {
+        // Defensive: curve_full_points always returns >=2, but direct callers
+        // in tests or future code may pass a raw slice.
+        return 100;
+    }
     debug_assert!(full_points.len() >= 2, "full_points must have at least 2 elements (curve_full_points ensures this)");
     let temp = temp as f64;
     for w in full_points.windows(2) {

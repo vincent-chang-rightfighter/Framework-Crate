@@ -109,7 +109,7 @@ struct TempChartRenderer {
 /// Persistent state living in the widget `Tree` — survives `view()` rebuilds.
 struct TempChartState {
     cache: OnceCell<iced::widget::canvas::Cache<iced::Renderer>>,
-    /// Cache invalidation key: (samples Arc ptr, samples len, sensor_names Arc ptr).
+    /// Cache invalidation key: (samples Arc ptr, samples len, sensor_names Arc ptr, colors Arc ptr).
     ///
     /// SAFETY: `Arc` never reallocates its backing allocation, so the base
     /// pointer is stable for the lifetime of the allocation. Two `Arc`s
@@ -117,7 +117,7 @@ struct TempChartState {
     /// when `ViewSnapshot` clones a new `Arc` (i.e. new data arrived), which
     /// is exactly when the canvas needs re-drawing. This avoids hashing or
     /// deep-comparing the entire sample deque on every frame.
-    cached_key: Cell<(*const (), usize, *const (), i64)>,
+    cached_key: Cell<(*const (), usize, *const (), *const (), i64)>,
     /// Reused line-point buffer, kept in the tree so it is not re-allocated
     /// on every `view()` rebuild.
     points_buf: std::cell::RefCell<Vec<(f32, f32)>>,
@@ -127,7 +127,7 @@ impl Default for TempChartState {
     fn default() -> Self {
         Self {
             cache: OnceCell::new(),
-            cached_key: Cell::new((std::ptr::null::<()>(), 0, std::ptr::null::<()>(), 0)),
+            cached_key: Cell::new((std::ptr::null::<()>(), 0, std::ptr::null::<()>(), std::ptr::null::<()>(), 0)),
             points_buf: std::cell::RefCell::new(Vec::new()),
         }
     }
@@ -159,6 +159,7 @@ impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
             Arc::as_ptr(&self.samples) as *const (),
             self.samples.len(),
             Arc::as_ptr(&self.sensor_names) as *const (),
+            Arc::as_ptr(&self.colors) as *const (),
             self.window_seconds,
         );
         if state.cached_key.get() != key {
