@@ -248,8 +248,9 @@ pub struct App {
     /// Current window height (logical px), tracked via Resized events.
     pub window_height: Option<f32>,
     /// Whether the window height has been fitted to content. Once set, the
-    /// window stays at that height even when the content grows (e.g. battery
-    /// details expanded).
+    /// window stays at that height until a content-affecting toggle
+    /// (sensor/battery/curve/CPU settings) resets it via `height_set = false`,
+    /// allowing re-autosize for the new layout.
     pub height_set: bool,
     pub modules_download_error: Option<String>,
     pub pl1_edit: String,
@@ -801,17 +802,16 @@ impl App {
                 Some(Task::none())
             }
             Message::SensorToggled(idx, enabled) => {
-                let name = {
+                let (name, all_keys) = {
                     let cache = read_lock(&self.state.thermal.sensor_cache);
-                    cache.keys.get(idx).cloned()
+                    (cache.keys.get(idx).cloned(), cache.keys.clone())
                 };
                 let Some(name) = name else {
                     return Some(Task::none());
                 };
                 self.mutate_config(|cfg| {
                     if cfg.telemetry.selected_sensors.is_empty() {
-                        let cache = read_lock(&self.state.thermal.sensor_cache);
-                        cfg.telemetry.selected_sensors = cache.keys.clone();
+                        cfg.telemetry.selected_sensors = all_keys.clone();
                     }
                     if enabled {
                         if !cfg.telemetry.selected_sensors.contains(&name) {
@@ -1087,21 +1087,28 @@ impl App {
             }
             Message::ToggleSensorSettings => {
                 self.show_sensor_settings = !self.show_sensor_settings;
+                self.height_set = false;
                 Task::none()
             }
             Message::ChartWindowChanged(secs) => {
                 if crate::temp_chart::HISTORY_WINDOW_OPTIONS.contains(&secs) {
                     self.chart_window_seconds = secs;
+                    with_write_lock(&self.state.thermal.history, |hist| {
+                        Arc::make_mut(hist).set_window(secs);
+                    });
+                    self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 }
                 Task::none()
             }
             Message::ToggleCurveSettings => {
                 self.show_curve_settings = !self.show_curve_settings;
+                self.height_set = false;
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
             Message::ToggleCpuPowerSettings => {
                 self.show_cpu_power_settings = !self.show_cpu_power_settings;
+                self.height_set = false;
                 // This flag lives in the cached ViewSnapshot, so mark it dirty
                 // or the toggle only appears after an unrelated background poll.
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
@@ -1143,6 +1150,7 @@ impl App {
             }
             Message::ToggleBatteryDetails => {
                 self.show_battery_details = !self.show_battery_details;
+                self.height_set = false;
                 Task::none()
             }
             Message::ToggleExpansionCardDebug => {

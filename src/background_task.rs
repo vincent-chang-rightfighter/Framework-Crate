@@ -212,6 +212,7 @@ fn estimate_duty_from_thermal(state: &AppState) -> Option<u32> {
     }
 }
 
+#[allow(clippy::collapsible_if)]
 fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> bool {
     // Periodically reset fan_max_rpm to avoid stale readings from hardware changes.
     // Reset every 60 seconds so the max adapts to the actual current fan capability.
@@ -253,7 +254,19 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
             None => true,
         }
     };
-    if !changed { return false; }
+    if !changed {
+        // Even when temps/fans haven't changed, the chart's time base
+        // (`now_ms` = last sample's ts) would otherwise freeze and the
+        // next change would prune a large gap at once. Push a periodic
+        // sample so the window slides smoothly, but throttle to 1/s to
+        // avoid rebuilding the view every 200 ms when idle.
+        let history = read_lock(&state.thermal.history);
+        if let Some(last_ts) = history.last_timestamp() {
+            if now - last_ts < 1_000 {
+                return false;
+            }
+        }
+    }
 
     // Wrap temps in Arc for history samples — avoids deep clone on every history read
     let temps_for_history = std::sync::Arc::clone(&t.temps);
@@ -435,17 +448,10 @@ pub fn spawn(state: AppState) {
                         // fan_max_rpm here made the estimate read ~100% (the
                         // first post-resume rpm would become the new max).
                         bg_state2.fan.last_applied_duty.store(0, Ordering::Release);
-                        with_write_lock(&bg_state2.thermal.data, |guard| {
-                            *guard = Arc::new(None);
-                        });
-                        with_write_lock(&bg_state2.thermal.history, |hist| {
-                            let hist = Arc::make_mut(hist);
-                            *hist = temp_chart::ThermalHistory::new();
-                        });
-                        with_write_lock(&bg_state2.thermal.sensor_cache, |guard| {
-                            *guard = Arc::new(crate::app::SensorCache::default());
-                        });
-                        tracing::warn!("[RESUME] EC client, fan state, and thermal history reset after system resume");
+                        // Retain thermal history/sensor cache across resume so the chart
+                        // doesn't flash blank on the left; stale samples will be
+                        // pruned by the normal window-based retention.
+                        tracing::warn!("[RESUME] EC client and fan state reset after system resume (history retained)");
                     }
                     // Read fan mode from atomic (no config lock needed)
                     let fan_mode = crate::types::FanControlMode::from_u8(

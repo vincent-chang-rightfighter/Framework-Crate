@@ -36,6 +36,7 @@ pub struct ThermalHistory {
     draft: std::collections::VecDeque<TempSample>,
     published: Arc<std::collections::VecDeque<TempSample>>,
     last_publish_ms: i64,
+    window_ms: i64,
 }
 
 impl Default for ThermalHistory {
@@ -50,6 +51,22 @@ impl ThermalHistory {
             draft: std::collections::VecDeque::new(),
             published: Arc::new(std::collections::VecDeque::new()),
             last_publish_ms: 0,
+            window_ms: HISTORY_SECONDS * 1_000,
+        }
+    }
+
+    /// Update the retention window and immediately prune old samples.
+    /// Called on the UI thread when the user changes Chart Window.
+    pub fn set_window(&mut self, window_seconds: i64) {
+        self.window_ms = (window_seconds * 1_000).clamp(5_000, HISTORY_MAX_MS);
+        let now = crate::util::monotonic_ms() as i64;
+        let cutoff = now - self.window_ms;
+        while let Some(front) = self.draft.front() {
+            if front.ts_ms < cutoff {
+                self.draft.pop_front();
+            } else {
+                break;
+            }
         }
     }
 
@@ -57,7 +74,7 @@ impl ThermalHistory {
     /// Caller must hold the write lock.
     pub fn push_sample(&mut self, sample: TempSample, now_ms: i64) {
         self.draft.push_back(sample);
-        let cutoff = now_ms - HISTORY_MAX_MS;
+        let cutoff = now_ms - self.window_ms;
         while let Some(front) = self.draft.front() {
             if front.ts_ms <= cutoff {
                 self.draft.pop_front();
@@ -65,6 +82,10 @@ impl ThermalHistory {
                 break;
             }
         }
+    }
+
+    pub fn last_timestamp(&self) -> Option<i64> {
+        self.draft.back().map(|s| s.ts_ms)
     }
 
     /// Reader side: return an `Arc` snapshot of the history, re-publishing

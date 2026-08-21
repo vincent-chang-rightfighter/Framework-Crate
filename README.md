@@ -16,7 +16,7 @@ Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-c
 - **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity
 - **Live Telemetry** — Real-time temperature chart (selectable 15/30/60s window, default 30s), per-sensor display with colored indicators, and fan RPM in the header
 - **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card, and USB-C / HDMI / DP port classification
-- **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download). AMD and other vendors are not supported.
+- **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download); original factory limits are saved on first run for `Reset`. AMD and other vendors are not supported.
 - **About Page** — Hardware info (CPU, RAM, display, BIOS), software settings (poll rate, refresh interval, launch at startup), GitHub link, and third-party license notices
 - **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit), icon restored automatically if Explorer restarts
 
@@ -120,6 +120,8 @@ framework_lib (CrosEc) → background_task → Arc<RwLock> → UI (view reads)
 
 Config file location: `%APPDATA%/framework-crate/config.toml`
 
+On first run with PawnIO available, the original factory PL1/PL2 (MSR + MMIO watts, enabled, clamped, time window, and RAPL units) are saved to `%APPDATA%/framework-crate/bios_defaults.toml`. `Reset` in the UI restores this persisted snapshot (the effective `min(MSR, MMIO)`). Delete that file to re-capture the current BIOS values on next launch.
+
 ```toml
 [fan]
 mode = "curve"  # "disabled" | "manual" | "curve"
@@ -173,6 +175,8 @@ The section reads and optionally writes PL1/PL2 via official PawnIO Modules. Tho
 3. The app fetches `IntelMSR.bin` and `IntelMCHBAR.bin` from [PawnIO Modules Releases](https://github.com/namazso/PawnIO.Modules/releases) (version 0.2.10), checks pinned SHA-256 hashes, and caches them in `%APPDATA%/framework-crate/modules/`.
 
 A hash mismatch or failed download is rejected; the files are deleted and CPU Power stays unavailable until you retry.
+
+The first successful RAPL read also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` and resume-from-sleep both restore `min(MSR, MMIO)` from that snapshot.
 
 **Requirements:**
 - PawnIO installed

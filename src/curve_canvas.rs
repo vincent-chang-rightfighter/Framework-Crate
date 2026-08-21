@@ -196,21 +196,18 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
             }
             return None;
         };
-        let sorted: Vec<[u32; 2]> = {
-            let mut v = self.points.to_vec();
-            v.sort_by_key(|p| p[0]);
-            v
-        };
-
-        // Find nearest point within HIT_RADIUS, mapped back to the config
-        // point index so hover/drag identity survives re-sorting.
-        let nearest = sorted.iter().enumerate().min_by(|(_, a), (_, b)| {
-            let da = cursor_pos.distance(layout.to_screen(a[0] as f32, a[1] as f32));
-            let db = cursor_pos.distance(layout.to_screen(b[0] as f32, b[1] as f32));
-            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-        }).filter(|(_, pt)| {
-            cursor_pos.distance(layout.to_screen(pt[0] as f32, pt[1] as f32)) <= HIT_RADIUS
-        }).map(|(i, _)| self.sorted_indices[i]);
+        // Use pre-sorted indices to avoid allocating a sorted Vec per mouse move.
+        let mut nearest: Option<usize> = None;
+        let mut best_dist = f32::INFINITY;
+        for &config_idx in &self.sorted_indices {
+            let pt = &self.points[config_idx];
+            let dist = cursor_pos.distance(layout.to_screen(pt[0] as f32, pt[1] as f32));
+            if dist < best_dist {
+                best_dist = dist;
+                nearest = Some(config_idx);
+            }
+        }
+        let nearest = nearest.filter(|_| best_dist <= HIT_RADIUS);
 
         match event {
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
@@ -291,12 +288,8 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
         }
         if let Some(pos) = cursor.position_in(bounds) {
             let layout = Layout::new(bounds.size());
-            let sorted: Vec<[u32; 2]> = {
-                let mut v = self.points.to_vec();
-                v.sort_by_key(|p| p[0]);
-                v
-            };
-            let near = sorted.iter().any(|pt| {
+            let near = self.sorted_indices.iter().any(|idx| {
+                let pt = &self.points[*idx];
                 pos.distance(layout.to_screen(pt[0] as f32, pt[1] as f32)) <= HIT_RADIUS
             });
             if near {
@@ -352,11 +345,9 @@ fn draw_curve_contents(
             .with_color(crate::style::COLOR_CURVE).with_width(2.0));
 
         // Draw control points as circles, in sorted temperature order.
-        let mut sorted_points: Vec<[u32; 2]> = points.to_vec();
-        sorted_points.sort_by_key(|p| p[0]);
-        for (sorted_pos, p) in sorted_points.iter().enumerate() {
+        for &config_idx in sorted_indices.iter() {
+            let p = &points[config_idx];
             let center = to_screen(p[0] as f32, p[1] as f32);
-            let config_idx = sorted_indices[sorted_pos];
             let (fill_color, stroke_color, r) = if drag_idx == Some(config_idx) {
                 (crate::style::COLOR_CURVE, Color::WHITE, POINT_RADIUS + 2.0)
             } else if hover_idx == Some(config_idx) {

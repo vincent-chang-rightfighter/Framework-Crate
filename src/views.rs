@@ -256,6 +256,10 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     crate::probe::HeightProbe::wrap(root.into(), Arc::clone(&app.content_height))
 }
 
+/// About/Settings page — intentionally bypasses `ViewSnapshot` caching and reads
+/// `App` live. This is a modal screen (not the hot main view) and is shown
+/// infrequently, so the extra rebuild cost is negligible and it avoids
+/// snapshotting rarely-used settings state.
 fn view_settings(app: &App) -> Element<'_, Message> {
     let versions = read_lock(&app.state.system.versions);
 
@@ -547,18 +551,14 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
             let chart_colors = Arc::clone(&cache.colors);
 
             let mut list_content = column![].spacing(2);
-            let mut temp_buf = String::with_capacity(8);
 
             for (idx, name) in sorted_sensors.iter().enumerate() {
                 if let Some(temp) = thermal.temps.get(name) {
                     let color = chart_colors.get(idx).copied().unwrap_or(iced::Color::WHITE);
-                    temp_buf.clear();
-                    use std::fmt::Write;
-                    let _ = write!(temp_buf, "{}°C", temp);
                     let row = row![
                         colored_dot(color, 10.0),
                         text(name.as_str()).size(FONT_BODY).width(Length::Fill),
-                        text(temp_buf.clone()).size(FONT_BODY),
+                        text(format!("{}°C", temp)).size(FONT_BODY),
                     ].align_y(iced::Alignment::Center).spacing(6);
                     list_content = list_content.push(row);
                 }
@@ -781,13 +781,12 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                 content = content.push(settings_panel);
 
                 for (chunk_idx, chunk) in curve.curve.points.chunks(3).enumerate() {
-                    let items: Vec<Element<'_, Message>> = chunk.iter().enumerate().map(|(offset, point)| {
+                    let mut r = iced::widget::Row::new().spacing(12);
+                    for (offset, point) in chunk.iter().enumerate() {
                         let idx = chunk_idx * 3 + offset;
-                        text(format!("P{}: {}°C -> {}%", idx + 1, point[0], point[1]))
-                            .size(FONT_BODY)
-                            .into()
-                    }).collect();
-                    content = content.push(row(items).spacing(12));
+                        r = r.push(text(format!("P{}: {}°C -> {}%", idx + 1, point[0], point[1])).size(FONT_BODY));
+                    }
+                    content = content.push(r);
                 }
 
                 let pts = &curve.curve.points;
