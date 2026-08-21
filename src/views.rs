@@ -44,6 +44,8 @@ pub(crate) struct ViewSnapshot {
     pub pl2_clamped: bool,
     pub cpu_power_error: Option<String>,
     pub intel_cpu: bool,
+    pub curve_points: Arc<[[u32; 2]]>,
+    pub curve_marks: Arc<Vec<crate::curve_canvas::SensorMark>>,
 }
 
 impl ViewSnapshot {
@@ -57,9 +59,62 @@ impl ViewSnapshot {
         let per_fan_duty = Arc::clone(&read_lock(&app.state.fan.per_fan_duty));
         let cpu_power = app.state.cpu_power.snapshot();
         let sync_enabled = app.state.cpu_power.sync_enabled.load(Ordering::Acquire);
+        let config = Arc::clone(&read_lock(&app.state.lifecycle.config));
+        let curve_points: Arc<[[u32; 2]]> = config
+            .fan
+            .curve
+            .as_ref()
+            .map(|c| Arc::from(c.curve.points.as_slice()))
+            .unwrap_or_else(|| Arc::from(Vec::<[u32; 2]>::new() as Vec<[u32; 2]>));
+        let curve_marks: Arc<Vec<crate::curve_canvas::SensorMark>> = if let Some(thermal) = thermal_snap.data.as_ref().as_ref() {
+            if let Some(curve) = config.fan.curve.as_ref() {
+            let keys = &thermal_snap.sensor_cache.keys;
+            let sensors: Vec<&str> = {
+                let configured: Vec<&str> = curve.curve.sensors.iter().map(|s| s.as_str()).collect();
+                let has_reading = configured.iter().any(|s| thermal.temps.contains_key(*s));
+                if has_reading {
+                    configured
+                } else {
+                    let mut best: Option<(&str, i32)> = None;
+                    for (name, t) in thermal.temps.iter() {
+                        let name: &str = name;
+                        if crate::types::is_battery_sensor(name) {
+                            continue;
+                        }
+                        if best.is_none_or(|(_, bt)| *t > bt) {
+                            best = Some((name, *t));
+                        }
+                    }
+                    if best.is_none() {
+                        best = thermal
+                            .temps
+                            .iter()
+                            .max_by_key(|(_, t)| **t)
+                            .map(|(name, t)| (name.as_str(), *t));
+                    }
+                    best.into_iter().map(|(n, _)| n).collect()
+                }
+            };
+            let mut marks = Vec::new();
+            for name in sensors {
+                if let Some(t) = thermal.temps.get(name) {
+                    let idx = keys.iter().position(|k| k == name).unwrap_or(0);
+                    marks.push(crate::curve_canvas::SensorMark {
+                        temp: *t,
+                        color: crate::style::SENSOR_COLORS[idx % crate::style::SENSOR_COLORS.len()],
+                    });
+                }
+            }
+            Arc::new(marks)
+            } else {
+                Arc::new(Vec::new())
+            }
+        } else {
+            Arc::new(Vec::new())
+        };
         Self {
             thermal: thermal_snap.data,
-            config: Arc::clone(&read_lock(&app.state.lifecycle.config)),
+            config,
             sensor_cache: thermal_snap.sensor_cache,
             temp_history: thermal_snap.temp_history,
             battery: Arc::clone(&read_lock(&app.state.battery.info)),
@@ -89,6 +144,8 @@ impl ViewSnapshot {
             pl2_clamped: app.pl2_clamped,
             cpu_power_error: app.cpu_power_error.clone(),
             intel_cpu: app.state.system.intel_cpu.load(Ordering::Acquire),
+            curve_points,
+            curve_marks,
         }
     }
 }
@@ -494,19 +551,11 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
                 }
                 settings_content = settings_content.push(window_row);
 
-                // Build a lookup set once instead of a linear scan per row
-                // (selected_sensors is small, but the panel rebuilds every frame).
-                let selected_set: std::collections::HashSet<&str> = if all_empty {
-                    std::collections::HashSet::new()
-                } else {
-                    config.telemetry.selected_sensors.iter().map(|s| s.as_str()).collect()
-                };
-
                 for (idx, name) in cache.keys.iter().enumerate() {
-                    // The loop index is the position in `cache.keys`, so use
-                    // it directly instead of a per-row linear scan.
+                    // Small Vec (≤8) — linear `contains` is cheaper than
+                    // building a `HashSet` per frame and has no allocation.
                     let color = SENSOR_COLORS[idx % SENSOR_COLORS.len()];
-                    let is_on = all_empty || selected_set.contains(name.as_str());
+                    let is_on = all_empty || config.telemetry.selected_sensors.contains(name);
                     let on_off = if is_on { "On" } else { "Off" };
                     let on_color = if is_on { COLOR_GREEN } else { COLOR_GRAY };
                     let bg_color = if is_on { color } else { COLOR_DARK };
@@ -789,55 +838,11 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                     content = content.push(r);
                 }
 
-                let pts = &curve.curve.points;
-                let all_pts = Arc::clone(&snap.curve_full_points);
-
-                // Live sensor markers: whichever sensors drive the curve
-                // (configured list, or the hottest non-battery fallback).
-                let marks: std::sync::Arc<Vec<crate::curve_canvas::SensorMark>> = {
-                    let mut marks = Vec::new();
-                    if let Some(thermal) = snap.thermal.as_ref().as_ref() {
-                        let keys = &snap.sensor_cache.keys;
-                        let sensors: Vec<&str> = {
-                            // Matches curve_control_temp: configured sensors
-                            // if any have a reading, otherwise the hottest
-                            // non-battery sensor, else any hottest sensor.
-                            let configured: Vec<&str> = curve.curve.sensors.iter().map(|s| s.as_str()).collect();
-                            let has_reading = configured.iter().any(|s| thermal.temps.contains_key(*s));
-                            if has_reading {
-                                configured
-                            } else {
-                                let mut best: Option<(&str, i32)> = None;
-                                for (name, t) in thermal.temps.iter() {
-                                    let name: &str = name;
-                                    if crate::types::is_battery_sensor(name) {
-                                        continue;
-                                    }
-                                    if best.is_none_or(|(_, bt)| *t > bt) {
-                                        best = Some((name, *t));
-                                    }
-                                }
-                                if best.is_none() {
-                                    best = thermal.temps.iter()
-                                        .max_by_key(|(_, t)| **t)
-                                        .map(|(name, t)| (name.as_str(), *t));
-                                }
-                                best.into_iter().map(|(n, _)| n).collect()
-                            }
-                        };
-                        for name in sensors {
-                            if let Some(t) = thermal.temps.get(name) {
-                                let idx = keys.iter().position(|k| k == name).unwrap_or(0);
-                                marks.push(crate::curve_canvas::SensorMark {
-                                    temp: *t,
-                                    color: SENSOR_COLORS[idx % SENSOR_COLORS.len()],
-                                });
-                            }
-                        }
-                    }
-                    Arc::new(marks)
-                };
-                let canvas = crate::curve_canvas::view_curve(pts, &all_pts, &marks);
+                let canvas = crate::curve_canvas::view_curve(
+                    Arc::clone(&snap.curve_points),
+                    Arc::clone(&snap.curve_full_points),
+                    Arc::clone(&snap.curve_marks),
+                );
 
                 let mut curve_area = column![].spacing(2);
                 curve_area = curve_area.push(canvas);

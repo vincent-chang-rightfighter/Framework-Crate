@@ -174,7 +174,7 @@ fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
             f.sync_all().map_err(|e| format!("sync tmp failed: {}", e))?;
         }
         drop(f);
-        atomic_replace(&tmp_path, &path)
+        atomic_replace(&tmp_path, &path, sync)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp_path);
@@ -182,7 +182,7 @@ fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
     result
 }
 
-fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path, sync: bool) -> Result<(), String> {
     // On Windows, std::fs::rename fails if dest exists.
     // Use MoveFileExW with MOVEFILE_REPLACE_EXISTING for atomic replacement.
     #[cfg(windows)]
@@ -192,9 +192,6 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path) -> Result<(), S
         use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
 
         const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-        // Write-through: flush the directory entry so the rename survives a
-        // power loss right after the call (config files are small and saves
-        // are rare, so the cost is negligible).
         const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
 
         let tmp_wide: Vec<u16> = OsStr::new(tmp).encode_wide().chain(std::iter::once(0)).collect();
@@ -205,7 +202,14 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path) -> Result<(), S
         // SAFETY: MoveFileExW atomically replaces dest with tmp on the same volume.
         // Both paths are null-terminated UTF-16 wide strings. tmp and dest are on
         // the same directory (same volume), so MOVEFILE_REPLACE_EXISTING is atomic.
-        let success = unsafe { MoveFileExW(tmp_wide.as_ptr(), dest_wide.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
+        // Only use WRITE_THROUGH when durability is required (sync=true, e.g. quit);
+        // debounced background saves use `sync=false` and avoid the extra flush.
+        let flags = if sync {
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+        } else {
+            MOVEFILE_REPLACE_EXISTING
+        };
+        let success = unsafe { MoveFileExW(tmp_wide.as_ptr(), dest_wide.as_ptr(), flags) };
         if success != 0 {
             return Ok(());
         }
@@ -238,6 +242,7 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path) -> Result<(), S
     }
     #[cfg(not(windows))]
     {
+        let _ = sync;
         // On Unix, rename is atomic and replaces dest
         std::fs::rename(tmp, dest).map_err(|e| format!("rename failed: {}", e))
     }
@@ -261,7 +266,7 @@ mod tests {
         let tmp = dir.path().join("src.toml");
         let dest = dir.path().join("dest.toml");
         std::fs::write(&tmp, "content").unwrap();
-        atomic_replace(&tmp, &dest).unwrap();
+        atomic_replace(&tmp, &dest, true).unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "content");
         assert!(!tmp.exists());
     }
@@ -273,7 +278,7 @@ mod tests {
         let dest = dir.path().join("dest.toml");
         std::fs::write(&dest, "old").unwrap();
         std::fs::write(&tmp, "new").unwrap();
-        atomic_replace(&tmp, &dest).unwrap();
+        atomic_replace(&tmp, &dest, true).unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
         assert!(!tmp.exists());
     }
@@ -283,7 +288,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tmp = dir.path().join("nope.toml");
         let dest = dir.path().join("dest.toml");
-        assert!(atomic_replace(&tmp, &dest).is_err());
+        assert!(atomic_replace(&tmp, &dest, true).is_err());
     }
 
     #[test]
@@ -293,7 +298,7 @@ mod tests {
         let dest = dir.path().join("config.toml");
         std::fs::write(&dest, "old").unwrap();
         std::fs::write(&tmp, "new").unwrap();
-        atomic_replace(&tmp, &dest).unwrap();
+        atomic_replace(&tmp, &dest, true).unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
         // Note: .bak is only created in the fallback path (when MoveFileExW fails).
         // On Windows with atomic MoveFileExW, no .bak is expected.
@@ -305,7 +310,7 @@ mod tests {
         let tmp = dir.path().join("src.toml");
         let dest = dir.path().join("config.toml");
         std::fs::write(&tmp, "new").unwrap();
-        atomic_replace(&tmp, &dest).unwrap();
+        atomic_replace(&tmp, &dest, true).unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
         // No .bak should be created when dest didn't exist
         assert!(!dest.with_extension("toml.bak").exists());

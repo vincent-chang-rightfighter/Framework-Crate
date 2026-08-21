@@ -22,20 +22,19 @@ pub struct SensorMark {
 }
 
 pub fn view_curve(
-    points: &[[u32; 2]],
-    all_pts: &Arc<Vec<[u32; 2]>>,
-    marks: &Arc<Vec<SensorMark>>,
+    points: Arc<[[u32; 2]]>,
+    all_pts: Arc<Vec<[u32; 2]>>,
+    marks: Arc<Vec<SensorMark>>,
 ) -> Element<'static, crate::Message> {
-    let points_arc: Arc<[[u32; 2]]> = Arc::from(points);
     // Build a mapping from sorted position back to the original config
     // index so that dragging a rendered point emits the correct index.
     let mut sorted_indices: Vec<usize> = (0..points.len()).collect();
     sorted_indices.sort_by_key(|&i| points[i][0]);
     iced::widget::canvas(CurveRenderer {
-        all_pts: Arc::clone(all_pts),
-        points: points_arc,
+        all_pts,
+        points,
         sorted_indices,
-        marks: Arc::clone(marks),
+        marks,
     })
     .width(Length::Fill)
     .height(180)

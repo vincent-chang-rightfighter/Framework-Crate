@@ -308,49 +308,56 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
 }
 
 pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<cli::EcClient>) {
-    let ec_clone = Arc::clone(ec);
-    let thermal_fut = tokio::task::spawn_blocking(move || ec_clone.thermal());
     let battery_ref = Arc::clone(&state.battery.info);
-    let ec_clone2 = Arc::clone(ec);
-    let power_fut = tokio::task::spawn_blocking(move || ec_clone2.power());
     let kblight_ref = Arc::clone(&state.peripherals.kblight);
-    let ec_clone3 = Arc::clone(ec);
-    let kb_fut = tokio::task::spawn_blocking(move || ec_clone3.kblight_get());
     let pd_ports_ref = Arc::clone(&state.peripherals.pd_ports);
     let pd_history_ref = Arc::clone(&state.peripherals.pd_ports_history);
-    let ec_clone4 = Arc::clone(ec);
-    let pd_fut = tokio::task::spawn_blocking(move || ec_clone4.pd_ports());
     let exp_ref = Arc::clone(&state.peripherals.expansion_cards);
-    let ec_clone5 = Arc::clone(ec);
-    let exp_fut = tokio::task::spawn_blocking(move || ec_clone5.expansion_cards());
+    let ec_clone = Arc::clone(ec);
+    // Single blocking task for all EC reads — 1 wake instead of 5, at the
+    // cost of sum latency (~250ms vs ~100ms) which is acceptable for the
+    // one-shot init path.
+    let batch = tokio::task::spawn_blocking(move || {
+        (
+            ec_clone.thermal(),
+            ec_clone.power(),
+            ec_clone.kblight_get(),
+            ec_clone.pd_ports(),
+            ec_clone.expansion_cards(),
+        )
+    })
+    .await;
+    let (thermal_result, power_result, kb_result, pd_ports, exp_cards) = match batch {
+        Ok((t, p, kb, pd, exp)) => (t, p, kb, pd, exp),
+        Err(join_err) => {
+            warn!("refresh_all_data spawn panicked: {}", join_err);
+            return;
+        }
+    };
 
-    let (thermal_result, power_result, kb_result, pd_result, exp_result) = tokio::join!(
-        thermal_fut, power_fut, kb_fut, pd_fut, exp_fut
-    );
-
-    if let Ok(Ok(t)) = thermal_result {
+    if let Ok(t) = thermal_result {
         record_thermal_sample(state, t);
     }
-    if let Ok(Ok(bat)) = power_result {
+    if let Ok(bat) = power_result {
         with_write_lock(&battery_ref, |guard| {
             *guard = Arc::new(Some(crate::types::BatteryInfo { power_info: bat }));
         });
     }
-    if let Ok(Ok(kb)) = kb_result {
+    if let Ok(kb) = kb_result {
         with_write_lock(&kblight_ref, |guard| {
             *guard = Arc::new(Some(kb));
         });
     }
-    if let Ok(ports) = pd_result {
+    {
         with_write_lock(&pd_ports_ref, |guard| {
-            *guard = Arc::new(ports);
+            *guard = Arc::new(pd_ports);
         });
         mark_pd_usb_c_seen(&read_lock(&pd_ports_ref), &state.peripherals.pd_usb_c_seen);
         push_pd_ports_history(&pd_ports_ref, &pd_history_ref);
     }
-    if let Ok(cards) = exp_result {
+    {
         with_write_lock(&exp_ref, |guard| {
-            *guard = Arc::new(cards);
+            *guard = Arc::new(exp_cards);
         });
     }
     mark_view_dirty(state);

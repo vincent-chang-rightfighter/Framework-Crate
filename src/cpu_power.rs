@@ -145,17 +145,50 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
     }
 
     debug!("PawnIO modules extracted successfully to {}", dir.display());
+    invalidate_blob_cache();
     Ok(())
 }
 
-/// Load IntelMSR module blob.
-fn load_intel_msr_blob() -> Result<Vec<u8>, &'static str> {
-    read_verified_module(&modules_dir().join("IntelMSR.bin"), INTEL_MSR_SHA256)
+static MSR_BLOB_CACHE: std::sync::Mutex<Option<Arc<Vec<u8>>>> = std::sync::Mutex::new(None);
+static MCHBAR_BLOB_CACHE: std::sync::Mutex<Option<Arc<Vec<u8>>>> = std::sync::Mutex::new(None);
+
+fn invalidate_blob_cache() {
+    let _ = MSR_BLOB_CACHE.lock().map(|mut g| *g = None);
+    let _ = MCHBAR_BLOB_CACHE.lock().map(|mut g| *g = None);
 }
 
-/// Load IntelMCHBAR module blob.
+/// Load IntelMSR module blob (cached after first verified load).
+fn load_intel_msr_blob() -> Result<Vec<u8>, &'static str> {
+    {
+        if let Ok(guard) = MSR_BLOB_CACHE.lock()
+            && let Some(cached) = guard.as_ref()
+        {
+            return Ok((**cached).clone());
+        }
+    }
+    let blob = read_verified_module(&modules_dir().join("IntelMSR.bin"), INTEL_MSR_SHA256)?;
+    let arc = Arc::new(blob.clone());
+    if let Ok(mut guard) = MSR_BLOB_CACHE.lock() {
+        *guard = Some(arc);
+    }
+    Ok(blob)
+}
+
+/// Load IntelMCHBAR module blob (cached after first verified load).
 fn load_intel_mchbar_blob() -> Result<Vec<u8>, &'static str> {
-    read_verified_module(&modules_dir().join("IntelMCHBAR.bin"), INTEL_MCHBAR_SHA256)
+    {
+        if let Ok(guard) = MCHBAR_BLOB_CACHE.lock()
+            && let Some(cached) = guard.as_ref()
+        {
+            return Ok((**cached).clone());
+        }
+    }
+    let blob = read_verified_module(&modules_dir().join("IntelMCHBAR.bin"), INTEL_MCHBAR_SHA256)?;
+    let arc = Arc::new(blob.clone());
+    if let Ok(mut guard) = MCHBAR_BLOB_CACHE.lock() {
+        *guard = Some(arc);
+    }
+    Ok(blob)
 }
 
 /// CPU power limit information.
@@ -804,24 +837,56 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
     // override ends when the user or firmware stops fighting) instead of
     // dying on the first error.
     let mut write_failures: u32 = 0;
+    let mut mmio_write_failures: u32 = 0;
+    let mut last_msr_raw: Option<u64> = None;
+    let mut last_mmio_raw: Option<u64> = None;
     while running.load(Ordering::Relaxed) {
-        match write_msr_pl1_pl2(&msr_handle, &params) {
-            Ok(()) => {
-                write_failures = 0;
-            }
-            Err(e) => {
-                write_failures += 1;
-                if write_failures <= 5 {
-                    warn!("Sync thread MSR write failed: {}", e);
-                } else if write_failures == 6 {
-                    warn!("Sync thread MSR write keeps failing ({}), suppressing further warnings", e);
+        // Coalesce: skip write if the register already holds the target.
+        let (pl1_y, pl1_z) = encode_time_window(params.pl1_time_s, params.time_unit);
+        let (pl2_y, pl2_z) = encode_time_window(params.pl2_time_s, params.time_unit);
+        let pl1_enc = encode_power_limit(params.pl1_watts, params.pl1_enabled, params.pl1_clamped, params.power_unit, pl1_y, pl1_z);
+        let pl2_enc = encode_power_limit(params.pl2_watts, params.pl2_enabled, params.pl2_clamped, params.power_unit, pl2_y, pl2_z);
+        let msr_new_raw = ((pl2_enc as u64) << 32) | (pl1_enc as u64);
+        let mmio_new_raw = msr_new_raw;
+        let should_write_msr = last_msr_raw != Some(msr_new_raw);
+        let should_write_mmio = mchbar_handle.is_some() && last_mmio_raw != Some(mmio_new_raw);
+        if should_write_msr {
+            match write_msr_pl1_pl2(&msr_handle, &params) {
+                Ok(()) => {
+                    write_failures = 0;
+                    last_msr_raw = Some(msr_new_raw);
+                }
+                Err(e) => {
+                    write_failures += 1;
+                    if write_failures <= 5 {
+                        warn!("Sync thread MSR write failed: {}", e);
+                    } else if write_failures == 6 {
+                        warn!("Sync thread MSR write keeps failing ({}), suppressing further warnings", e);
+                    }
                 }
             }
+        } else {
+            write_failures = 0;
         }
-        if let Some(ref mchbar) = mchbar_handle
-            && let Err(e) = write_mmio_pl1_pl2(mchbar, &params)
-        {
-            warn!("Sync thread MMIO write failed: {}", e);
+        if should_write_mmio {
+            // `should_write_mmio` already implies `mchbar_handle.is_some()`
+            let mchbar = mchbar_handle.as_ref().expect("mchbar should be Some when should_write_mmio");
+            match write_mmio_pl1_pl2(mchbar, &params) {
+                Ok(()) => {
+                    mmio_write_failures = 0;
+                    last_mmio_raw = Some(mmio_new_raw);
+                }
+                Err(e) => {
+                    mmio_write_failures += 1;
+                    if mmio_write_failures <= 5 {
+                        warn!("Sync thread MMIO write failed: {}", e);
+                    } else if mmio_write_failures == 6 {
+                        warn!("Sync thread MMIO write keeps failing ({}), suppressing further warnings", e);
+                    }
+                }
+            }
+        } else {
+            mmio_write_failures = 0;
         }
         // Back off on persistent failures: a BIOS-locked register can never
         // succeed, and hammering the driver at 4 Hz forever wastes CPU and
