@@ -327,7 +327,7 @@ fn view_settings(app: &App) -> Element<'_, Message> {
             .style(btn_style),
     ];
 
-    let mut hw_content = column![].spacing(4);
+    let mut hw_content = column![].spacing(2);
     match versions.as_ref().as_ref() {
         Some(v) => {
             if let Some(ref t) = v.mainboard_type {
@@ -357,7 +357,7 @@ fn view_settings(app: &App) -> Element<'_, Message> {
         hw_content = hw_content.push(info_row("Display", &display_text));
     }
 
-    let mut sw_content = column![].spacing(4);
+    let mut sw_content = column![].spacing(2);
     if let Some(v) = versions.as_ref().as_ref() {
         if let Some(ref bios) = v.uefi_version {
             sw_content = sw_content.push(info_row("BIOS", bios));
@@ -436,6 +436,7 @@ fn view_settings(app: &App) -> Element<'_, Message> {
         ].spacing(8)
     );
 
+    content = content.push(space::vertical().height(8));
     content = content.push(
         column![
             text("Framework Crate — MIT License").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),

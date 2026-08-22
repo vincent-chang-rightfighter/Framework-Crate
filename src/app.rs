@@ -213,6 +213,10 @@ pub struct App {
     pub show_cpu_power_settings: bool,
     pub show_battery_details: bool,
     pub show_settings: bool,
+    /// When true the window starts hidden to tray (set by --minimized from
+    /// the schtasks logon trigger). The first Tick after init_complete
+    /// dispatches MinimizeToTray to actually hide the window.
+    pub start_minimized: bool,
     pub init_complete: bool,
     pub config_save_failed: bool,
     pub expansion_card_debug: bool,
@@ -293,7 +297,7 @@ pub struct AppState {
 }
 
 impl App {
-    pub(crate) fn new() -> (Self, Task<Message>) {
+    pub(crate) fn new(start_minimized: bool) -> (Self, Task<Message>) {
         let (loaded_config, config_load_warning) = match crate::config::load() {
             Ok(cfg) => (cfg, None),
             Err(e) => {
@@ -379,6 +383,7 @@ impl App {
             expansion_card_debug: false,
             startup_launch_enabled: system_info::startup_launch_enabled(),
             startup_launch_error: None,
+            start_minimized,
             config_load_warning,
             show_quit_warning: false,
             closing_window_id: None,
@@ -1089,6 +1094,16 @@ impl App {
                 self.rebuild_sensor_cache();
                 self.cached_snapshot = Some(crate::views::ViewSnapshot::from_app(self));
                 self.state.lifecycle.view_dirty.store(false, Ordering::Release);
+                // When launched by the schtasks logon trigger (--minimized),
+                // hide to tray immediately after init so the window never
+                // flashes on screen.
+                if self.start_minimized {
+                    self.start_minimized = false;
+                    return Task::batch([
+                        Task::perform(async {}, |_| Message::MinimizeToTray),
+                        tick_task(0),
+                    ]);
+                }
                 tick_task(0)
             }
             Message::StartupError(msg) => {
@@ -1771,7 +1786,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_cpu_power_rejects_nan_and_inf() {
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         app.pl1_edit = "nan".into();
         app.pl2_edit = "50".into();
         app.pl1_time_edit = "28".into();
@@ -1794,7 +1809,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_cpu_power_accepts_finite_values() {
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         app.pl1_edit = "40".into();
         app.pl2_edit = "80".into();
         app.pl1_time_edit = "28".into();

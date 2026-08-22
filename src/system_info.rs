@@ -656,7 +656,12 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
         // backslashes, failing to launch on paths like `C:\Program Files\...`.
         let mut cmd = std::process::Command::new("schtasks");
         cmd.args(["/Create", "/TN", STARTUP_TASK_NAME, "/TR"]);
-        cmd.raw_arg(format!("\"{}\"", exe_str));
+        // --minimized tells the single-instance guard to exit silently
+        // without restoring the existing window (avoids disrupting the
+        // user on lock-screen unlock, which also triggers ONLOGON).
+        // The /TR value is a full command line, so the exe path needs its
+        // own quotes INSIDE the /TR quotes: `"\"C:\path\app.exe\" --minimized"`.
+        cmd.raw_arg(format!("\"\\\"{}\\\" --minimized\"", exe_str));
         cmd.args(["/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]);
         cmd.creation_flags(CREATE_NO_WINDOW);
         cmd.output()
@@ -671,8 +676,11 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    // schtasks outputs errors in the system locale encoding (Big5/GBK on
+    // Chinese Windows), not UTF-8. from_utf8_lossy produces mojibake.
+    // Fall back to a generic message when the bytes are not valid UTF-8.
+    let stderr = String::from_utf8(output.stderr.clone()).unwrap_or_default();
+    let stdout = String::from_utf8(output.stdout.clone()).unwrap_or_default();
     let detail = if !stderr.trim().is_empty() {
         stderr.trim().to_string()
     } else if !stdout.trim().is_empty() {
@@ -680,7 +688,11 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     } else {
         format!("exit code {}", output.status.code().unwrap_or(-1))
     };
-    Err(detail)
+    if detail.is_empty() {
+        Err(format!("schtasks failed (exit code {})", output.status.code().unwrap_or(-1)))
+    } else {
+        Err(detail)
+    }
 }
 
 // --- Tray icon functions ---

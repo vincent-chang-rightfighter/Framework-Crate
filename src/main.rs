@@ -64,13 +64,18 @@ impl iced::Executor for SmallTokioExecutor {
 /// Single-instance guard. A second process (manual relaunch, or overlap with
 /// the schtasks logon task) would issue parallel EC I/O on the same LPC bus
 /// and race the tray window class / config writes.
-fn acquire_single_instance() -> Option<system_info::SingleInstanceGuard> {
+fn acquire_single_instance(minimized: bool) -> Option<system_info::SingleInstanceGuard> {
     match system_info::SingleInstanceGuard::acquire("FrameworkCrateSingleInstance") {
         Ok(guard) => Some(guard),
         Err(()) => {
             eprintln!("Framework Crate is already running.");
-            // Best effort: bring the existing window to the foreground.
-            if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
+            // Only bring the existing window to the foreground when the
+            // second instance was started manually (no --minimized). The
+            // schtasks ONLOGON trigger also fires on lock-screen unlock;
+            // silently exiting in that case avoids disrupting the user.
+            if !minimized
+                && let Some(hwnd) = system_info::find_window_by_title("Framework Crate")
+            {
                 system_info::restore_window_from_tray(hwnd);
                 system_info::force_foreground_window(hwnd);
             }
@@ -80,8 +85,9 @@ fn acquire_single_instance() -> Option<system_info::SingleInstanceGuard> {
 }
 
 fn main() {
+    let minimized = std::env::args().any(|a| a == "--minimized");
     // Hold for the whole process lifetime.
-    let _single_instance = acquire_single_instance();
+    let _single_instance = acquire_single_instance(minimized);
 
     #[cfg(not(test))]
     {
@@ -109,7 +115,7 @@ fn main() {
         iced::Theme::Dark
     }
 
-    iced::application(App::new, App::update, App::view)
+    iced::application(move || App::new(minimized), App::update, App::view)
         .title(app_title)
         .subscription(App::subscription)
         .theme(app_theme)
@@ -238,7 +244,7 @@ mod tests {
 
     // --- Integration tests: UI state toggles ---
 
-    // App::new() loads/saves the config file (test-isolated via config_path),
+    // App::new(false) loads/saves the config file (test-isolated via config_path),
     // so serialize tests that touch it to avoid cross-test state pollution.
     static APP_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -249,7 +255,7 @@ mod tests {
     #[tokio::test]
     async fn settings_toggle_flips_flag() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         assert!(!app.show_settings);
         let _ = app.update(Message::SettingsToggled);
         assert!(app.show_settings);
@@ -260,7 +266,7 @@ mod tests {
     #[tokio::test]
     async fn sensor_settings_toggle_flips_flag() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         assert!(!app.show_sensor_settings);
         let _ = app.update(Message::ToggleSensorSettings);
         assert!(app.show_sensor_settings);
@@ -271,7 +277,7 @@ mod tests {
     #[tokio::test]
     async fn chart_window_changed_validates_option() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         assert_eq!(app.chart_window_seconds, 30, "default window is 30s");
         let _ = app.update(Message::ChartWindowChanged(60));
         assert_eq!(app.chart_window_seconds, 60);
@@ -282,7 +288,7 @@ mod tests {
     #[tokio::test]
     async fn battery_details_toggle_flips_flag() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         assert!(!app.show_battery_details);
         let _ = app.update(Message::ToggleBatteryDetails);
         assert!(app.show_battery_details);
@@ -295,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn fan_mode_curve_creates_default_config() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         let _ = app.update(Message::FanModeChanged(FanControlMode::Curve));
         let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.fan.mode, FanControlMode::Curve);
@@ -305,7 +311,7 @@ mod tests {
     #[tokio::test]
     async fn fan_mode_disabled_sets_disabled() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         let _ = app.update(Message::FanModeChanged(FanControlMode::Curve));
         let _ = app.update(Message::FanModeChanged(FanControlMode::Disabled));
         let cfg = read_lock(&app.state.lifecycle.config);
@@ -315,7 +321,7 @@ mod tests {
     #[tokio::test]
     async fn fan_manual_duty_is_clamped() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         let _ = app.update(Message::FanDutyChanged(5));
         let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.fan.manual.as_ref().map(|m| m.duty_pct), Some(5));
@@ -324,7 +330,7 @@ mod tests {
     #[tokio::test]
     async fn fan_manual_duty_above_max_clamps() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         let _ = app.update(Message::FanDutyChanged(200));
         let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.fan.manual.as_ref().map(|m| m.duty_pct), Some(100));
@@ -333,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn fan_manual_duty_in_range_unchanged() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         let _ = app.update(Message::FanDutyChanged(60));
         let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.fan.manual.as_ref().map(|m| m.duty_pct), Some(60));
@@ -342,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn charge_limit_toggle_creates_default() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         let _ = app.update(Message::ChargeLimitToggled(true));
         let cfg = read_lock(&app.state.lifecycle.config);
         let limit = cfg.battery.charge_limit_max_pct;
@@ -353,7 +359,7 @@ mod tests {
     #[tokio::test]
     async fn charge_limit_changes_value() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         let _ = app.update(Message::ChargeLimitChanged(80));
         let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.battery.charge_limit_max_pct.map(|l| l.value), Some(80));
@@ -362,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn poll_rate_changes_config_and_atomic() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         let _ = app.update(Message::PollRateChanged(1000));
         let cfg = read_lock(&app.state.lifecycle.config);
         assert_eq!(cfg.telemetry.poll_ms, 1000);
@@ -372,7 +378,7 @@ mod tests {
     #[tokio::test]
     async fn ui_refresh_rate_changes_interval() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         let _ = app.update(Message::UiRefreshRateChanged(200));
         assert_eq!(app.tick_interval_ms, 200);
         let cfg = read_lock(&app.state.lifecycle.config);
@@ -402,7 +408,7 @@ mod tests {
     #[tokio::test]
     async fn close_request_in_non_manual_does_not_show_warning() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         let _ = app.update(Message::FanModeChanged(FanControlMode::Disabled));
         let id = iced::window::Id::unique();
         let _task = app.update(Message::CloseRequested(id));
@@ -412,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn quit_cancel_hides_warning() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         let _ = app.update(Message::QuitCanceled);
         assert!(!app.show_quit_warning);
     }
@@ -420,7 +426,7 @@ mod tests {
     #[tokio::test]
     async fn quit_duty_changes_clamped() {
         let _guard = app_config_lock();
-        let (mut app, _) = App::new();
+        let (mut app, _) = App::new(false);
         let _ = app.update(Message::QuitDutyChanged(5));
         assert_eq!(app.quit_duty_value, 5);
         let _ = app.update(Message::QuitDutyChanged(150));
