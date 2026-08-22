@@ -768,19 +768,31 @@ impl SyncThread {
     }
 
     /// Start the sync thread with the given PL1/PL2 parameters.
-    fn start(&mut self, params: PowerLimitParams) -> Result<(), &'static str> {
+    /// `external_alive` is `CpuPowerState.sync_alive` — kept in sync with the
+    /// thread's real lifecycle so the UI tick can detect thread death
+    /// (PawnIO load failure, handle open failure, panic) without locking.
+    fn start(&mut self, params: PowerLimitParams, external_alive: Arc<AtomicBool>) -> Result<(), &'static str> {
         self.stop();
 
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
         let alive = Arc::new(AtomicBool::new(true));
         let alive_clone = alive.clone();
+        let external_clone = external_alive;
 
         let handle = std::thread::Builder::new()
             .name("cpu-power-sync".to_string())
             .spawn(move || {
-                sync_thread_main(running_clone, params);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    sync_thread_main(running_clone, params);
+                }));
+                if result.is_err() {
+                    warn!("Sync thread panicked");
+                }
+                // Clear BOTH liveness flags on exit so the UI cannot show a
+                // stale "Syncing" state after an early return or panic.
                 alive_clone.store(false, Ordering::Release);
+                external_clone.store(false, Ordering::Release);
             })
             .map_err(|_| "failed to spawn sync thread")?;
 
@@ -838,43 +850,30 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
     // dying on the first error.
     let mut write_failures: u32 = 0;
     let mut mmio_write_failures: u32 = 0;
-    let mut last_msr_raw: Option<u64> = None;
-    let mut last_mmio_raw: Option<u64> = None;
     while running.load(Ordering::Relaxed) {
-        // Coalesce: skip write if the register already holds the target.
-        let (pl1_y, pl1_z) = encode_time_window(params.pl1_time_s, params.time_unit);
-        let (pl2_y, pl2_z) = encode_time_window(params.pl2_time_s, params.time_unit);
-        let pl1_enc = encode_power_limit(params.pl1_watts, params.pl1_enabled, params.pl1_clamped, params.power_unit, pl1_y, pl1_z);
-        let pl2_enc = encode_power_limit(params.pl2_watts, params.pl2_enabled, params.pl2_clamped, params.power_unit, pl2_y, pl2_z);
-        let msr_new_raw = ((pl2_enc as u64) << 32) | (pl1_enc as u64);
-        let mmio_new_raw = msr_new_raw;
-        let should_write_msr = last_msr_raw != Some(msr_new_raw);
-        let should_write_mmio = mchbar_handle.is_some() && last_mmio_raw != Some(mmio_new_raw);
-        if should_write_msr {
-            match write_msr_pl1_pl2(&msr_handle, &params) {
-                Ok(()) => {
-                    write_failures = 0;
-                    last_msr_raw = Some(msr_new_raw);
-                }
-                Err(e) => {
-                    write_failures += 1;
-                    if write_failures <= 5 {
-                        warn!("Sync thread MSR write failed: {}", e);
-                    } else if write_failures == 6 {
-                        warn!("Sync thread MSR write keeps failing ({}), suppressing further warnings", e);
-                    }
+        // Unconditional periodic rewrite: the whole point of this thread is to
+        // re-assert the user's limits against EC/firmware overrides. The
+        // register is NOT re-read here — a previous "skip when equal"
+        // optimization compared against our own last write (never the live
+        // hardware value), which silently disabled the sync after its first
+        // successful write.
+        match write_msr_pl1_pl2(&msr_handle, &params) {
+            Ok(()) => {
+                write_failures = 0;
+            }
+            Err(e) => {
+                write_failures += 1;
+                if write_failures <= 5 {
+                    warn!("Sync thread MSR write failed: {}", e);
+                } else if write_failures == 6 {
+                    warn!("Sync thread MSR write keeps failing ({}), suppressing further warnings", e);
                 }
             }
-        } else {
-            write_failures = 0;
         }
-        if should_write_mmio {
-            // `should_write_mmio` already implies `mchbar_handle.is_some()`
-            let mchbar = mchbar_handle.as_ref().expect("mchbar should be Some when should_write_mmio");
+        if let Some(ref mchbar) = mchbar_handle {
             match write_mmio_pl1_pl2(mchbar, &params) {
                 Ok(()) => {
                     mmio_write_failures = 0;
-                    last_mmio_raw = Some(mmio_new_raw);
                 }
                 Err(e) => {
                     mmio_write_failures += 1;
@@ -885,8 +884,6 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
                     }
                 }
             }
-        } else {
-            mmio_write_failures = 0;
         }
         // Back off on persistent failures: a BIOS-locked register can never
         // succeed, and hammering the driver at 4 Hz forever wastes CPU and
@@ -936,6 +933,16 @@ pub struct BiosDefaults {
     pub pl2_mmio_time_s: f64,
     pub power_unit: f64,
     pub time_unit: f64,
+    /// Power source at capture time. The snapshot reflects the OEM's limits
+    /// for THAT source; restoring an AC snapshot while on battery would
+    /// override the firmware's lower battery-mode protection, so resume
+    /// only writes when the source matches.
+    #[serde(default = "default_true_fn")]
+    pub captured_on_ac: bool,
+}
+
+fn default_true_fn() -> bool {
+    true
 }
 
 fn bios_defaults_path() -> Result<std::path::PathBuf, String> {
@@ -946,11 +953,64 @@ fn bios_defaults_path() -> Result<std::path::PathBuf, String> {
         .join("bios_defaults.toml"))
 }
 
-fn load_persisted_bios_defaults() -> Option<BiosDefaults> {
-    let path = bios_defaults_path().ok()?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let parsed: BiosDefaults = toml::from_str(&content).ok()?;
-    Some(parsed)
+fn bios_defaults_file_exists() -> bool {
+    bios_defaults_path().map(|p| p.exists()).unwrap_or(false)
+}
+
+/// Read the current AC-present state from the shared battery snapshot.
+/// Defaults to `true` (AC) when no reading exists yet — matching the
+/// pre-existing conservative default so the first capture records AC
+/// semantics unless the battery path has already published data.
+pub fn read_ac_present() -> bool {
+    match BATTERY_AC_SNAPSHOT.read() {
+        Ok(guard) => *guard,
+        Err(poisoned) => {
+            warn!("BATTERY_AC_SNAPSHOT poisoned (writer panicked); defaulting to AC");
+            *poisoned.into_inner()
+        }
+    }
+}
+
+static BATTERY_AC_SNAPSHOT: std::sync::RwLock<bool> = std::sync::RwLock::new(true);
+
+/// Publish the current AC state for `read_ac_present`. Called by the
+/// background thermal loop alongside its battery poll.
+pub fn publish_ac_snapshot(ac_present: bool) {
+    if let Ok(mut guard) = BATTERY_AC_SNAPSHOT.write() {
+        *guard = ac_present;
+    }
+}
+
+fn load_persisted_bios_defaults() -> Option<BiosDefaults> {    let path = bios_defaults_path().ok()?;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        // Missing file = first run, caller may capture current values.
+        Err(_) => return None,
+    };
+    match toml::from_str::<BiosDefaults>(&content) {
+        Ok(parsed) => Some(parsed),
+        Err(e) => {
+            // The file EXISTS but is corrupt. Never overwrite the original
+            // factory snapshot with live values in this case — back it up
+            // and refuse to capture until the user deletes it.
+            let backup = path.with_extension(format!(
+                "toml.corrupt-{}",
+                crate::util::current_time_ms()
+            ));
+            match std::fs::copy(&path, &backup) {
+                Ok(_) => warn!(
+                    "bios_defaults.toml is corrupt ({}); backed up to {} — NOT overwriting with live values. Delete the file to re-capture.",
+                    e,
+                    backup.display()
+                ),
+                Err(be) => warn!(
+                    "bios_defaults.toml is corrupt ({}) and backup failed: {}",
+                    e, be
+                ),
+            }
+            None
+        }
+    }
 }
 
 fn persist_bios_defaults(defaults: &BiosDefaults) -> Result<(), String> {
@@ -1060,8 +1120,18 @@ impl CpuPowerState {
                 persisted.pl1_watts, persisted.pl1_time_s, persisted.pl2_watts, persisted.pl2_time_s);
             return;
         }
+        // If the file exists but is corrupt, load_persisted_bios_defaults()
+        // already backed it up and logged — do NOT capture live values over
+        // it (that would destroy the factory snapshot permanently).
+        if bios_defaults_file_exists() {
+            warn!("bios_defaults.toml exists but could not be loaded; refusing to overwrite with live values");
+            return;
+        }
         let info = self.snapshot();
         if !info.available { return; }
+        // Record the power source at capture time so resume can refuse to
+        // restore an AC snapshot onto battery (or vice versa).
+        let captured_on_ac = read_ac_present();
         let defaults = BiosDefaults {
             pl1_watts: info.pl1_msr,
             pl1_enabled: info.pl1_msr_enabled,
@@ -1081,6 +1151,7 @@ impl CpuPowerState {
             pl2_mmio_time_s: info.pl2_mmio_time_s,
             power_unit: info.power_unit,
             time_unit: info.time_unit,
+            captured_on_ac,
         };
         if let Err(e) = persist_bios_defaults(&defaults) {
             warn!("Failed to persist BIOS defaults: {}", e);
@@ -1143,7 +1214,7 @@ impl CpuPowerState {
             let _ = old.join();
         }
         let mut thread = self.sync_thread.lock();
-        thread.start(params)?;
+        thread.start(params, Arc::clone(&self.sync_alive))?;
         self.sync_alive.store(true, Ordering::Release);
         self.sync_enabled.store(true, Ordering::Release);
         Ok(())
@@ -1311,6 +1382,7 @@ mod tests {
             pl2_mmio_time_s: 2.5,
             power_unit: 0.125,
             time_unit: 0.00098,
+            captured_on_ac: true,
         };
         let toml_str = toml::to_string_pretty(&defaults).unwrap();
         let parsed: BiosDefaults = toml::from_str(&toml_str).unwrap();
@@ -1341,6 +1413,7 @@ mod tests {
             pl2_mmio_time_s: 8.0,
             power_unit: 0.125,
             time_unit: 0.001,
+            captured_on_ac: false,
         };
         persist_bios_defaults(&defaults).unwrap();
         let loaded = load_persisted_bios_defaults().expect("should load persisted");

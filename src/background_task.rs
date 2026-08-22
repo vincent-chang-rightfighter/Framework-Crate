@@ -583,6 +583,7 @@ pub fn spawn(state: AppState) {
                                 tracing::info!("AC→battery transition detected, PL1/PL2 reset pending");
                             }
                             bg_state2.battery.prev_ac_present.store(ac_now, Ordering::Release);
+                            crate::cpu_power::publish_ac_snapshot(ac_now);
 
                             with_write_lock(&bg_state2.battery.info, |guard| {
                                 let new_info = crate::types::BatteryInfo { power_info: bat };

@@ -347,6 +347,15 @@ impl EcClient {
                     0xFC..=0xFF => continue,
                     _ => {
                         let temp = byte as i32 - 73;
+                        // EC returns 0x00 (and a few low values) when a sensor
+                        // is missing or its read failed. Decoding those to
+                        // negative temperatures would let the fan curve see
+                        // e.g. -73°C and park the fans at 0% duty while real
+                        // silicon could be hot. Drop implausible readings
+                        // instead of feeding them to control.
+                        if temp <= 0 {
+                            continue;
+                        }
                         let name = sensor_name(platform, i);
                         temps.insert(name, temp);
                     }

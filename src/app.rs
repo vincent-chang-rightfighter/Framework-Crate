@@ -965,6 +965,7 @@ impl App {
                         }
                         let cpu_power = self.state.cpu_power.clone();
                         let bios = cpu_power.bios_defaults();
+                        let was_custom_applied = self.pl_custom_applied;
                         let after = {
                             let cpu_power = cpu_power.clone();
                             move || {
@@ -979,12 +980,26 @@ impl App {
                                         info.pl2_msr, info.pl2_msr_enabled, info.pl2_msr_clamped, info.pl2_time_s,
                                         info.power_unit, info.time_unit,
                                     );
-                                } else {
+                                } else if was_custom_applied {
                                     cpu_power.stop_sync();
-                                    if let Some(bios) = bios
-                                        && let Err(e) = crate::cpu_power::write_bios_defaults(&bios)
-                                    {
-                                        warn!("Resume write failed: {}", e);
+                                    // Only restore when the user had applied custom
+                                    // limits: without a custom apply the firmware's
+                                    // own power management is authoritative, and
+                                    // blindly writing boot-time (possibly AC) defaults
+                                    // could override the OEM's battery-mode protection.
+                                    // Additionally refuse when the snapshot's capture
+                                    // power source differs from the current one — an
+                                    // AC snapshot must never land on battery.
+                                    if let Some(bios) = bios {
+                                        let ac_now = crate::cpu_power::read_ac_present();
+                                        let source_matches = bios.captured_on_ac == ac_now;
+                                        if !source_matches {
+                                            debug!("Resume: BIOS snapshot captured on {} but now on {}; skipping restore",
+                                                if bios.captured_on_ac { "AC" } else { "battery" },
+                                                if ac_now { "AC" } else { "battery" });
+                                        } else if let Err(e) = crate::cpu_power::write_bios_defaults(&bios) {
+                                            warn!("Resume write failed: {}", e);
+                                        }
                                     }
                                 }
                             }

@@ -61,7 +61,27 @@ impl iced::Executor for SmallTokioExecutor {
     }
 }
 
+/// Single-instance guard. A second process (manual relaunch, or overlap with
+/// the schtasks logon task) would issue parallel EC I/O on the same LPC bus
+/// and race the tray window class / config writes.
+fn acquire_single_instance() -> Option<system_info::SingleInstanceGuard> {
+    match system_info::SingleInstanceGuard::acquire("FrameworkCrateSingleInstance") {
+        Ok(guard) => Some(guard),
+        Err(()) => {
+            eprintln!("Framework Crate is already running.");
+            // Best effort: bring the existing window to the foreground.
+            if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
+                system_info::restore_window_from_tray(hwnd);
+                system_info::force_foreground_window(hwnd);
+            }
+            std::process::exit(0);
+        }
+    }
+}
+
 fn main() {
+    // Hold for the whole process lifetime.
+    let _single_instance = acquire_single_instance();
 
     #[cfg(not(test))]
     {

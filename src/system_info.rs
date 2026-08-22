@@ -212,7 +212,14 @@ pub fn hide_window_to_tray(hwnd: isize) {
         let mut placement = std::mem::zeroed::<WINDOWPLACEMENT>();
         placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
         if GetWindowPlacement(h, &mut placement) != 0 {
-            *SAVED_PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()) = Some(placement);
+            // Guard: if the window is already parked off-screen, its
+            // "normal" position reads -32000 and would overwrite the real
+            // saved coordinates — a second hide (e.g. minimize + close
+            // racing) would then make the window unrecoverable from the
+            // tray. Only accept an on-screen position.
+            if placement.rcNormalPosition.left > -10000 {
+                *SAVED_PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()) = Some(placement);
+            }
         }
         // Park off-screen. NOTE: SetWindowPlacement clamps negative coordinates
         // back to the virtual screen origin (0,0), leaving the window visible;
@@ -563,6 +570,59 @@ fn registry_query_dword_from(hkey: HKEY, value_name: *const u16) -> Option<u32> 
 
 const STARTUP_TASK_NAME: &str = "FrameworkCrate";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Process-wide single-instance guard backed by a Windows named mutex.
+/// The handle is intentionally never closed — the OS releases it when the
+/// process exits, which is exactly the desired lifetime.
+pub struct SingleInstanceGuard {
+    _handle: *mut core::ffi::c_void,
+}
+
+// The raw handle is only owned, never dereferenced after acquire; the guard
+// is not shared across threads beyond Move semantics.
+unsafe impl Send for SingleInstanceGuard {}
+
+/// Deliberately empty: the OS releases the named mutex when the process
+/// exits. An explicit `CloseHandle` would free it early if the guard were
+/// accidentally dropped before `main` returns.
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {}
+}
+
+impl SingleInstanceGuard {
+    /// Try to acquire the named mutex. Returns `Err(())` when another
+    /// instance already holds it.
+    pub fn acquire(name: &str) -> Result<Self, ()> {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn CreateMutexW(
+                lpMutexAttributes: *const core::ffi::c_void,
+                bInitialOwner: i32,
+                lpName: LPCWSTR,
+            ) -> *mut core::ffi::c_void;
+            fn GetLastError() -> u32;
+        }
+        const ERROR_ALREADY_EXISTS: u32 = 183;
+        let wide = to_wide(name);
+        // SAFETY: name is a null-terminated UTF-16 string; no security
+        // attributes needed. A non-null handle with ERROR_ALREADY_EXISTS
+        // means another instance owns the mutex.
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 1, wide.as_ptr()) };
+        if handle.is_null() {
+            // Mutex creation failed (rare) — allow this instance rather than
+            // blocking the app on a non-critical guard.
+            tracing::warn!("CreateMutexW failed; single-instance check skipped");
+            return Ok(Self { _handle: handle });
+        }
+        // SAFETY: trivial syscall wrapper reading thread-local error code,
+        // valid immediately after CreateMutexW in the same thread.
+        let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+        if exists {
+            return Err(());
+        }
+        Ok(Self { _handle: handle })
+    }
+}
 
 /// Whether the app is registered to launch at Windows startup via a
 /// scheduled task (ONLOGON with highest privileges, so it starts elevated
