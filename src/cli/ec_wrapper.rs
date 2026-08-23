@@ -163,12 +163,6 @@ pub fn classify_pd_port<'a>(
             hist_len += 1;
         }
     }
-    debug_assert!(
-        hist_len <= MAX_HIST,
-        "classify_pd_port received {} history samples, expected at most {}",
-        hist_len,
-        MAX_HIST
-    );
     let history = &hist_buf[..hist_len];
 
     tracing::debug!(
@@ -335,8 +329,9 @@ impl EcClient {
                     0xFC..=0xFF => continue,
                     _ => {
                         let temp = byte as i32 - 73;
-                        // Drop implausible low readings; e.g. 0x00 would decode to -73°C and park fans while silicon is hot.
-                        if temp <= 0 {
+                        // Drop implausible low readings (e.g. 0x00 decodes to -73°C).
+                        // Keep 0°C as valid in cold ambient; only filter negatives.
+                        if temp < 0 {
                             continue;
                         }
                         let name = sensor_name(platform, i);
@@ -528,7 +523,10 @@ impl EcClient {
         for i in 0u8..4 {
             let info = match (EcRequestGetPdPortState { port: i }).send_command(&self.ec) {
                 Ok(info) => info,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::debug!("pd_ports: port {} query failed: {:?}", i, e);
+                    continue;
+                }
             };
             let c_state = info.c_state;
             let pd_state = info.pd_state;
@@ -548,7 +546,7 @@ impl EcClient {
                 1 => "Dfp",
                 _ => "Disconnected",
             };
-            let watts_mw = voltage as u32 * current as u32 / 1000;
+            let watts_mw = ((voltage as u64 * current as u64) / 1000) as u32;
             let negotiated_watts = if watts_mw > 0 {
                 Some(watts_mw as f32 / 1000.0)
             } else {
@@ -580,15 +578,17 @@ impl EcClient {
 
     pub fn expansion_cards(&self) -> Vec<ExpansionCard> {
         let mut cards = Vec::new();
-        if let Ok(Some(board_id)) = self.ec.read_board_id_hc(
-            framework_lib::chromium_ec::commands::BoardIdType::Mainboard,
-        )
-            && board_id != 0
-        {
-            cards.push(ExpansionCard {
-                name: format!("Board ID: {:#06x}", board_id),
-                active_firmware: None,
-            });
+        match self.ec.read_board_id_hc(framework_lib::chromium_ec::commands::BoardIdType::Mainboard) {
+            Ok(Some(board_id)) => {
+                if board_id != 0 {
+                    cards.push(ExpansionCard {
+                        name: format!("Board ID: {:#06x}", board_id),
+                        active_firmware: None,
+                    });
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!("expansion_cards: board ID query failed: {:?}", e),
         }
         cards
     }

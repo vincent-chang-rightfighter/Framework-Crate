@@ -218,6 +218,7 @@ impl TrayManager {
         self.init_started_at = None;
         self.icon_loaded = false;
         self.last_notify_at = None;
+        self.just_restored_at = None;
         tracing::warn!("TrayManager state reset");
     }
 

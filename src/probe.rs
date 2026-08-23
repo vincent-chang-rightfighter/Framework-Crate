@@ -51,10 +51,10 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer>
         renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        let node = self
-            .content
-            .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits);
+        let Some(child) = tree.children.first_mut() else {
+            return layout::Node::new(limits.loose().max());
+        };
+        let node = self.content.as_widget_mut().layout(child, renderer, limits);
         *self.report.lock() = Some(node.size().height);
         node
     }
@@ -69,7 +69,9 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer>
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
+        if let Some(child) = tree.children.first() {
+            self.content.as_widget().draw(child, renderer, theme, style, layout, cursor, viewport);
+        }
     }
 
     fn update(
@@ -83,16 +85,11 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer>
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            layout,
-            cursor,
-            renderer,
-            clipboard,
-            shell,
-            viewport,
-        );
+        if let Some(child) = tree.children.first_mut() {
+            self.content.as_widget_mut().update(
+                child, event, layout, cursor, renderer, clipboard, shell, viewport,
+            );
+        }
     }
 
     fn mouse_interaction(
@@ -103,9 +100,10 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer>
         viewport: &Rectangle,
         renderer: &iced::Renderer,
     ) -> mouse::Interaction {
-        self.content
-            .as_widget()
-            .mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
+        if let Some(child) = tree.children.first() {
+            return self.content.as_widget().mouse_interaction(child, layout, cursor, viewport, renderer);
+        }
+        mouse::Interaction::default()
     }
 
     fn operate(
@@ -115,9 +113,9 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer>
         renderer: &iced::Renderer,
         operation: &mut dyn Operation,
     ) {
-        self.content
-            .as_widget_mut()
-            .operate(&mut tree.children[0], layout, renderer, operation);
+        if let Some(child) = tree.children.first_mut() {
+            self.content.as_widget_mut().operate(child, layout, renderer, operation);
+        }
     }
 
     fn overlay<'b>(
@@ -128,8 +126,7 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer>
         viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, iced::Theme, iced::Renderer>> {
-        self.content
-            .as_widget_mut()
-            .overlay(&mut tree.children[0], layout, renderer, viewport, translation)
+        let child = tree.children.first_mut()?;
+        self.content.as_widget_mut().overlay(child, layout, renderer, viewport, translation)
     }
 }

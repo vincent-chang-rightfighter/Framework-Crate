@@ -204,8 +204,8 @@ fn draw_temp_chart_contents(
     // Top margin keeps "110" label visible.
     let margin_top = 10.0f32;
     let margin_bottom = 18.0f32;
-    let plot_w = size.width - margin_left - margin_right;
-    let plot_h = size.height - margin_top - margin_bottom;
+    let plot_w = (size.width - margin_left - margin_right).max(1.0);
+    let plot_h = (size.height - margin_top - margin_bottom).max(1.0);
     let origin = Point::new(margin_left, margin_top);
 
     frame.fill_rectangle(

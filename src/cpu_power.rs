@@ -381,6 +381,28 @@ fn write_mmio_pl1_pl2(
     exec_ioctl(mchbar_handle, "ioctl_write_qword", &inp, &mut out2)
         .map_err(|_| "ioctl_write_qword failed — IntelMCHBAR module may not support MMIO write")?;
 
+    // Verify write by re-reading MMIO, mirroring MSR verification.
+    let tolerance = params.power_unit.max(0.25);
+    let mut rb_out = [0u64; 1];
+    if exec_ioctl(mchbar_handle, "ioctl_read_qword", &[mmio_offset], &mut rb_out).is_err() {
+        return Err("MMIO write succeeded but read-back failed");
+    }
+    let rb_raw = rb_out[0];
+    let (rb_pl1, rb_pl1_en, ..) = decode_power_limit(rb_raw, params.power_unit);
+    let (rb_pl2, rb_pl2_en, ..) = decode_power_limit(rb_raw >> 32, params.power_unit);
+    let expected_pl1 = ((pl1_enc & 0x7FFF) as f64) * params.power_unit;
+    let expected_pl2 = ((pl2_enc & 0x7FFF) as f64) * params.power_unit;
+    if (rb_pl1 - expected_pl1).abs() > tolerance
+        || (rb_pl2 - expected_pl2).abs() > tolerance
+        || rb_pl1_en != params.pl1_enabled
+        || rb_pl2_en != params.pl2_enabled
+    {
+        debug!("MMIO read-back mismatch: wrote PL1={:.2}W(en={}) PL2={:.2}W(en={}), read PL1={:.2}W(en={}) PL2={:.2}W(en={})",
+            expected_pl1, params.pl1_enabled, expected_pl2, params.pl2_enabled,
+            rb_pl1, rb_pl1_en, rb_pl2, rb_pl2_en);
+        return Err("MMIO write not reflected in read-back — register may be locked");
+    }
+
     debug!("MMIO PL1/PL2 written: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) raw=0x{:016X}",
         params.pl1_watts, params.pl1_time_s, params.pl2_watts, params.pl2_time_s, new_val);
     Ok(())

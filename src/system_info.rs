@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::process::CommandExt;
+use std::sync::OnceLock;
 use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW};
 
 #[allow(clippy::upper_case_acronyms)]
@@ -538,9 +539,17 @@ pub struct SingleInstanceGuard {
 // Handle is owned, not dereferenced; Move-only across threads.
 unsafe impl Send for SingleInstanceGuard {}
 
-/// OS releases mutex on process exit; explicit close would free it early.
 impl Drop for SingleInstanceGuard {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        if self._handle.is_null() {
+            return;
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn CloseHandle(h: *mut core::ffi::c_void) -> i32;
+        }
+        unsafe { CloseHandle(self._handle); }
+    }
 }
 
 impl SingleInstanceGuard {
@@ -615,9 +624,9 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
-    // schtasks errors may be non-UTF8 (locale encoding); fall back to generic message.
-    let stderr = String::from_utf8(output.stderr.clone()).unwrap_or_default();
-    let stdout = String::from_utf8(output.stdout.clone()).unwrap_or_default();
+    // schtasks errors may be non-UTF8 (locale/OEM codepage); use lossy conversion.
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let detail = if !stderr.trim().is_empty() {
         stderr.trim().to_string()
     } else if !stdout.trim().is_empty() {
@@ -668,6 +677,17 @@ pub fn request_show_running_instance() {
     if let Some(hwnd) = find_tray_window() {
         post_message(hwnd, show_request_message_id(), 0, 0);
     }
+}
+
+/// Registered message sent by Explorer when the taskbar is recreated (e.g.
+/// Explorer crash/restart). `RegisterWindowMessageW("TaskbarCreated")` returns
+/// a dynamic atom, not a fixed constant, so it must be queried at runtime.
+pub fn taskbar_created_msg() -> u32 {
+    static MSG: OnceLock<u32> = OnceLock::new();
+    *MSG.get_or_init(|| {
+        let wide = to_wide("TaskbarCreated");
+        unsafe { RegisterWindowMessageW(wide.as_ptr()) }
+    })
 }
 
 pub fn is_iconic(hwnd: isize) -> bool {
