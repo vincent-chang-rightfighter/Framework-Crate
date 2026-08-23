@@ -64,7 +64,8 @@ impl Config {
                 point[0] = point[0].clamp(0, CURVE_TEMP_MAX);
                 point[1] = point[1].clamp(0, 100);
             }
-            // Dedupe by temp keeping highest duty; avoids phantom points that don't affect curve.
+            // Dedupe by temp keeping highest duty; sort to keep editor and
+            // canvas in consistent left-to-right order.
             let mut deduped: Vec<[u32; 2]> = Vec::new();
             for &[t, d] in &curve.curve.points {
                 if let Some(existing) = deduped.iter_mut().find(|p| p[0] == t) {
@@ -73,6 +74,7 @@ impl Config {
                     deduped.push([t, d]);
                 }
             }
+            deduped.sort_by_key(|p| p[0]);
             curve.curve.points = deduped;
         }
         for duty in &mut self.fan.per_fan_duty {
@@ -189,7 +191,7 @@ fn default_rate_limit_pct_per_step() -> u32 {
 }
 
 pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
-    // BTreeMap sorted by temp; last wins on duplicates.
+    // BTreeMap sorted by temp; keep max duty on duplicates to match validate.
     let mut map: BTreeMap<u32, u32> = BTreeMap::new();
     let has_zero = points.iter().any(|p| p[0] == 0);
     // Ensure full domain coverage so fan hits 100% before edge.
@@ -198,7 +200,7 @@ pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
         map.insert(0, 0);
     }
     for &[temp, duty] in points {
-        map.insert(temp, duty);
+        map.entry(temp).and_modify(|e| *e = (*e).max(duty)).or_insert(duty);
     }
     if !has_max {
         map.insert(CURVE_TEMP_MAX, 100);
@@ -273,7 +275,7 @@ pub fn battery_health_pct(last_full_mah: u32, design_mah: u32) -> Option<u32> {
     if design_mah == 0 {
         return None;
     }
-    Some(((last_full_mah as f32 / design_mah as f32) * 100.0).round() as u32)
+    Some((((last_full_mah as f32 / design_mah as f32) * 100.0).round() as u32).min(100))
 }
 
 pub fn sorted_sensor_list(selected: &[String], sensor_keys: &[String]) -> Vec<String> {
@@ -429,8 +431,8 @@ mod tests {
         });
         c.validate();
         let pts = &c.fan.curve.as_ref().unwrap().curve.points;
-        assert_eq!(pts[0], [110, 100]);
-        assert_eq!(pts[1], [40, 10]);
+        assert_eq!(pts[0], [40, 10]);
+        assert_eq!(pts[1], [110, 100]);
     }
 
     #[test]

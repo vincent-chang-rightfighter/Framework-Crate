@@ -735,6 +735,7 @@ impl App {
                         .as_ref()
                         .map(|c| c.curve.points.as_slice())
                         .unwrap_or(&[]);
+                    let orig_temp = points.get(idx).map(|p| p[0] as i64).unwrap_or(temp as i64);
                     let mut others: Vec<i64> = points
                         .iter()
                         .enumerate()
@@ -752,10 +753,16 @@ impl App {
                             hi = hi.min(t);
                         }
                     }
-                    let min_t = (lo + 1).max(0);
-                    let max_allowed = (hi - 1).min(max_t);
-                    (temp.clamp(0, crate::types::CURVE_TEMP_MAX) as i64)
-                        .clamp(min_t, max_allowed.max(min_t)) as u32
+                    // No valid slot between neighbors (gap <=1) would force a
+                    // duplicate that validate would silently drop; keep original.
+                    if hi - lo <= 1 {
+                        orig_temp.clamp(0, max_t) as u32
+                    } else {
+                        let min_t = (lo + 1).max(0);
+                        let max_allowed = (hi - 1).min(max_t);
+                        (temp.clamp(0, crate::types::CURVE_TEMP_MAX) as i64)
+                            .clamp(min_t, max_allowed) as u32
+                    }
                 };
                 self.mutate_config(|cfg| {
                     if let Some(ref mut curve) = cfg.fan.curve
@@ -816,7 +823,7 @@ impl App {
             Message::ChargeLimitChanged(value) => {
                 self.mutate_config(|cfg| {
                     let limit = cfg.battery.charge_limit_max_pct.get_or_insert(crate::types::SettingU8 { enabled: false, value: CHARGE_LIMIT_MIN as u8 });
-                    limit.value = value.min(CHARGE_LIMIT_MAX) as u8;
+                    limit.value = value.clamp(CHARGE_LIMIT_MIN, CHARGE_LIMIT_MAX) as u8;
                 });
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
@@ -953,8 +960,12 @@ impl App {
                 } else {
                     self.tray.shutdown();
                     self.state.lifecycle.shutdown.store(true, Ordering::Release);
-                    self.save_config_now();
-                    return Some(self.close_window());
+                    let limit = read_lock(&self.state.lifecycle.config).battery.charge_limit_max_pct;
+                    return Some(run_ec_task(
+                        &self.state.system.ec_client,
+                        Message::QuitShutdown,
+                        move |ec| apply_quit_charge_limit(&ec, &limit),
+                    ));
                 }
                 Some(Task::none())
             }
@@ -1059,6 +1070,7 @@ impl App {
             Message::QuitWithoutRestore => {
                 self.show_quit_warning = false;
                 self.tray.shutdown();
+                self.state.lifecycle.shutdown.store(true, Ordering::Release);
                 let limit = read_lock(&self.state.lifecycle.config).battery.charge_limit_max_pct;
                 // Flush charge limit to EC before shutdown.
                 Some(run_ec_task(&self.state.system.ec_client, Message::QuitShutdown, move |ec| {
@@ -1156,6 +1168,7 @@ impl App {
             }
             Message::SettingsToggled => {
                 self.show_settings = !self.show_settings;
+                self.height_set = false;
                 Task::none()
             }
             Message::KblightChanged(percent) => {

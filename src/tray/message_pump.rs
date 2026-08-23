@@ -12,8 +12,8 @@ const WM_TRAYICON: u32 = WM_APP + 1;
 const WM_COMMAND_READY: u32 = WM_APP + 2;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONUP: u32 = 0x0205;
-/// Explorer restart notification; tray icon must be re-added.
-const WM_TASKBARCREATED: u32 = 0x0526;
+// Explorer restart notification is a registered message, not a fixed
+// constant. Must be queried via `RegisterWindowMessageW("TaskbarCreated")`.
 
 // SAFETY: Thread-locals accessed only on pump thread that created the window.
 thread_local! {
@@ -133,7 +133,7 @@ unsafe extern "system" fn tray_wnd_proc(
         }
         return 0;
     }
-    if msg == WM_TASKBARCREATED {
+    if msg == system_info::taskbar_created_msg() {
         let hwnd = TRAY_HWND.with(|h| h.get());
         let icon = TRAY_HICON.with(|h| h.get());
         if hwnd != 0 && icon != 0 {
@@ -144,17 +144,13 @@ unsafe extern "system" fn tray_wnd_proc(
     }
     if msg == WM_POWERBROADCAST {
         let wparam_u32 = wparam as u32;
-        if wparam_u32 == PBT_APMRESUMEAUTOMATIC {
+        if wparam_u32 == PBT_APMRESUMEAUTOMATIC || wparam_u32 == PBT_APMRESUMESUSPEND {
             tracing::info!("[POWER] System resumed from sleep/hibernate (wParam={:#x})", wparam_u32);
             EVENT_TX.with(|tx| {
                 if let Some(sender) = tx.borrow().as_ref() {
                     let _ = sender.send(TrayEvent::PowerResumed);
                 }
             });
-            return 0;
-        }
-        if wparam_u32 == PBT_APMRESUMESUSPEND {
-            tracing::info!("[POWER] System suspending (wParam={:#x})", wparam_u32);
             return 0;
         }
     }
@@ -206,11 +202,13 @@ fn cleanup_and_exit(tray_icon_loaded: bool, tray_hwnd: *mut core::ffi::c_void, h
             DestroyIcon(icon as *mut core::ffi::c_void);
         }
     }
-    unsafe {
-        DestroyWindow(tray_hwnd);
-        let class_name: Vec<u16> = "FrameworkControlTray\0".encode_utf16().collect();
-        let h_instance = GetModuleHandleW(std::ptr::null());
-        UnregisterClassW(class_name.as_ptr(), h_instance);
+    if !tray_hwnd.is_null() {
+        unsafe {
+            DestroyWindow(tray_hwnd);
+            let class_name: Vec<u16> = "FrameworkControlTray\0".encode_utf16().collect();
+            let h_instance = GetModuleHandleW(std::ptr::null());
+            UnregisterClassW(class_name.as_ptr(), h_instance);
+        }
     }
 }
 
@@ -404,6 +402,7 @@ fn handle_tray_right_click(event_tx: &mpsc::Sender<TrayEvent>) {
                     }
                 });
                 let _ = event_tx.send(TrayEvent::MenuShow);
+                let _ = event_tx.send(TrayEvent::Restored);
             }
             ID_QUIT => { let _ = event_tx.send(TrayEvent::MenuQuit); }
             _ => {}
