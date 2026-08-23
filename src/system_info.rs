@@ -603,6 +603,7 @@ impl SingleInstanceGuard {
                 lpName: LPCWSTR,
             ) -> *mut core::ffi::c_void;
             fn GetLastError() -> u32;
+            fn CloseHandle(h: *mut core::ffi::c_void) -> i32;
         }
         const ERROR_ALREADY_EXISTS: u32 = 183;
         let wide = to_wide(name);
@@ -620,6 +621,10 @@ impl SingleInstanceGuard {
         // valid immediately after CreateMutexW in the same thread.
         let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
         if exists {
+            // Close our handle to the *existing* named mutex; closing only
+            // decrements its reference count — the owning instance keeps it
+            // alive. Leaking it would leave a kernel handle per launch attempt.
+            unsafe { CloseHandle(handle); }
             return Err(());
         }
         Ok(Self { _handle: handle })

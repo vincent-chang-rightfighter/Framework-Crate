@@ -43,6 +43,7 @@ pub(crate) struct ViewSnapshot {
     pub pl1_clamped: bool,
     pub pl2_clamped: bool,
     pub cpu_power_error: Option<String>,
+    pub ec_op_error: Option<String>,
     pub intel_cpu: bool,
     pub curve_points: Arc<[[u32; 2]]>,
     pub curve_marks: Arc<Vec<crate::curve_canvas::SensorMark>>,
@@ -133,7 +134,7 @@ impl ViewSnapshot {
             sync_enabled,
             show_cpu_power_settings: app.show_cpu_power_settings,
             show_curve_settings: app.show_curve_settings,
-            pl_custom_applied: app.pl_custom_applied,
+            pl_custom_applied: app.pl_custom_applied.load(Ordering::Acquire),
             modules_download_error: app.modules_download_error.clone(),
             pl1_edit: app.pl1_edit.clone(),
             pl2_edit: app.pl2_edit.clone(),
@@ -143,6 +144,7 @@ impl ViewSnapshot {
             pl1_clamped: app.pl1_clamped,
             pl2_clamped: app.pl2_clamped,
             cpu_power_error: app.cpu_power_error.clone(),
+            ec_op_error: app.ec_op_error.clone(),
             intel_cpu: app.state.system.intel_cpu.load(Ordering::Acquire),
             curve_points,
             curve_marks,
@@ -830,7 +832,11 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                 };
                 content = content.push(settings_panel);
 
-                for (chunk_idx, chunk) in curve.curve.points.chunks(3).enumerate() {
+                // Sort a copy by temperature so the labels (P1..) follow the same
+                // left-to-right order the canvas draws the control points.
+                let mut points_sorted = curve.curve.points.clone();
+                points_sorted.sort_by_key(|p| p[0]);
+                for (chunk_idx, chunk) in points_sorted.chunks(3).enumerate() {
                     let mut r = iced::widget::Row::new().spacing(12);
                     for (offset, point) in chunk.iter().enumerate() {
                         let idx = chunk_idx * 3 + offset;
@@ -1092,6 +1098,14 @@ fn battery_detail_rows(battery_info: &crate::cli::ec_wrapper::BatteryData) -> Op
 
 fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
     let mut content = column![text("Misc").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) })].spacing(6);
+
+    if let Some(ref err) = snap.ec_op_error {
+        content = content.push(
+            text(err.as_str())
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style { color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)) }),
+        );
+    }
 
     if snap.platform.has_keyboard_backlight() {
         content = content.push(kblight_section(snap));

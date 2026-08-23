@@ -129,6 +129,9 @@ unsafe extern "system" fn tray_wnd_proc(
             EVENT_TX.with(|tx| {
                 if let Some(sender) = tx.borrow().as_ref() {
                     let _ = sender.send(TrayEvent::Show);
+                    // Also signal the App to mark the window recently restored so
+                    // the auto-minimize-to-tray logic doesn't immediately re-hide it.
+                    let _ = sender.send(TrayEvent::Restored);
                 }
             });
         } else if lparam_u32 == WM_RBUTTONUP {
@@ -189,6 +192,9 @@ unsafe extern "system" fn tray_wnd_proc(
         EVENT_TX.with(|tx| {
             if let Some(sender) = tx.borrow().as_ref() {
                 let _ = sender.send(TrayEvent::Show);
+                // Mark the window recently restored so the auto-minimize logic
+                // (which triggers after 2 iconic checks) doesn't re-hide it.
+                let _ = sender.send(TrayEvent::Restored);
             }
         });
         return 0;
@@ -204,7 +210,14 @@ pub fn spawn_message_pump(
     app_hwnd: isize,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        message_pump_loop(event_tx, command_rx, icon_ready_tx, thread_ready_tx, app_hwnd);
+        // Catch panics so a failure in the pump doesn't silently kill the thread
+        // (leaving TRAY_THREAD_ID stale and the tray class leaked). cleanup_and_exit
+        // runs on normal exit; on panic we at least log it.
+        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            message_pump_loop(event_tx, command_rx, icon_ready_tx, thread_ready_tx, app_hwnd);
+        })) {
+            tracing::error!("Tray message pump panicked: {:?}", e);
+        }
     })
 }
 

@@ -87,6 +87,47 @@ pub(crate) fn run_ec_task(
     )
 }
 
+/// Flush the persisted charge limit to EC. Used on quit so the hardware
+/// reflects the saved value even though config_save_task skips EC writes
+/// once shutdown is set.
+fn apply_quit_charge_limit(ec: &cli::EcClient, limit: &Option<crate::types::SettingU8>) {
+    if let Some(limit) = limit {
+        let pct = if limit.enabled { limit.value } else { 100 };
+        if let Err(e) = ec.charge_limit_set(0, pct) {
+            warn!("Failed to set charge limit on quit: {}", e);
+        }
+    }
+}
+
+/// Like `run_ec_task`, but the closure returns a `Result` and the outcome is
+/// reported back via `Message::EcOpResult` so the UI can surface EC write
+/// failures (e.g. keyboard backlight / fingerprint LED) instead of only
+/// logging them.
+pub(crate) fn run_ec_task_result(
+    ec_client: &Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
+    f: impl FnOnce(Arc<cli::EcClient>) -> Result<(), String> + Send + 'static,
+) -> Task<Message> {
+    let ec_client = Arc::clone(ec_client);
+    Task::perform(
+        async move {
+            let ec_opt = { read_lock(&ec_client) };
+            let res = if let Some(ref ec) = *ec_opt {
+                let ec = ec.clone();
+                match tokio::task::spawn_blocking(move || f(ec)).await {
+                    Ok(r) => r,
+                    Err(e) => Err(format!("EC task failed: {}", e)),
+                }
+            } else {
+                // No EC client (e.g. not running as admin): keep prior behavior
+                // of a silent no-op rather than surfacing a spurious error.
+                Ok(())
+            };
+            Message::EcOpResult(res.err())
+        },
+        |msg| msg,
+    )
+}
+
 /// Self-rescheduling UI tick. Sleeping via tokio::time lets the runtime
 /// park the thread between ticks, so an idle UI wakes ~1x/sec instead of
 /// hammering update()/view() at a fixed 50ms.
@@ -164,7 +205,7 @@ pub enum Message {
     DismissConfigWarning,
     KblightChanged(u32),
     FpLedLevelChanged(&'static str),
-    EcOpDone,
+    EcOpResult(Option<String>),
     ToggleBatteryDetails,
     CloseRequested(iced::window::Id),
     WindowResized(iced::window::Id, iced::Size),
@@ -265,7 +306,8 @@ pub struct App {
     pub pl1_clamped: bool,
     pub pl2_clamped: bool,
     pub cpu_power_error: Option<String>,
-    pub pl_custom_applied: bool,
+    pub ec_op_error: Option<String>,
+    pub pl_custom_applied: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct SystemInfo {
@@ -420,7 +462,8 @@ impl App {
             pl1_clamped: false,
             pl2_clamped: false,
             cpu_power_error: None,
-            pl_custom_applied: false,
+            ec_op_error: None,
+            pl_custom_applied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         let init_task = Task::perform(async move {
@@ -560,7 +603,7 @@ impl App {
         // AC→battery: auto-reset PL1/PL2 to BIOS defaults
         if self.cpu_power_supported()
             && self.state.lifecycle.pl_reset_pending.swap(false, Ordering::Acquire)
-            && self.pl_custom_applied
+                    && self.pl_custom_applied.load(Ordering::Acquire)
         {
             tracing::info!("AC→battery: resetting PL1/PL2 to BIOS defaults");
             return Task::batch([
@@ -988,6 +1031,10 @@ impl App {
                     crate::tray::TrayEvent::MenuShow => {
                         Some(Task::perform(async {}, |_| Message::RestoreFromTray))
                     }
+                    crate::tray::TrayEvent::Restored => {
+                        self.tray.mark_restored();
+                        Some(Task::none())
+                    }
                     crate::tray::TrayEvent::MenuQuit => {
                         Some(Task::perform(async {}, |_| Message::TrayQuit))
                     }
@@ -1008,11 +1055,11 @@ impl App {
                         // AC→battery PL reset — clearing it would silently
                         // disable that reset for sync users.
                         if !was_sync {
-                            self.pl_custom_applied = false;
+                            self.pl_custom_applied.store(false, Ordering::Release);
                         }
                         let cpu_power = self.state.cpu_power.clone();
                         let bios = cpu_power.bios_defaults();
-                        let was_custom_applied = self.pl_custom_applied;
+                        let custom_applied = self.pl_custom_applied.clone();
                         let after = {
                             let cpu_power = cpu_power.clone();
                             move || {
@@ -1027,7 +1074,7 @@ impl App {
                                         info.pl2_msr, info.pl2_msr_enabled, info.pl2_msr_clamped, info.pl2_time_s,
                                         info.power_unit, info.time_unit,
                                     );
-                                } else if was_custom_applied {
+                                } else if custom_applied.load(Ordering::Acquire) {
                                     cpu_power.stop_sync();
                                     // Only restore when the user had applied custom
                                     // limits: without a custom apply the firmware's
@@ -1064,13 +1111,15 @@ impl App {
             Message::QuitWithRestore => {
                 self.show_quit_warning = false;
                 self.state.lifecycle.shutdown.store(true, Ordering::Release);
+                let limit = read_lock(&self.state.lifecycle.config).battery.charge_limit_max_pct;
                 // Run the EC restore first and only quit once it completes,
                 // so "Restore Auto & Exit" actually restores the fan before
-                // the process exits.
-                Some(run_ec_task(&self.state.system.ec_client, Message::QuitShutdown, |ec| {
+                // the process exits. Also flush the charge limit to EC.
+                Some(run_ec_task(&self.state.system.ec_client, Message::QuitShutdown, move |ec| {
                     if let Err(e) = ec.autofanctrl() {
                         warn!("Failed to restore auto fan control on quit: {}", e);
                     }
+                    apply_quit_charge_limit(&ec, &limit);
                 }))
             }
             Message::QuitDutyChanged(duty) => {
@@ -1081,19 +1130,24 @@ impl App {
                 self.show_quit_warning = false;
                 self.state.lifecycle.shutdown.store(true, Ordering::Release);
                 let duty = self.quit_duty_value;
+                let limit = read_lock(&self.state.lifecycle.config).battery.charge_limit_max_pct;
                 // Same as QuitWithRestore: write the quit duty first, then quit.
+                // Also flush the charge limit to EC.
                 Some(run_ec_task(&self.state.system.ec_client, Message::QuitShutdown, move |ec| {
                     if let Err(e) = ec.set_fan_duty(duty, None) {
                         warn!("Failed to set quit fan duty: {}", e);
                     }
+                    apply_quit_charge_limit(&ec, &limit);
                 }))
             }
             Message::QuitWithoutRestore => {
                 self.show_quit_warning = false;
                 self.tray.shutdown();
-                self.state.lifecycle.shutdown.store(true, Ordering::Release);
-                self.save_config_now();
-                Some(self.close_window())
+                let limit = read_lock(&self.state.lifecycle.config).battery.charge_limit_max_pct;
+                // Flush the charge limit to EC before the final shutdown/close.
+                Some(run_ec_task(&self.state.system.ec_client, Message::QuitShutdown, move |ec| {
+                    apply_quit_charge_limit(&ec, &limit);
+                }))
             }
             Message::QuitShutdown => {
                 self.show_quit_warning = false;
@@ -1196,31 +1250,25 @@ impl App {
             }
             Message::KblightChanged(percent) => {
                 let kblight = Arc::clone(&self.state.peripherals.kblight);
-                let task = run_ec_task(&self.state.system.ec_client, Message::EcOpDone, move |ec| {
-                    if let Err(e) = ec.kblight_set(percent) {
-                        warn!("Failed to set keyboard backlight: {}", e);
-                    }
+                let task = run_ec_task_result(&self.state.system.ec_client, move |ec| {
+                    ec.kblight_set(percent)?;
                     if let Ok(kb) = ec.kblight_get() {
                         with_write_lock(&kblight, |guard| {
                             *guard = Arc::new(Some(kb));
                         });
                     }
+                    Ok(())
                 });
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 task
             }
             Message::FpLedLevelChanged(level) => {
-                run_ec_task(&self.state.system.ec_client, Message::EcOpDone, move |ec| {
-                    if let Err(e) = ec.fp_led_level_set(level) {
-                        warn!("Failed to set fingerprint LED: {}", e);
-                    }
-                })
+                run_ec_task_result(&self.state.system.ec_client, move |ec| ec.fp_led_level_set(level))
             }
-            Message::EcOpDone => {
-                // EC operation finished (kblight/fp-led write). Deliberately
-                // does NOT reschedule a tick: the tick_task chain already
-                // pending would otherwise grow by one task per EC op,
-                // doubling the per-interval work over a session.
+            Message::EcOpResult(err) => {
+                // Surface a failed peripheral EC write (keyboard backlight /
+                // fingerprint LED) to the UI instead of only logging it.
+                self.ec_op_error = err;
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
@@ -1478,7 +1526,7 @@ impl App {
             Message::CpuPowerApplied(result) => {
                 match result {
                     Ok(()) => {
-                        self.pl_custom_applied = true;
+                        self.pl_custom_applied.store(true, Ordering::Release);
                         self.cpu_power_error = None;
                         // Refresh readback and, if sync was running, restart it
                         // with the values just read back from hardware — both
@@ -1488,11 +1536,13 @@ impl App {
                         // fields avoids racing the user typing during the
                         // ~100ms MSR write.
                         let cpu_power = self.state.cpu_power.clone();
-                        let restart_sync = cpu_power.sync_enabled.load(Ordering::Acquire);
                         let after = {
                             let cpu_power = cpu_power.clone();
                             move || {
-                                if !restart_sync {
+                                // Re-read the live flag inside the closure: the
+                                // refresh window is ~100ms and the user may have
+                                // toggled sync since restart_sync was captured.
+                                if !cpu_power.sync_enabled.load(Ordering::Acquire) {
                                     return;
                                 }
                                 let info = cpu_power.snapshot();
@@ -1556,7 +1606,7 @@ impl App {
                         // Sync enforces custom limits every 250ms, so the
                         // AC→battery PL reset (gated on pl_custom_applied in
                         // handle_tick_message) must trigger for sync users too.
-                        self.pl_custom_applied = true;
+                        self.pl_custom_applied.store(true, Ordering::Release);
                         self.cpu_power_error = None;
                         tracing::info!("CPU power sync started");
                     }
@@ -1647,7 +1697,7 @@ impl App {
         if !self.cpu_power_supported() {
             return Task::none();
         }
-        self.pl_custom_applied = false;
+        self.pl_custom_applied.store(false, Ordering::Release);
         self.cpu_power_error = None;
         let bios = match self.state.cpu_power.bios_defaults() {
             Some(b) => b,

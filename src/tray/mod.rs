@@ -102,7 +102,9 @@ impl TrayManager {
 
     /// Send CreateIcon once the tray thread has signaled it is inside
     /// GetMessageW (PostThreadMessageW needs the queue to exist first).
-    /// Non-blocking: returns false until the thread is ready, then true.
+    /// Non-blocking: returns `true` once the CreateIcon request has been posted
+    /// (or the 3s fallback has elapsed), NOT when the icon is actually created.
+    /// Actual creation is tracked via `icon_loaded` / `check_icon_ready`.
     /// Falls back after 3s so a stuck thread never wedges the UI.
     ///
     /// Lost-wakeup handling: PostThreadMessageW is silently dropped when the

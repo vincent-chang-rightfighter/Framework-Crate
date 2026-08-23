@@ -162,6 +162,9 @@ fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
     if fan_count == 0 {
         return;
     }
+    // Process-global: assumes exactly one background loop / AppState per process.
+    // Safe today (single instance), but a second AppState (e.g. concurrent tests
+    // or a future multi-window design) would cross-contaminate this fast-path.
     static LAST_FAN_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     // Fast path: fan count unchanged and per_fan_duty already sized — avoid write lock.
     let last = LAST_FAN_COUNT.load(Ordering::Acquire) as usize;
@@ -208,13 +211,11 @@ fn estimate_duty_from_thermal(state: &AppState) -> Option<u32> {
             if rpm == 0 {
                 // Stopped fans: seed the ramp at 0, not the 10% floor.
                 0
-            } else if let Some(pct) = (rpm * 100).checked_div(max_rpm) {
-                pct.clamp(10, 100)
-            } else {
-                // When max RPM is unknown, use minimum duty to avoid a
-                // sudden fan speed jump on mode switch. The background
-                // loop will ramp to the target duty via rate limiting.
+            } else if max_rpm == 0 {
                 10
+            } else {
+                // Compute in u64: rpm*100 can overflow u32 for extreme RPMs.
+                ((rpm as u64 * 100) / max_rpm as u64).clamp(10, 100) as u32
             }
         })
     } else {
@@ -436,6 +437,12 @@ pub fn spawn(state: AppState) {
                 let mut last_resume_ts: u64 = 0;
                 'poll_loop: loop {
                     let resume_ts = bg_state2.lifecycle.last_resume_ts.load(Ordering::Acquire);
+                    // If shutdown was requested while awaiting below, skip the
+                    // resume handling and let the shutdown re-check end the task,
+                    // instead of re-opening the EC device mid-teardown.
+                    if bg_state2.lifecycle.shutdown.load(Ordering::Acquire) {
+                        return;
+                    }
                     if resume_ts != 0 && resume_ts != last_resume_ts {
                         last_resume_ts = resume_ts;
                         curve_stepper.reset();
@@ -463,6 +470,11 @@ pub fn spawn(state: AppState) {
                         // fan_max_rpm here made the estimate read ~100% (the
                         // first post-resume rpm would become the new max).
                         bg_state2.fan.last_applied_duty.store(0, Ordering::Release);
+                        // Also forget the last duty write time so the 30s
+                        // re-assert guard trips immediately on the resume
+                        // iteration (otherwise Curve/Manual duty can stay
+                        // un-asserted for up to 30s after a short sleep).
+                        last_duty_write_ms = 0;
                         // Retain thermal history/sensor cache across resume so the chart
                         // doesn't flash blank on the left; stale samples will be
                         // pruned by the normal window-based retention.
@@ -650,7 +662,9 @@ pub fn spawn(state: AppState) {
                         // refresh() runs PawnIO ioctls; keep it off the async
                         // worker like the other EC I/O in this loop.
                         let cpu_power = bg_state2.cpu_power.clone();
-                        let _ = tokio::task::spawn_blocking(move || cpu_power.refresh()).await;
+                        if let Err(e) = tokio::task::spawn_blocking(move || cpu_power.refresh()).await {
+                            warn!("CPU power refresh task failed: {}", e);
+                        }
                         mark_view_dirty(&bg_state2);
                     }
 

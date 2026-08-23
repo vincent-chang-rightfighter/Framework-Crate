@@ -101,12 +101,18 @@ fn main() {
             .init();
     }
 
-    let window_icon = iced::window::icon::from_rgba(
+    let window_icon = match iced::window::icon::from_rgba(
         ICON_RGBA.to_vec(),
         ICON_WIDTH,
         ICON_HEIGHT,
-    )
-    .expect("Failed to load window icon");
+    ) {
+        Ok(icon) => Some(icon),
+        Err(e) => {
+            // Don't panic before any UI is shown: run icon-less instead.
+            tracing::error!("Failed to load window icon: {}", e);
+            None
+        }
+    };
 
     fn app_title(_app: &App) -> String {
         "Framework Crate".to_string()
@@ -126,7 +132,7 @@ fn main() {
             // / `.resizable()` calls, so the size must be set here.
             size: iced::Size::new(900.0, 613.0),
             resizable: false,
-            icon: Some(window_icon),
+            icon: window_icon,
             exit_on_close_request: false,
             ..iced::window::Settings::default()
         })

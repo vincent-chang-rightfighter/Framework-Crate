@@ -590,23 +590,28 @@ fn open_handle(blob: &[u8]) -> Result<PawnioHandle, &'static str> {
     init_dll_fns()?;
 
     let mut handle: HANDLE = std::ptr::null_mut();
-    let hr = unsafe { (DLL_OPEN.get().unwrap())(&mut handle) };
+    let open = *DLL_OPEN.get().ok_or("PawnIO DLL not initialized")?;
+    let hr = unsafe { open(&mut handle) };
     if hr < 0 || handle.is_null() {
         warn!("pawnio_open returned hr=0x{:X} handle={:?}", hr, handle);
         return Err("pawnio_open failed");
     }
 
-    let hr = unsafe { (DLL_LOAD.get().unwrap())(handle, blob.as_ptr(), blob.len()) };
+    let load = *DLL_LOAD.get().ok_or("PawnIO DLL not initialized")?;
+    let hr = unsafe { load(handle, blob.as_ptr(), blob.len()) };
     if hr < 0 {
         warn!("pawnio_load returned hr=0x{:X}", hr);
-        unsafe { (DLL_CLOSE.get().unwrap())(handle) };
+        let close = *DLL_CLOSE.get().ok_or("PawnIO DLL not initialized")?;
+        unsafe { close(handle) };
         return Err("pawnio_load failed");
     }
 
+    let exec_fn = *DLL_EXEC.get().ok_or("PawnIO DLL not initialized")?;
+    let close_fn = *DLL_CLOSE.get().ok_or("PawnIO DLL not initialized")?;
     Ok(PawnioHandle {
         handle,
-        exec_fn: *DLL_EXEC.get().unwrap(),
-        close_fn: *DLL_CLOSE.get().unwrap(),
+        exec_fn,
+        close_fn,
     })
 }
 

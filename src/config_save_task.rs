@@ -60,6 +60,12 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
 
 pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState) {
     tokio::spawn(async move {
+        // NOTE: pin_to_slowest_core() pins the *calling* thread. Under a
+        // multi-threaded tokio runtime this pins a shared worker for the whole
+        // lifetime of this task; acceptable here because the config task is
+        // long-lived but lightweight (debounced disk writes + EC writes). If
+        // many tasks shared that worker it could starve them — revisit if the
+        // runtime config changes.
         pin_to_slowest_core();
         let mut last_battery: Option<BatteryKey>;
 
@@ -81,8 +87,25 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
         // Watch for changes — debounce: wait for the value to stabilise before saving.
         // This avoids redundant disk writes during rapid slider drags.
         loop {
-            // Wait for the first change
-            if config_rx.changed().await.is_err() { break; }
+            // If a battery apply is still pending (e.g. EC wasn't ready within
+            // the 5s startup window), wake periodically to retry instead of
+            // blocking forever on the next config change — otherwise a persisted
+            // charge limit that missed startup would never be applied this session.
+            let changed = if last_battery.is_none() {
+                match tokio::time::timeout(Duration::from_secs(5), config_rx.changed()).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        let (cfg, _ver) = config_rx.borrow().clone();
+                        if apply_battery_settings(&cfg, &state).await {
+                            last_battery = Some(battery_key(&cfg));
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                config_rx.changed().await
+            };
+            if changed.is_err() { break; }
 
             // Drain rapid successive changes within the debounce window.
             // The timeout returns Err on timeout (normal), Ok(Err(_)) on channel close.
