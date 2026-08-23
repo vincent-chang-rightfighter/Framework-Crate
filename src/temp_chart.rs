@@ -5,12 +5,11 @@ use std::sync::Arc;
 
 const TEMP_MAX: f32 = 110.0;
 const TEMP_MIN: f32 = 0.0;
-/// Default history window in seconds (used for the x-axis scale).
+/// Default history window in seconds.
 pub const HISTORY_SECONDS: i64 = 30;
-/// Selectable history window lengths in seconds.
+/// Selectable history window lengths.
 pub const HISTORY_WINDOW_OPTIONS: [i64; 3] = [15, 30, 60];
-/// Buffer retention in milliseconds: keep the longest selectable window so
-/// switching windows never shows a gap.
+/// Buffer retention; keeps longest window to avoid gaps on switch.
 pub const HISTORY_MAX_MS: i64 = 60_000;
 const Y_LABELS: [&str; 7] = ["0", "20", "40", "60", "80", "100", "110°C"];
 
@@ -20,17 +19,10 @@ pub struct TempSample {
     pub temps: std::sync::Arc<BTreeMap<String, i32>>,
 }
 
-/// How often the double-buffer `published` snapshot is refreshed (ms). The
-/// chart shows a 30s window, so a 1s publishing lag is invisible while it
-/// cuts full-deque clones from "every changed poll" to 1/s.
+/// Double-buffer publish interval; 1s lag is invisible on a 30s window.
 pub const HISTORY_PUBLISH_MS: i64 = 1_000;
 
-/// Double-buffered temperature history.
-///
-/// The background writer mutates `draft` in place (push + prune, no
-/// allocation beyond VecDeque growth). Readers receive an `Arc` snapshot
-/// that is re-published at most once per `HISTORY_PUBLISH_MS`, so the
-/// per-sample full-history clone is eliminated.
+/// Double-buffered history: writer mutates `draft` in place, readers get throttled `Arc` snapshot.
 #[derive(Clone)]
 pub struct ThermalHistory {
     draft: std::collections::VecDeque<TempSample>,
@@ -48,9 +40,7 @@ impl Default for ThermalHistory {
 impl ThermalHistory {
     pub fn new() -> Self {
         let mut draft = std::collections::VecDeque::new();
-        // Pre-reserve for the max retention window (60s / 200ms poll ≈ 300
-        // samples) so the deque never re-allocates its ring buffer while the
-        // window slides.
+        // Pre-reserve for max window (~300 samples) to avoid reallocation.
         draft.reserve(350);
         Self {
             draft,
@@ -60,8 +50,7 @@ impl ThermalHistory {
         }
     }
 
-    /// Update the retention window and immediately prune old samples.
-    /// Called on the UI thread when the user changes Chart Window.
+    /// Update retention window and prune old samples.
     pub fn set_window(&mut self, window_seconds: i64) {
         self.window_ms = (window_seconds * 1_000).clamp(5_000, HISTORY_MAX_MS);
         let now = crate::util::monotonic_ms() as i64;
@@ -75,8 +64,7 @@ impl ThermalHistory {
         }
     }
 
-    /// Writer side: push a sample and drop entries older than the window.
-    /// Caller must hold the write lock.
+    /// Push sample and prune entries outside window.
     pub fn push_sample(&mut self, sample: TempSample, now_ms: i64) {
         self.draft.push_back(sample);
         let cutoff = now_ms - self.window_ms;
@@ -93,9 +81,7 @@ impl ThermalHistory {
         self.draft.back().map(|s| s.ts_ms)
     }
 
-    /// Reader side: return an `Arc` snapshot of the history, re-publishing
-    /// the draft at most once per `HISTORY_PUBLISH_MS`. Cheap when the
-    /// interval has not elapsed (just an Arc refcount increment).
+    /// Return `Arc` snapshot, re-publishing at most once per interval.
     pub fn snapshot(&mut self, now_ms: i64) -> Arc<std::collections::VecDeque<TempSample>> {
         if self.last_publish_ms == 0 || now_ms - self.last_publish_ms >= HISTORY_PUBLISH_MS {
             self.published = Arc::new(self.draft.clone());
@@ -132,20 +118,12 @@ struct TempChartRenderer {
     window_seconds: i64,
 }
 
-/// Persistent state living in the widget `Tree` — survives `view()` rebuilds.
+/// State in widget Tree; survives `view()` rebuilds.
 struct TempChartState {
     cache: OnceCell<iced::widget::canvas::Cache<iced::Renderer>>,
-    /// Cache invalidation key: (samples Arc ptr, samples len, sensor_names Arc ptr, colors Arc ptr).
-    ///
-    /// SAFETY: `Arc` never reallocates its backing allocation, so the base
-    /// pointer is stable for the lifetime of the allocation. Two `Arc`s
-    /// wrapping the same data share the same pointer. The key changes only
-    /// when `ViewSnapshot` clones a new `Arc` (i.e. new data arrived), which
-    /// is exactly when the canvas needs re-drawing. This avoids hashing or
-    /// deep-comparing the entire sample deque on every frame.
+    /// SAFETY: `Arc` pointer is stable; key changes only when new data arrives.
     cached_key: Cell<(*const (), usize, *const (), *const (), i64)>,
-    /// Reused line-point buffer, kept in the tree so it is not re-allocated
-    /// on every `view()` rebuild.
+    /// Reused line-point buffer to avoid per-frame allocation.
     points_buf: std::cell::RefCell<Vec<(f32, f32)>>,
 }
 
@@ -223,21 +201,19 @@ fn draw_temp_chart_contents(
 ) {
     let margin_left = 36.0f32;
     let margin_right = 8.0f32;
-    // Top margin tall enough for the "110" label at the top edge.
+    // Top margin keeps "110" label visible.
     let margin_top = 10.0f32;
     let margin_bottom = 18.0f32;
     let plot_w = size.width - margin_left - margin_right;
     let plot_h = size.height - margin_top - margin_bottom;
     let origin = Point::new(margin_left, margin_top);
 
-    // Background
     frame.fill_rectangle(
         origin,
         Size::new(plot_w, plot_h),
         Color::from_rgb(0.10, 0.10, 0.13),
     );
 
-    // Grid lines (horizontal for temp levels)
     let grid_stroke = iced::widget::canvas::Stroke::default()
         .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.08))
         .with_width(0.5);
@@ -252,7 +228,6 @@ fn draw_temp_chart_contents(
         );
     }
 
-    // Border
     frame.stroke_rectangle(
         origin,
         Size::new(plot_w, plot_h),
@@ -261,8 +236,7 @@ fn draw_temp_chart_contents(
             .with_width(1.0),
     );
 
-    // Y-axis labels, left-aligned at the gutter edge so every label starts
-    // on the same line.
+    // Y labels left-aligned so they share a common edge.
     let font = iced::Font::with_name("Consolas");
     for (i, temp) in [0, 20, 40, 60, 80, 100, 110].iter().enumerate() {
         let y = origin.y + plot_h - ((*temp as f32 - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h;
@@ -280,13 +254,9 @@ fn draw_temp_chart_contents(
         });
     }
 
-    // X-axis time labels. Samples are plotted newest-first: t_ratio = 1.0
-    // (the right edge) is "now", so the labels must run from the window
-    // length at the left down to "now" at the right. The "0" coordinate is
-    // not labeled — "now" takes its place.
+    // X-axis: newest at right ("now"); labels run from window length inward.
     let step = (window_seconds / 3).max(5);
-    // Skip the window-boundary label (e.g. "30s" on a 30s window): it would
-    // sit on the plot's left edge. Only interior ticks + "now" are shown.
+    // Skip boundary label to avoid clipping at left edge.
     let mut secs = window_seconds - step;
     while secs > 0 {
         let x = origin.x + (1.0 - secs as f32 / window_seconds as f32) * plot_w;
@@ -304,7 +274,7 @@ fn draw_temp_chart_contents(
         });
         secs -= step;
     }
-    // "now" at the right edge, right-aligned so it is never clipped.
+    // Right-aligned "now" at right edge.
     frame.fill_text(iced::widget::canvas::Text {
         content: "now".to_string(),
         position: Point::new(origin.x + plot_w, origin.y + plot_h + 4.0),
@@ -337,7 +307,6 @@ fn draw_temp_chart_contents(
     let now_ms = samples.back().map(|s| s.ts_ms).unwrap_or(0);
     let start_ms = now_ms - window_seconds * 1_000;
 
-    // Draw lines per sensor
     for (sensor_idx, sensor_name) in sensor_names.iter().enumerate() {
         let color = if colors.is_empty() {
             Color::WHITE
@@ -376,8 +345,7 @@ fn draw_temp_chart_contents(
                     .with_width(1.5),
             );
         } else if points_buf.len() == 1 {
-            // A single sample cannot form a line; draw a dot so the first
-            // reading is visible immediately.
+            // Single sample: draw dot so first reading is visible.
             let pt = &points_buf[0];
             let center = Point::new(
                 origin.x + pt.0 * plot_w,
@@ -411,9 +379,7 @@ mod tests {
     fn push_sample_prunes_expired_entries() {
         let mut h = ThermalHistory::new();
         let now = 100_000i64;
-        // Old sample far outside the 30s window
         h.push_sample(sample(now - 100_000), now);
-        // Recent samples
         h.push_sample(sample(now - 20_000), now);
         h.push_sample(sample(now - 10_000), now);
         h.push_sample(sample(now), now);
@@ -438,7 +404,6 @@ mod tests {
         h.push_sample(sample(now), now);
         let snap1 = h.snapshot(now);
         h.push_sample(sample(now + 200), now + 200);
-        // Still within the 1s publish interval
         let snap2 = h.snapshot(now + 900);
         assert!(Arc::ptr_eq(&snap1, &snap2), "no republish within interval");
         assert_eq!(snap2.len(), 1);

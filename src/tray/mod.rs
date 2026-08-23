@@ -20,18 +20,14 @@ pub struct TrayManager {
     init_started_at: Option<std::time::Instant>,
     icon_loaded: bool,
     thread_handle: Option<JoinHandle<()>>,
-    /// HWND waiting for a two-phase reinit: the old pump was asked to shut
-    /// down; poll_reinit() spawns the fresh pump once the old thread exits.
+    /// Pending HWND for two-phase reinit after old pump exits.
     pending_reinit_hwnd: Option<isize>,
-    /// Last time the tray thread was woken with WM_COMMAND_READY, used to
-    /// re-post the wake-up message until the icon is actually created.
+    /// Last WM_COMMAND_READY wake time for retry until icon creation.
     last_notify_at: Option<std::time::Instant>,
     pub(crate) just_restored_at: Option<std::time::Instant>,
 }
 
-/// How often show_icon_async() re-posts the WM_COMMAND_READY wake-up while
-/// the icon creation is still pending (see lost-wakeup comment in
-/// show_icon_async).
+/// Retry interval for WM_COMMAND_READY wake-ups while icon creation is pending.
 const NOTIFY_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl Default for TrayManager {
@@ -64,8 +60,7 @@ impl TrayManager {
         if self.initialized {
             return true;
         }
-        // A pending two-phase reinit takes precedence; the caller must poll
-        // poll_reinit() instead of init().
+        // NOTE: Pending reinit takes precedence; caller must poll poll_reinit().
         if self.pending_reinit_hwnd.is_some() {
             return false;
         }
@@ -76,7 +71,6 @@ impl TrayManager {
         true
     }
 
-    /// Spawn a fresh message pump thread and wire up all channels.
     fn spawn_pump(&mut self, hwnd: isize) {
         self.hwnd = hwnd;
 
@@ -100,24 +94,9 @@ impl TrayManager {
         self.icon_loaded = false;
     }
 
-    /// Send CreateIcon once the tray thread has signaled it is inside
-    /// GetMessageW (PostThreadMessageW needs the queue to exist first).
-    /// Non-blocking: returns `true` once the CreateIcon request has been posted
-    /// (or the 3s fallback has elapsed), NOT when the icon is actually created.
-    /// Actual creation is tracked via `icon_loaded` / `check_icon_ready`.
-    /// Falls back after 3s so a stuck thread never wedges the UI.
-    ///
-    /// Lost-wakeup handling: PostThreadMessageW is silently dropped when the
-    /// thread's message queue does not exist yet (the 3s fallback path), and
-    /// a WM_COMMAND_READY consumed during the priming GetMessageW leaves the
-    /// CreateIcon command unprocessed until the next notify. While the icon
-    /// is still pending this method therefore re-posts the wake-up (and the
-    /// idempotent CreateIcon command) every NOTIFY_RETRY_INTERVAL, so the
-    /// creation always completes as soon as the queue exists.
+    /// Posts CreateIcon once pump signals readiness; re-posts every NOTIFY_RETRY_INTERVAL to recover lost wake-ups.
     pub fn show_icon_async(&mut self) -> bool {
         if self.icon_requested {
-            // Drain any ready signal so the retry loop stops as soon as the
-            // pump reports, even when check_icon_ready() is not called.
             if let Some(rx) = &self.icon_ready_rx
                 && let Ok(ready) = rx.try_recv()
             {
@@ -129,10 +108,7 @@ impl TrayManager {
                     .is_none_or(|t| t.elapsed() >= NOTIFY_RETRY_INTERVAL);
                 if due {
                     self.last_notify_at = Some(std::time::Instant::now());
-                    // The pump drains all queued commands per wake, so a
-                    // duplicate CreateIcon would only add a no-op command.
-                    // Re-posting the idempotent command every 500ms is the
-                    // documented lost-wakeup recovery; keep it simple.
+                    // NOTE: Duplicate CreateIcon is idempotent; re-post is lost-wakeup recovery.
                     if let Some(tx) = &self.command_tx {
                         let _ = tx.send(TrayCommand::CreateIcon);
                     }
@@ -151,16 +127,12 @@ impl TrayManager {
                     if !timed_out {
                         return false;
                     }
-                    // Best-effort fallback: the command stays queued, and the
-                    // retry loop above keeps re-posting until the queue exists.
                     tracing::warn!("Tray thread ready signal timeout, proceeding anyway");
                     self.thread_ready = true;
                 }
             }
         }
         if self.command_tx.is_none() {
-            // Pump not respawned yet (reinit in progress): wait for the next
-            // poll_reinit() to complete.
             return false;
         }
         self.icon_requested = true;
@@ -175,7 +147,6 @@ impl TrayManager {
         true
     }
 
-    /// Check if the async icon creation has completed, updating `icon_loaded`.
     pub fn check_icon_ready(&mut self) -> bool {
         if let Some(rx) = &self.icon_ready_rx
             && let Ok(ready) = rx.try_recv()
@@ -187,26 +158,16 @@ impl TrayManager {
         self.icon_loaded
     }
 
-    /// Restore the parked window back on screen at its saved position.
-    /// The swapchain stays valid while parked, so no blank frame appears.
     pub fn restore_window(&self) {
         crate::system_info::restore_window_from_tray(self.hwnd);
     }
 
-    /// Park the window off-screen (keeps it WS_VISIBLE so WM_PAINT keeps
-    /// arriving and the swapchain stays valid) instead of SW_HIDE, which
-    /// would make the first frames after restore blank/white.
+    /// Parks window off-screen with WS_VISIBLE to keep swapchain valid.
     pub fn hide_window(&self) {
         crate::system_info::hide_window_to_tray(self.hwnd);
     }
 
-    /// Ask the tray thread to shut down and detach it — non-blocking.
-    ///
-    /// The process is exiting right after this (TrayQuit / QuitWithoutRestore
-    /// / QuitShutdown all close the window next), so the pump thread is
-    /// allowed to die with the process instead of blocking the UI thread on
-    /// join(). Dropping the command channel makes the pump exit via
-    /// TryRecvError::Disconnected if the Shutdown message itself is lost.
+    /// Requests tray thread shutdown without blocking; thread exits with process.
     pub fn shutdown(&mut self) {
         if !self.initialized {
             return;
@@ -238,20 +199,13 @@ impl TrayManager {
         self.initialized
     }
 
-    /// True while the message pump thread is still running.
     pub fn is_alive(&self) -> bool {
         self.thread_handle.as_ref().is_some_and(|h| !h.is_finished())
     }
 
-    /// Drop all thread state so the next `init()` spawns a fresh pump.
     pub fn reset(&mut self) {
         self.command_tx = None;
-        // Wake the (possibly still-alive) pump so it observes the disconnected
-        // channel and runs cleanup_and_exit (unregistering the window class and
-        // destroying the hidden window). Without this, a live pump stays blocked
-        // in GetMessageW forever, the class leaks, and the next init()'s
-        // RegisterClassW fails (ERROR_CLASS_ALREADY_EXISTS) — killing the tray
-        // permanently for the rest of the process.
+        // NOTE: Wakes live pump to observe disconnect and unregister window class.
         notify_tray_thread();
         self.event_rx = None;
         self.icon_ready_rx = None;
@@ -281,13 +235,7 @@ impl TrayManager {
         self.just_restored_at = Some(std::time::Instant::now());
     }
 
-    /// Two-phase reinit, phase 1: ask the old pump to shut down.
-    ///
-    /// Non-blocking — the previous implementation joined the pump thread
-    /// here, which froze the UI whenever the pump was stuck (e.g. while the
-    /// tray context menu is open). The fresh pump is spawned by
-    /// poll_reinit() once the old thread has actually exited; call it from
-    /// the UI tick before checking is_alive().
+    /// Phase 1 of two-phase reinit: requests old pump shutdown without blocking.
     pub fn request_reinit(&mut self, hwnd: isize) {
         tracing::info!("TrayManager reinit requested with new HWND: {}", hwnd);
 
@@ -305,8 +253,7 @@ impl TrayManager {
         self.pending_reinit_hwnd = Some(hwnd);
     }
 
-    /// Two-phase reinit, phase 2: complete a pending reinit once the old
-    /// pump thread has exited. Returns true when a fresh pump was spawned.
+    /// Phase 2 of two-phase reinit: spawns fresh pump once old thread exits.
     pub fn poll_reinit(&mut self) -> bool {
         let Some(hwnd) = self.pending_reinit_hwnd else {
             return false;

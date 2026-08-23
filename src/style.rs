@@ -7,50 +7,35 @@ pub const COLOR_CARD_BG: iced::Color = iced::Color { r: 0.14, g: 0.14, b: 0.17, 
 pub const COLOR_CARD_BORDER: iced::Color = iced::Color { r: 0.25, g: 0.25, b: 0.28, a: 1.0 };
 pub const COLOR_NOT_SUPPORTED_BG: iced::Color = iced::Color { r: 0.25, g: 0.12, b: 0.12, a: 0.4 };
 pub const COLOR_NOT_SUPPORTED_TEXT: iced::Color = iced::Color { r: 0.7, g: 0.4, b: 0.4, a: 1.0 };
-/// Curve line / control-point color (#6b75ff). Shared by the curve canvas
-/// and the slider thumbs styled to match the curve's draggable points.
+/// Curve color (#6b75ff) shared by canvas and matching slider thumbs.
 pub const COLOR_CURVE: iced::Color = iced::Color { r: 107.0 / 255.0, g: 117.0 / 255.0, b: 1.0, a: 1.0 };
 
-/// Minimum hardware poll interval (ms). framework_tool takes ~50-100ms to run,
-/// so 200ms prevents overlapping subprocess calls while keeping UI responsive.
+/// Minimum poll interval: 200ms avoids overlapping framework_tool calls.
 pub const POLL_RATE_MIN_MS: u32 = 200;
-/// Minimum battery charge limit (%). Framework EC enforces ~25% minimum to
-/// preserve battery health; values below are ignored by hardware.
+/// Minimum charge limit enforced by EC to preserve battery health.
 pub const CHARGE_LIMIT_MIN: u32 = 25;
-/// Maximum battery charge limit (%). Above 100% is invalid per EC spec.
+/// Maximum charge limit per EC spec.
 pub const CHARGE_LIMIT_MAX: u32 = 100;
 
 pub const FONT_SECTION: f32 = 14.0;
 pub const FONT_BODY: f32 = 12.0;
 pub const FONT_SMALL: f32 = 10.0;
 
-/// Background idle detection: if no user interaction for this many ms,
-/// the background poll loop switches to a slower interval to save CPU.
-/// Not applied to fan-curve mode, which must stay responsive to temperature.
+/// Idle threshold before background polling slows to save CPU.
 pub const IDLE_THRESHOLD_MS: u64 = 10_000;
-/// Background poll interval when the user is idle and the fan mode is not
-/// Curve (ms).
+/// Background poll interval when idle and not in Curve mode.
 pub const IDLE_INTERVAL_MS: u64 = 2_000;
-/// UI tick interval when the user is idle (ms). The UI only needs to
-/// rebuild while the user is watching it; at rest it drops to 1Hz.
+/// UI tick interval when idle.
 pub const UI_IDLE_INTERVAL_MS: u64 = 1_000;
-/// UI tick interval when the window is hidden (minimized to tray) (ms).
-/// Hidden windows receive no WM_PAINT, so no presents/view() run while hidden
-/// (each tick is just a trivial update + RedrawWindow syscall). The snapshot
-/// rebuild is skipped while hidden (view_dirty is reset without rebuilding),
-/// so 2s only needs to keep tray liveness / restore / shutdown responsive.
+/// UI tick interval when hidden; no view rebuild, only tray liveness.
 pub const UI_HIDDEN_INTERVAL_MS: u64 = 2_000;
 
-/// Expansion card / PD port scan interval (ms). Runs on a fixed wall-clock
-/// interval independent of idle state, so hotplug stays detectable while the
-/// user is away.
+/// Expansion card scan interval; fixed wall-clock so hotplug stays detectable.
 pub const EXPANSION_SCAN_MS: u64 = 10_000;
-/// versions scan interval (ms).
+/// Versions scan interval.
 pub const VERSIONS_REFRESH_MS: u64 = 60_000;
 
-/// Number of consecutive PD port samples in the same state before it is
-/// classified as "stable" (i.e. a USB-A expansion card rather than a
-/// transient USB device plugged into a USB-C port).
+/// Consecutive samples required to classify a port as stable (USB-A card).
 pub const STABLE_THRESHOLD: usize = 2;
 
 pub const SENSOR_COLORS: [iced::Color; 10] = [
@@ -123,8 +108,7 @@ pub fn mode_style(selected: bool) -> iced::widget::button::Style {
 
 pub fn slider_style(_theme: &iced::Theme, status: iced::widget::slider::Status) -> iced::widget::slider::Style {
     use iced::widget::slider::{Handle, HandleShape, Rail};
-    // Mirrors the curve canvas control points: a round handle in the curve
-    // color with a white ring, growing slightly on hover and while dragging.
+    // Matches curve control points: round handle with white ring.
     let (radius, border_width) = match status {
         iced::widget::slider::Status::Active => (5.0, 2.0),
         iced::widget::slider::Status::Hovered => (6.0, 2.0),
@@ -132,9 +116,7 @@ pub fn slider_style(_theme: &iced::Theme, status: iced::widget::slider::Status) 
     };
     iced::widget::slider::Style {
         rail: Rail {
-            // First background: the filled side (before the handle); second:
-            // the remaining track. The filled side uses the curve color so
-            // the slider reads like the curve line.
+            // Filled side uses curve color to match curve line.
             backgrounds: (COLOR_CURVE.into(), COLOR_DARK.into()),
             width: 4.0,
             border: iced::Border::default().rounded(2),

@@ -10,39 +10,22 @@ use crate::fan_control::CurveStepper;
 use crate::style::{POLL_RATE_MIN_MS, IDLE_THRESHOLD_MS, IDLE_INTERVAL_MS, EXPANSION_SCAN_MS, VERSIONS_REFRESH_MS};
 use crate::temp_chart;
 
-/// PD port state history depth. We keep 3 samples to distinguish USB-A
-/// expansion cards (stable Source/Dfp/no-PD state) from USB devices that
-/// may briefly share the same signature during enumeration. 3 samples at
-/// the fixed 10s expansion scan interval gives ~20-30s of history.
+/// PD history depth to distinguish USB-A cards from transient USB device states.
 const MAX_PD_HISTORY: usize = 3;
 
-/// Consecutive EC read failures tolerated before forcing a client
-/// reinitialization. Recovers from a dead EC driver after sleep/resume
-/// even if the tray's PowerResumed event was missed.
+/// Consecutive EC read failures before reinitializing client (recovers after sleep/resume).
 const MAX_EC_IO_FAILURES: u32 = 5;
 
-/// Consecutive EC fan duty write failures tolerated before forcing a
-/// client reinitialization (separate from reads: a healthy thermal poll
-/// would otherwise keep resetting the read counter while writes fail).
+/// Consecutive EC write failures before reinitializing client (separate from reads).
 const MAX_EC_WRITE_FAILURES: u32 = 5;
 
-/// Re-assert the configured fan duty even when the ramp has converged if
-/// no successful duty write happened for this long. The EC resets fan
-/// control during sleep; if the tray's PowerResumed event is missed, the
-/// fans would otherwise stay off (0 RPM) forever with no write to bring
-/// them back. This window bounds that recovery to 30s.
+/// Re-assert interval for converged fan duty; recovers fans if resume event was missed.
 const FAN_REASSERT_INTERVAL_MS: u64 = 30_000;
 
-/// Rate-limit for the curve-mode fail-safe: when the EC temperature read
-/// fails (empty temps map), hand fan control back to the firmware with
-/// autofanctrl() at most once per interval. The EC firmware has its own
-/// thermal protection; writing 0% duty from a 0°C control temp would
-/// otherwise leave the fans off with no protection.
+/// Rate-limit for curve fail-safe handover to firmware when temps are empty.
 const CURVE_TEMP_FAILOVER_MS: u64 = 30_000;
 
-/// Reset the EC client and mark it unavailable so the next loop iteration
-/// will reinitialize it. Called when a spawn_blocking panics, indicating
-/// the EC may be in a bad state.
+/// Resets EC client after spawn panic so next iteration reinitializes.
 fn reset_ec_on_panic(state: &AppState) {
     warn!("Resetting EC client after spawn panic");
     state.system.cli_available.store(false, Ordering::Release);
@@ -51,9 +34,7 @@ fn reset_ec_on_panic(state: &AppState) {
     });
 }
 
-/// Force EC client reinitialization after consecutive I/O failures. The
-/// driver can go stale after sleep/resume (or any missed PowerResumed
-/// event); recreating the client and reopening the device recovers it.
+/// Forces EC reinitialization after consecutive failures (recovers stale driver after resume).
 fn reset_ec_after_failures(state: &AppState, failures: u32) {
     warn!("EC unresponsive after {} consecutive read failures, reinitializing client", failures);
     state.system.cli_available.store(false, Ordering::Release);
@@ -118,10 +99,7 @@ fn push_pd_ports_history(
     });
 }
 
-/// Permanently mark any port seen reporting a Sink power role as USB-C.
-/// Only USB-C ports can sink, so the marker never expires — this keeps a
-/// USB-C expansion-card port from being reclassified as USB-A once its
-/// short history window no longer contains the idle Sink samples.
+/// Marks ports ever seen as Sink as USB-C (persists beyond history window).
 fn mark_pd_usb_c_seen(
     ports: &[cli::ec_wrapper::UsbCPort],
     seen_ref: &Arc<RwLock<Arc<Vec<bool>>>>,
@@ -131,9 +109,7 @@ fn mark_pd_usb_c_seen(
     }
     with_write_lock(seen_ref, |guard| {
         let mut seen = (**guard).clone();
-        // pd_ports() skips ports whose EC read failed, so the port index is
-        // not a contiguous 0..len sequence — size the vec for the highest
-        // seen port to avoid indexing out of bounds.
+        // Size vec for highest port index; EC skips failed ports so indices are sparse.
         let need = ports.iter().map(|p| p.port as usize + 1).max().unwrap_or(0);
         if seen.len() < need {
             seen.resize(need, false);
@@ -151,9 +127,7 @@ fn mark_view_dirty(state: &AppState) {
     state.lifecycle.view_dirty.store(true, Ordering::Release);
 }
 
-/// A quit has begun (shutdown flag set). Fan writes must not be issued
-/// anymore — a write submitted after the quit-time duty/restore write would
-/// land on the EC after it, leaving the fans at the wrong duty on exit.
+/// Returns true if shutdown requested; fan writes must not be issued after quit write.
 fn shutdown_requested(state: &AppState) -> bool {
     state.lifecycle.shutdown.load(Ordering::Acquire)
 }
@@ -162,11 +136,9 @@ fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
     if fan_count == 0 {
         return;
     }
-    // Process-global: assumes exactly one background loop / AppState per process.
-    // Safe today (single instance), but a second AppState (e.g. concurrent tests
-    // or a future multi-window design) would cross-contaminate this fast-path.
+    // Process-global single-instance assumption; second AppState would cross-contaminate.
     static LAST_FAN_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    // Fast path: fan count unchanged and per_fan_duty already sized — avoid write lock.
+    // Fast path: avoid write lock when count unchanged and duties sized.
     let last = LAST_FAN_COUNT.load(Ordering::Acquire) as usize;
     if fan_count == last {
         let len = read_lock(&state.fan.per_fan_duty).len();
@@ -182,22 +154,14 @@ fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
     with_write_lock(&state.fan.per_fan_duty, |guard| {
         let duties = Arc::make_mut(guard);
         if duties.len() >= fan_count {
-            // Never truncate: when the fan count drops (undock, module swap)
-            // the entries beyond the current count are the user's saved
-            // per-fan duties. Discarding them here and re-filling with the
-            // manual duty on the next dock would silently overwrite the
-            // saved values via FanPerDutyChanged's live->config copy.
+            // Never truncate; preserves saved per-fan duties across undock/dock.
             return;
         }
         duties.resize(fan_count, fill);
         resized = true;
     });
     LAST_FAN_COUNT.store(fan_count as u64, Ordering::Release);
-    // Note: the resize is deliberately NOT written back to config. It only
-    // tracks hardware fan-count changes (docking, module swaps); persisting
-    // it would overwrite the user's saved per-fan values with fill values
-    // derived from the current manual duty. The config is updated only when
-    // the user explicitly edits a per-fan duty (FanPerDutyChanged).
+    // NOTE: Resize is not persisted; only tracks hardware changes. Config updates on explicit edits.
     if resized {
         mark_view_dirty(state);
     }
@@ -209,12 +173,12 @@ fn estimate_duty_from_thermal(state: &AppState) -> Option<u32> {
         t.fans.iter().map(|f| f.rpm).max().map(|rpm| {
             let max_rpm = state.fan.fan_max_rpm.load(Ordering::Acquire) as u32;
             if rpm == 0 {
-                // Stopped fans: seed the ramp at 0, not the 10% floor.
+                // Seed stopped fans at 0.
                 0
             } else if max_rpm == 0 {
                 10
             } else {
-                // Compute in u64: rpm*100 can overflow u32 for extreme RPMs.
+                // Use u64 to avoid overflow.
                 ((rpm as u64 * 100) / max_rpm as u64).clamp(10, 100) as u32
             }
         })
@@ -225,8 +189,7 @@ fn estimate_duty_from_thermal(state: &AppState) -> Option<u32> {
 
 #[allow(clippy::collapsible_if)]
 fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> bool {
-    // Periodically reset fan_max_rpm to avoid stale readings from hardware changes.
-    // Reset every 60 seconds so the max adapts to the actual current fan capability.
+    // Periodically reset fan_max_rpm (60s) to adapt to hardware changes.
     const FAN_MAX_RPM_RESET_INTERVAL_MS: u64 = 60_000;
     let now_ts = crate::util::monotonic_ms();
     let fan_count = t.fans.len() as u64;
@@ -236,28 +199,17 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
         let prev = state.fan.fan_max_rpm.load(Ordering::Acquire) as u32;
         let last_reset = state.fan.last_fan_rpm_reset.load(Ordering::Acquire);
         if now_ts.saturating_sub(last_reset) >= FAN_MAX_RPM_RESET_INTERVAL_MS {
-            // Rolling re-baseline: only ever RAISE the max-RPM baseline,
-            // never lower it. Lowering it while the fans idle (e.g. 800 RPM)
-            // makes estimate_duty_from_thermal read ~100%, so the next
-            // Manual-mode entry would seed the ramp at ~90% duty — the exact
-            // failure the resume path avoids by keeping fan_max_rpm across
-            // sleep. The seed only affects the ramp start, never the final
-            // converged duty, so a high baseline is always safe.
+            // Rolling re-baseline only raises max; lowering while idle would mis-seed ramp.
             state.fan.fan_max_rpm.store(max_rpm.max(prev) as u64, Ordering::Release);
             state.fan.last_fan_rpm_reset.store(now_ts, Ordering::Release);
         } else if max_rpm > prev {
             state.fan.fan_max_rpm.store(max_rpm as u64, Ordering::Release);
         }
     }
-    // Monotonic timestamp: the sample ts is only used for relative window
-    // pruning and chart ratios, never displayed as absolute time — using the
-    // wall clock here would let a system clock jump prune or freeze the
-    // history.
+    // Monotonic timestamp for window pruning; wall clock would break on jumps.
     let now = crate::util::monotonic_ms() as i64;
 
-    // Read-only comparison first to avoid cloning when unchanged.
-    // Compare the whole payload: fan RPM can change while temperatures stay
-    // flat (manual ramping, EC recovery), and that data must still be stored.
+    // Avoid cloning if unchanged; compare whole payload to catch fan RPM changes.
     let changed = {
         let cur = read_lock(&state.thermal.data);
         match cur.as_ref().as_ref() {
@@ -266,11 +218,7 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
         }
     };
     if !changed {
-        // Even when temps/fans haven't changed, the chart's time base
-        // (`now_ms` = last sample's ts) would otherwise freeze and the
-        // next change would prune a large gap at once. Push a periodic
-        // sample so the window slides smoothly, but throttle to 1/s to
-        // avoid rebuilding the view every 200 ms when idle.
+        // Push periodic sample to keep chart window sliding; throttle to 1/s when idle.
         let history = read_lock(&state.thermal.history);
         if let Some(last_ts) = history.last_timestamp() {
             if now - last_ts < 1_000 {
@@ -279,11 +227,10 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
         }
     }
 
-    // Wrap temps in Arc for history samples — avoids deep clone on every history read
+    // Share temps via Arc to avoid deep clone on history reads.
     let temps_for_history = std::sync::Arc::clone(&t.temps);
 
-    // Update cached sensor_keys if the key set changed (rare — only on hardware change)
-    // Zero-alloc comparison: check length + element-wise before cloning
+    // Update sensor cache if key set changed (rare hardware change).
     let keys_changed = {
         let cache = read_lock(&state.thermal.sensor_cache);
         cache.keys.len() != t.temps.len()
@@ -325,9 +272,7 @@ pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<cli::
     let pd_history_ref = Arc::clone(&state.peripherals.pd_ports_history);
     let exp_ref = Arc::clone(&state.peripherals.expansion_cards);
     let ec_clone = Arc::clone(ec);
-    // Single blocking task for all EC reads — 1 wake instead of 5, at the
-    // cost of sum latency (~250ms vs ~100ms) which is acceptable for the
-    // one-shot init path.
+    // Single blocking task for all EC reads to reduce wakes.
     let batch = tokio::task::spawn_blocking(move || {
         (
             ec_clone.thermal(),
@@ -386,14 +331,7 @@ pub fn spawn(state: AppState) {
                     let init_config = read_lock(&bg_state2.lifecycle.config);
                     (init_config.fan.mode, matches!(init_config.fan.mode, crate::types::FanControlMode::Manual))
                 };
-                // Startup in Disabled (Auto) mode must still restore firmware
-                // fan control: the EC may hold a stale manual duty from a
-                // previous session (crash or "quit without restore"). Seed
-                // last_fan_mode as None so the Disabled branch's "entered
-                // Disabled" action runs once on the first iteration. Other
-                // modes keep Some(init) so their first iteration is not
-                // treated as a mode change (which would discard the
-                // saved-duty ramp seed).
+                // Seed Disabled as None to force firmware restore on first iteration.
                 let mut last_fan_mode: Option<crate::types::FanControlMode> =
                     if init_fan_mode == crate::types::FanControlMode::Disabled {
                         None
@@ -403,18 +341,11 @@ pub fn spawn(state: AppState) {
                 let mut last_manual_duty: Option<u32> = None;
                 let mut consecutive_ec_failures: u32 = 0;
                 let mut consecutive_ec_write_failures: u32 = 0;
-                // Monotonic time of the last successful fan duty write.
-                // Drives the periodic re-assert that recovers the fans when
-                // a sleep/resume cycle was not detected (missed event).
+                // Last successful duty write time for periodic re-assert.
                 let mut last_duty_write_ms: u64 = 0;
-                // Monotonic time of the last curve fail-safe autofanctrl()
-                // handover (see CURVE_TEMP_FAILOVER_MS).
+                // Last curve fail-safe handover time.
                 let mut last_curve_failover_ms: u64 = 0;
-                // True on the iteration right after a resume was detected.
-                // Manual control then re-asserts itself with at least one
-                // duty write even when the ramp estimate already equals the
-                // target, since the EC reverted to firmware control during
-                // sleep and needs an explicit write to hand control back.
+                // True on iteration after resume to re-assert manual control.
                 let mut just_resumed = false;
                 let mut manual_ramp_current: Option<u32> = if saved_duty > 0 {
                     Some(saved_duty)
@@ -423,11 +354,7 @@ pub fn spawn(state: AppState) {
                 } else {
                     None
                 };
-                // Per-fan ramp state for Manual mode (unified_duty = false).
-                // One entry per fan: the last duty actually written to that
-                // fan. Seeded from the RPM-based estimate on first use so
-                // per-fan mode ramps like the unified path instead of
-                // jumping straight to the target duty.
+                // Per-fan ramp state for Manual mode (one entry per fan).
                 let mut manual_per_fan_ramp: Option<Vec<u32>> = None;
                 let mut curve_stepper = if saved_duty > 0 { CurveStepper::with_last_duty(saved_duty) } else { CurveStepper::new() };
                 let start_ms = crate::util::monotonic_ms();
@@ -437,9 +364,7 @@ pub fn spawn(state: AppState) {
                 let mut last_resume_ts: u64 = 0;
                 'poll_loop: loop {
                     let resume_ts = bg_state2.lifecycle.last_resume_ts.load(Ordering::Acquire);
-                    // If shutdown was requested while awaiting below, skip the
-                    // resume handling and let the shutdown re-check end the task,
-                    // instead of re-opening the EC device mid-teardown.
+                    // Skip resume handling if shutdown requested.
                     if bg_state2.lifecycle.shutdown.load(Ordering::Acquire) {
                         return;
                     }
@@ -449,11 +374,8 @@ pub fn spawn(state: AppState) {
                         last_manual_duty = None;
                         manual_ramp_current = None;
                         manual_per_fan_ramp = None;
-                        // Also forget the last seen mode: the EC may have
-                        // reverted to firmware fan control during sleep, so
-                        // the next iteration must re-assert the selected mode
-                        // (Disabled → run autofanctrl once; Manual/Curve →
-                        // re-seed the ramp states and write again).
+                        // EC reverts to firmware control during sleep. Force the next
+                        // iteration to re-assert the selected mode and re-seed ramps.
                         last_fan_mode = None;
                         just_resumed = true;
                         bg_state2.system.cli_available.store(false, Ordering::Release);
@@ -461,23 +383,16 @@ pub fn spawn(state: AppState) {
                             *guard = Arc::new(None);
                         });
                         bg_state2.fan.last_fan_rpm_reset.store(resume_ts, Ordering::Release);
-                        // Keep fan_max_rpm from before sleep: it is the fan's
-                        // real max-RPM baseline, so estimate_duty_from_thermal
-                        // still computes the actual current duty after resume
-                        // and the ramp starts from the real fan speed. Only
-                        // last_fan_rpm_reset moves forward so the rolling
-                        // re-baseline is deferred by 60s past resume. Resetting
-                        // fan_max_rpm here made the estimate read ~100% (the
-                        // first post-resume rpm would become the new max).
+                        // Keep fan_max_rpm as the real max-RPM baseline for accurate
+                        // ramp seeding after resume; only defer the rolling re-baseline
+                        // by 60s via last_fan_rpm_reset.
                         bg_state2.fan.last_applied_duty.store(0, Ordering::Release);
-                        // Also forget the last duty write time so the 30s
-                        // re-assert guard trips immediately on the resume
-                        // iteration (otherwise Curve/Manual duty can stay
-                        // un-asserted for up to 30s after a short sleep).
+                        // Reset duty write time so the 30s re-assert guard trips
+                        // immediately on the resume iteration; otherwise Curve duty
+                        // could stay un-asserted for up to 30s after a short sleep.
                         last_duty_write_ms = 0;
-                        // Retain thermal history/sensor cache across resume so the chart
-                        // doesn't flash blank on the left; stale samples will be
-                        // pruned by the normal window-based retention.
+                        // Retain thermal history so the chart does not flash blank;
+                        // stale samples are pruned by the normal window retention.
                         tracing::warn!("[RESUME] EC client and fan state reset after system resume (history retained)");
                     }
                     // Read fan mode from atomic (no config lock needed)
@@ -486,9 +401,7 @@ pub fn spawn(state: AppState) {
                     );
                     let interval = match fan_mode {
                         crate::types::FanControlMode::Curve => {
-                            // The curve step interval is independently
-                            // configurable ([fan.curve] poll_ms, 500-5000ms)
-                            // so a slow fan curve keeps a fast sensor poll.
+                            // Curve interval is independently configurable.
                             let cfg = read_lock(&bg_state2.lifecycle.config);
                             cfg.fan.curve.as_ref()
                                 .map(|c| c.poll_ms)
@@ -501,8 +414,7 @@ pub fn spawn(state: AppState) {
                     let last_interaction = bg_state2.lifecycle.last_interaction_ts.load(Ordering::Acquire);
                     let is_idle = now_ms.saturating_sub(last_interaction) > IDLE_THRESHOLD_MS;
                     let effective_interval = match fan_mode {
-                        // Fan curve must keep responding to temperature even when the
-                        // user is idle; the idle slowdown only applies to non-curve modes.
+                        // Curve must keep responding while idle; slowdown only for other modes.
                         crate::types::FanControlMode::Curve => interval,
                         _ if is_idle => IDLE_INTERVAL_MS,
                         _ => interval,
@@ -514,11 +426,7 @@ pub fn spawn(state: AppState) {
                     let ec: Arc<cli::EcClient> = match ec_opt.as_ref().as_ref() {
                         Some(c) => Arc::clone(c),
                         None => {
-                            // Startup: the init task owns EC creation and is
-                            // still in flight — do not race it with a second
-                            // client. Once ec_init_done is set (success or
-                            // failure), the loop may create/recover the client
-                            // on its own (e.g. after reset_ec_after_failures).
+                            // Wait for init task before creating own client.
                             if !bg_state2.system.ec_init_done.load(Ordering::Acquire) {
                                 continue;
                             }
@@ -551,11 +459,7 @@ pub fn spawn(state: AppState) {
                     let ec_clone = Arc::clone(&ec);
                     match tokio::task::spawn_blocking(move || ec_clone.thermal()).await {
                         Ok(Ok(t)) => {
-                            // Empty temps mean the EC thermal read silently
-                            // failed (ec_wrapper returns Ok with an empty map).
-                            // Do not reset the failure counter in that case, or
-                            // the curve empty-temps fail-safe can never reach
-                            // the MAX_EC_IO_FAILURES reset threshold.
+                            // Empty temps indicates silent EC failure; do not reset counter.
                             if !t.temps.is_empty() {
                                 consecutive_ec_failures = 0;
                             }
@@ -582,13 +486,12 @@ pub fn spawn(state: AppState) {
                             }
                         }
                     }
-                    // While the user is idle, skip the per-cycle UI-only reads (battery) to
-                    // save subprocess spawns; thermal still feeds the fan curve.
+                    // Skip UI-only reads while idle to save spawns.
                     if !is_idle {
                         let ec_clone = Arc::clone(&ec);
                         if let Ok(Ok(bat)) = tokio::task::spawn_blocking(move || ec_clone.power()).await {
                             let ac_now = bat.ac_present == Some(true);
-                            // Detect AC→battery transition: signal PL reset on next tick.
+                            // Signal PL reset on AC->battery transition.
                             let ac_was = bg_state2.battery.prev_ac_present.load(Ordering::Acquire);
                             if ac_was && !ac_now {
                                 bg_state2.lifecycle.pl_reset_pending.store(true, Ordering::Release);
@@ -607,8 +510,7 @@ pub fn spawn(state: AppState) {
                         }
                     }
 
-                    // Expansion / PD scans run on fixed wall-clock intervals
-                    // so hotplug is always detectable.
+                    // Expansion/PD scans on fixed intervals for hotplug detection.
                     now_ms = crate::util::monotonic_ms();
                     if now_ms.saturating_sub(last_expansion_scan) >= EXPANSION_SCAN_MS {
                         last_expansion_scan = now_ms;
@@ -650,17 +552,14 @@ pub fn spawn(state: AppState) {
                         }
                     }
 
-                    // CPU power (PL1/PL2) via PawnIO — poll every 5 seconds.
-                    // This is a slow operation (MSR + MMIO reads) so we keep
-                    // the interval long and only refresh when the UI is active.
+                    // Poll CPU power every 5s; slow MSR/MMIO reads only when UI active.
                     const CPU_POWER_POLL_MS: u64 = 5000;
                     if bg_state2.system.intel_cpu.load(Ordering::Acquire)
                         && !is_idle
                         && now_ms.saturating_sub(last_cpu_power_poll) >= CPU_POWER_POLL_MS
                     {
                         last_cpu_power_poll = now_ms;
-                        // refresh() runs PawnIO ioctls; keep it off the async
-                        // worker like the other EC I/O in this loop.
+                        // Run PawnIO ioctls off async worker like other EC I/O.
                         let cpu_power = bg_state2.cpu_power.clone();
                         if let Err(e) = tokio::task::spawn_blocking(move || cpu_power.refresh()).await {
                             warn!("CPU power refresh task failed: {}", e);
@@ -668,13 +567,10 @@ pub fn spawn(state: AppState) {
                         mark_view_dirty(&bg_state2);
                     }
 
-                    // Shutdown re-check after scans: a quit initiated during the
-                    // async thermal/scan awaits must not be overwritten by fan
-                    // control (restore or quit duty) below.
+                    // Re-check shutdown after scans to avoid overwriting quit fan control.
                     if bg_state2.lifecycle.shutdown.load(Ordering::Acquire) { return; }
 
-                    // Read only the fields we need, then drop the lock immediately.
-                    // This avoids holding the config lock across ~100ms EC I/O.
+                    // Read needed fields then drop lock to avoid holding across EC I/O.
                     let (manual_duty, curve_hysteresis, curve_rate_limit, curve_rate_limit_down, curve_sensors) = {
                         let config = read_lock(&bg_state2.lifecycle.config);
                         (
@@ -692,11 +588,7 @@ pub fn spawn(state: AppState) {
                     if last_fan_mode.as_ref() != Some(&mode) {
                         let last_duty = bg_state2.fan.last_applied_duty.load(Ordering::Acquire) as u32;
                         if matches!(mode, crate::types::FanControlMode::Curve) && last_duty > 0 {
-                            // Seed the stepper with the duty actually written
-                            // (e.g. by Manual mode) so the first curve step
-                            // ramps to the target instead of jumping to it
-                            // (reset() clears last_duty and the first next()
-                            // returns the raw target).
+                            // Seed stepper with last written duty to ramp instead of jump.
                             curve_stepper = CurveStepper::with_last_duty(last_duty);
                         } else {
                             curve_stepper.reset();
@@ -704,11 +596,7 @@ pub fn spawn(state: AppState) {
                         last_manual_duty = None;
                         manual_per_fan_ramp = None;
                         if matches!(mode, crate::types::FanControlMode::Manual) {
-                            // Prefer the last duty actually written (most
-                            // reliable seed); fall back to the RPM estimate
-                            // only when nothing was written yet (fresh boot,
-                            // or after resume where last_applied_duty is 0
-                            // and the EC reset fan control during sleep).
+                            // Prefer last written duty; fallback to RPM estimate.
                             let last_duty = bg_state2.fan.last_applied_duty.load(Ordering::Acquire) as u32;
                             manual_ramp_current = if last_duty > 0 {
                                 Some(last_duty)
@@ -721,8 +609,7 @@ pub fn spawn(state: AppState) {
                     }
                     match &mode {
                         crate::types::FanControlMode::Disabled => {
-                            // None (startup in Auto mode) counts as "entered
-                            // Disabled": restore firmware fan control once.
+                            // Restore firmware control once when entering Disabled.
                             if last_fan_mode.as_ref().is_none_or(|m| m != &crate::types::FanControlMode::Disabled) {
                                 if shutdown_requested(&bg_state2) { return; }
                                 let ec_clone = Arc::clone(&ec);
@@ -760,10 +647,7 @@ pub fn spawn(state: AppState) {
                                     let current = manual_ramp_current.unwrap_or(target);
                                     let next = crate::fan_control::apply_rate_limit(current, target, 10);
                                     let converged = last_manual_duty == Some(next);
-                                    // Even when converged, periodically re-assert the duty:
-                                    // the EC resets fan control during sleep, and if the
-                                    // resume event was missed the fan would stay off with
-                                    // no write to bring it back.
+                                    // Re-assert periodically even when converged to recover missed resume.
                                     let reassert = converged
                                         && now_ms.saturating_sub(last_duty_write_ms) >= FAN_REASSERT_INTERVAL_MS;
                                     if converged && !reassert {
@@ -804,12 +688,7 @@ pub fn spawn(state: AppState) {
                                     }
                                 }
                             } else {
-                                // Per-fan manual: each fan ramps independently toward its
-                                // configured duty. Deliberately NOT gated by the unified
-                                // duty's ramp state (last_manual_duty), otherwise slider
-                                // changes would stop being applied once the unified ramp
-                                // converges. last_applied_duty tracks the max actually
-                                // written so the quit warning shows a real value.
+                                // Per-fan manual ramps independently; not gated by unified ramp state.
                                 let per_fan = read_lock(&bg_state2.fan.per_fan_duty);
                                 if !per_fan.is_empty() {
                                     let last_duty = bg_state2.fan.last_applied_duty.load(Ordering::Acquire) as u32;
@@ -822,51 +701,28 @@ pub fn spawn(state: AppState) {
                                     let ramp = manual_per_fan_ramp.get_or_insert_with(|| {
                                         vec![seed; per_fan.len()]
                                     });
-                                    // Grow the ramp when the duty list grew (e.g.
-                                    // dock 2 -> 4 fans): without this, fans beyond
-                                    // the old ramp length read "current = target"
-                                    // and are never written, even on slider edits,
-                                    // until a mode switch or resume re-seeds it.
+                                    // Grow ramp when fan count increases; otherwise new fans never get written.
                                     if ramp.len() < per_fan.len() {
                                         ramp.resize(per_fan.len(), seed);
                                     }
                                     let mut wrote_any = false;
                                     let fan_count_now = bg_state2.fan.fan_count.load(Ordering::Acquire) as usize;
-                                    // Re-assert once per pass, not per fan: each
-                                    // successful write refreshes last_duty_write_ms
-                                    // mid-loop, so a per-fan check would make fans
-                                    // 1..N-1 always skip the periodic re-assert and
-                                    // only fan 0 would recover after a missed
-                                    // resume.
+                                    // Re-assert once per pass, not per fan, to ensure all fans recover.
                                     let reassert = now_ms.saturating_sub(last_duty_write_ms)
                                         >= FAN_REASSERT_INTERVAL_MS;
                                     for (idx, &target) in per_fan.iter().enumerate() {
-                                        // Never write to a fan index beyond the
-                                        // physical fan count: the vector keeps
-                                        // entries for docked fans that are
-                                        // currently unplugged (see
-                                        // ensure_per_fan_duty), and the EC
-                                        // wrapper must not be handed a bogus index.
+                                        // Skip indices beyond physical fan count (vector retains docked fans).
                                         if idx >= fan_count_now {
                                             continue;
                                         }
                                         let current = ramp.get(idx).copied().unwrap_or(target);
                                         let next_i = crate::fan_control::apply_rate_limit(current, target, 10);
-                                        // On the resume cycle, still write when the
-                                        // estimate already equals the target: the EC
-                                        // reverted to firmware control during sleep
-                                        // and needs one explicit duty write to hand
-                                        // control back. Same for the periodic
-                                        // re-assert when the ramp has converged — a
-                                        // missed resume event would otherwise leave
-                                        // the fans off with no write to bring them
-                                        // back.
+                                        // Write even when converged on resume or periodic re-assert.
                                         if next_i == current && !just_resumed && !reassert {
                                             continue;
                                         }
                                         if shutdown_requested(&bg_state2) { return; }
-                                        // Re-check mode between fans to avoid setting duties
-                                        // after the user has switched away from Manual mode.
+                                        // Re-check mode between fans to avoid writes after mode switch.
                                         let mode_check = crate::types::FanControlMode::from_u8(
                                             bg_state2.fan.mode.load(Ordering::Acquire) as u8
                                         );
@@ -899,17 +755,12 @@ pub fn spawn(state: AppState) {
                                             }
                                         }
                                     }
-                                    // Update on any successful write, including convergence at 0% —
-                                    // otherwise the quit warning and ramp seed
-                                    // would keep a stale pre-per-fan value.
+                                    // Update on any write, including 0% convergence.
                                     if wrote_any {
                                         let max_applied = ramp.iter().copied().max().unwrap_or(0);
                                         bg_state2.fan.last_applied_duty.store(max_applied as u64, Ordering::Release);
                                     }
-                                    // Keep the unified ramp seed in sync with the per-fan
-                                    // duties so switching back to the unified slider starts
-                                    // from the level the fans are actually at, not a stale
-                                    // pre-per-fan value.
+                                    // Sync unified ramp seed with per-fan max for mode switch.
                                     manual_ramp_current = ramp.iter().copied().max();
                                 }
                             }
@@ -920,22 +771,9 @@ pub fn spawn(state: AppState) {
                                 && let (Some(hyst), Some(rate)) =
                                     (curve_hysteresis, curve_rate_limit)
                             {
-                                    // Fail-safe: an empty temps map means the
-                                    // EC temperature read failed (ec_wrapper
-                                    // returns Ok with empty temps on read
-                                    // error while fan RPMs may still read).
-                                    // curve_control_temp would then return 0
-                                    // and the stepper would write 0% duty —
-                                    // fans off with no firmware protection.
-                                    // Hand control back to the EC firmware,
-                                    // which has its own thermal protection.
+                                    // Fail-safe: empty temps means EC read failed; hand back to firmware.
                                     if thermal.temps.is_empty() {
-                                        // Treat silent empty temps like a read
-                                        // error so a dead EC is eventually
-                                        // reset: autofanctrl() alone can never
-                                        // recover it, and counting here feeds
-                                        // the same MAX_EC_IO_FAILURES path as
-                                        // an explicit thermal() error.
+                                        // Count as read failure toward EC reset.
                                         consecutive_ec_failures += 1;
                                         if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
                                             reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
@@ -953,10 +791,7 @@ pub fn spawn(state: AppState) {
                                                 }
                                                 Ok(Err(e)) => {
                                                     warn!("Curve fail-safe autofanctrl failed: {}", e);
-                                                    // Account for the failure so a
-                                                    // persistently failing EC is
-                                                    // reset instead of retried every
-                                                    // poll cycle with no accounting.
+                                                    // Count failure toward EC reset.
                                                     consecutive_ec_failures += 1;
                                                     if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
                                                         reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
@@ -976,10 +811,10 @@ pub fn spawn(state: AppState) {
                                     let full_pts_arc = read_lock(&bg_state2.fan.curve_full_points);
                                     let full_pts: &[[u32; 2]] = &full_pts_arc;
                                     let mut next = curve_stepper.next(control_temp, hyst, rate, curve_rate_limit_down, full_pts);
-                                    // The stepper only yields a value when the duty
-                                    // changes. When it has converged, periodically
-                                    // re-assert the last duty anyway: a missed resume
-                                    // event would otherwise leave the fans off.
+                                    // Even when the stepper has converged, periodically
+                                    // re-assert the last duty. This recovers from a
+                                    // missed resume event that would otherwise leave
+                                    // fans in firmware control.
                                     if next.is_none()
                                         && now_ms.saturating_sub(last_duty_write_ms) >= FAN_REASSERT_INTERVAL_MS
                                     {
@@ -988,11 +823,9 @@ pub fn spawn(state: AppState) {
                                     if let Some(next) = next {
                                         let fan_count = bg_state2.fan.fan_count.load(Ordering::Acquire) as u32;
                                         let write_each = !bg_state2.fan.unified_duty.load(Ordering::Acquire) && fan_count > 1;
-                                        // Only advance the stepper when the duty was
-                                        // actually applied to every target fan: a
-                                        // partial success must not distort the
-                                        // rate-limit basis (the next step would be
-                                        // computed from an unapplied value).
+                                        // Only advance the stepper when every target fan
+                                        // was updated. Partial success must not distort
+                                        // the ramp state.
                                         let mut applied = false;
                                         if write_each {
                                             let mut all_fans_applied = true;
@@ -1011,12 +844,7 @@ pub fn spawn(state: AppState) {
                                                 match tokio::task::spawn_blocking(move || ec_clone.set_fan_duty(next, Some(fan_idx))).await {
                                                     Ok(result) => {
                                                         if let Err(e) = result {
-                                                            // A write can transiently fail on a fan the EC is
-                                                            // dropping (e.g. a dock just unplugged while the
-                                                            // fan count is still stale). Treat those as local
-                                                            // failures: only a pass where nothing wrote at all
-                                                            // indicates a real EC problem worth counting
-                                                            // toward a reset.
+                                                            // Transient per-fan failure (e.g. dock unplugged); only all-fail counts toward reset.
                                                             all_fans_applied = false;
                                                             failed_fans.push(fan_idx);
                                                             tracing::debug!("Failed to set fan {} duty (curve): {}", fan_idx, e);

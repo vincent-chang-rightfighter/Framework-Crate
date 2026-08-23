@@ -9,8 +9,7 @@ use crate::util::read_lock;
 use crate::background_task::pin_to_slowest_core;
 use crate::types::{Config, SettingU8};
 
-/// Debounce window: only save after this many ms of no further changes.
-/// Prevents redundant disk writes during rapid slider drags.
+/// Debounce window to coalesce rapid slider changes.
 const DEBOUNCE_MS: u64 = 100;
 
 type BatteryKey = Option<SettingU8>;
@@ -36,8 +35,7 @@ async fn apply_battery_when_ready(cfg: &Config, state: &AppState) -> bool {
 }
 
 async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
-    // Never write battery EC registers during shutdown: a quit initiated
-    // while this task is mid-flight must not be followed by EC writes.
+    // Skip EC writes during shutdown.
     if state.lifecycle.shutdown.load(Ordering::Acquire) {
         return false;
     }
@@ -46,10 +44,7 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
     if let Some(ref limit) = cfg.battery.charge_limit_max_pct {
         let pct = if limit.enabled { limit.value } else { 100 };
         let ec_clone = ec.clone();
-        // min_pct=0: Framework EC ignores the minimum charge limit parameter;
-        // it only enforces the max. Using 0 here (not CHARGE_LIMIT_MIN=25)
-        // because the EC's minimum is hardware-enforced at ~25%, and passing
-        // 0 tells the EC "no software minimum" — the hardware minimum still applies.
+        // min_pct=0: EC ignores software minimum; hardware enforces ~25%.
         if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.charge_limit_set(0, pct)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
             warn!("Failed to set charge limit: {}", e);
             return false;
@@ -60,37 +55,24 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
 
 pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState) {
     tokio::spawn(async move {
-        // NOTE: pin_to_slowest_core() pins the *calling* thread. Under a
-        // multi-threaded tokio runtime this pins a shared worker for the whole
-        // lifetime of this task; acceptable here because the config task is
-        // long-lived but lightweight (debounced disk writes + EC writes). If
-        // many tasks shared that worker it could starve them — revisit if the
-        // runtime config changes.
+        // NOTE: Pins calling thread; acceptable for lightweight long-lived task.
         pin_to_slowest_core();
         let mut last_battery: Option<BatteryKey>;
 
-        // Apply the persisted charge limit once EC is ready. The client is
-        // initialized asynchronously, so retry until it appears or shutdown.
+        // Apply persisted charge limit once EC is ready; retry until available or shutdown.
         {
             let (cfg, _ver) = config_rx.borrow().clone();
             let key = battery_key(&cfg);
             last_battery = Some(key);
-            // A bounded startup wait must not silently drop a persisted
-            // charge limit: if the EC never became ready in time, keep
-            // last_battery out of sync so the next config change re-attempts
-            // the apply.
+            // Keep out of sync if apply failed so next change retries.
             if key.is_some() && !apply_battery_when_ready(&cfg, &state).await {
                 last_battery = None;
             }
         }
 
-        // Watch for changes — debounce: wait for the value to stabilise before saving.
-        // This avoids redundant disk writes during rapid slider drags.
+        // Debounce changes to avoid redundant disk writes.
         loop {
-            // If a battery apply is still pending (e.g. EC wasn't ready within
-            // the 5s startup window), wake periodically to retry instead of
-            // blocking forever on the next config change — otherwise a persisted
-            // charge limit that missed startup would never be applied this session.
+            // Retry battery apply periodically if still pending; do not block forever.
             let changed = if last_battery.is_none() {
                 match tokio::time::timeout(Duration::from_secs(5), config_rx.changed()).await {
                     Ok(r) => r,
@@ -107,8 +89,7 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
             };
             if changed.is_err() { break; }
 
-            // Drain rapid successive changes within the debounce window.
-            // The timeout returns Err on timeout (normal), Ok(Err(_)) on channel close.
+            // Drain rapid changes within debounce window.
             let mut latest = config_rx.borrow().clone();
             loop {
                 match tokio::time::timeout(
@@ -119,8 +100,7 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
                         latest = config_rx.borrow().clone();
                     }
                     Ok(Err(_)) => {
-                        // Channel closed — save latest config and exit.
-                        // Versioned: skipped if a newer snapshot already hit disk.
+                        // Channel closed; save latest and exit (versioned).
                         let (cfg_arc, ver) = latest;
                         let save_failed = Arc::clone(&state.lifecycle.bg_config_save_failed);
                         tokio::task::spawn_blocking(move || {
@@ -138,9 +118,7 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
                 }
             }
 
-            // Versioned: a newer shutdown-time save_config_now() marks older
-            // snapshots as superseded, so this debounced write can never roll
-            // the file back after it.
+            // Versioned: newer shutdown save supersedes this older snapshot.
             let (cfg_arc, ver) = latest;
             let cfg_for_battery = Arc::clone(&cfg_arc);
             let save_failed = Arc::clone(&state.lifecycle.bg_config_save_failed);
@@ -155,10 +133,7 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
 
             let key = battery_key(&cfg_for_battery);
             if last_battery.as_ref() != Some(&key) {
-                // Retry failed applies on the next change (EC not ready yet,
-                // or a transient write failure) instead of dropping the
-                // charge limit silently. last_battery only advances on success
-                // so the next change re-attempts the apply.
+                // Retry on failure; only advance on success.
                 if apply_battery_settings(&cfg_for_battery, &state).await {
                     last_battery = Some(key);
                 }

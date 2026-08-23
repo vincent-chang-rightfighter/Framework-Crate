@@ -28,8 +28,7 @@ impl CurveStepper {
     pub fn note_applied(&mut self, duty: u32) {
         self.last_duty = Some(duty);
     }
-    /// Last duty actually applied (or the seed), if any. Used to re-assert
-    /// a converged duty after sleep/resume.
+    /// Last applied duty, used to re-assert after sleep/resume.
     pub fn current_duty(&self) -> Option<u32> {
         self.last_duty
     }
@@ -49,13 +48,10 @@ impl CurveStepper {
                 let should_apply = if hysteresis_c == 0 {
                     true
                 } else if curve_target > current {
-                    // Rising target: re-apply as soon as temp is back at/above
-                    // the start point. A small dip is tolerated, only a rise
-                    // should immediately raise the fan.
+                    // Rising: re-apply once temp recovers to start point.
                     temp >= self.transition_start_temp
                 } else {
-                    // Falling target: require temp to have dropped at least
-                    // hysteresis below the start point before lowering the fan.
+                    // Falling: require drop of hysteresis below start point.
                     temp <= self.transition_start_temp.saturating_sub(hysteresis_c as i32)
                 };
                 if should_apply {
@@ -83,8 +79,7 @@ impl CurveStepper {
 
 pub fn calculate_duty_from_curve(temp: i32, full_points: &[[u32; 2]]) -> u32 {
     if full_points.len() < 2 {
-        // Defensive: curve_full_points always returns >=2, but direct callers
-        // in tests or future code may pass a raw slice.
+        // Defensive: full_points always has >=2, but raw slices may not.
         return 100;
     }
     debug_assert!(full_points.len() >= 2, "full_points must have at least 2 elements (curve_full_points ensures this)");
@@ -100,14 +95,12 @@ pub fn calculate_duty_from_curve(temp: i32, full_points: &[[u32; 2]]) -> u32 {
             return (y1 + ratio * (y2 - y1)).round() as u32;
         }
     }
-    // Safe default: max fan when no curve defined to prevent overheat
+    // No curve: max fan to prevent overheat.
     100
 }
 
 pub fn apply_rate_limit(current: u32, target: u32, max_change: u32) -> u32 {
-    // A zero step would stall the ramp forever (every call returns the same
-    // value, so the caller keeps resubmitting and the fan never moves).
-    // Treat 0 as "no rate limit": jump straight to the target.
+    // Zero step would stall ramp; treat as no limit.
     if max_change == 0 {
         return target;
     }
@@ -150,7 +143,7 @@ mod tests {
     #[test]
     fn calculate_duty_from_curve_empty_uses_full() {
         let points = types::curve_full_points(&[]);
-        // The fallback spans 0°C..110°C, so 50°C sits at 50/110 of the ramp.
+        // Fallback spans 0-110°C, so 50°C is 50/110 of ramp.
         assert_eq!(calculate_duty_from_curve(50, &points), 45);
         assert_eq!(calculate_duty_from_curve(110, &points), 100);
     }

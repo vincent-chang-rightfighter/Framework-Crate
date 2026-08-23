@@ -225,8 +225,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     let snap = match &app.cached_snapshot {
         Some(snap) => snap,
         None => {
-            // First frame after init (before the first Tick rebuild): show a
-            // placeholder instead of borrowing from a temporary snapshot.
+            // First frame before Tick rebuild: placeholder avoids borrowing temporary.
             return container(text("Preparing view...").size(FONT_BODY))
                 .padding(20)
                 .into();
@@ -265,9 +264,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
             ].spacing(8)
         ).padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 8.0 })
     )
-    // Embedded scrollbar: reserves its own strip (6px rail + 4px spacing =
-    // 10px, matching the left column's 10px inset) so it never floats over
-    // or abuts the cards.
+    // Reserve scrollbar strip to match left inset and avoid overlapping cards.
     .direction(scrollable::Direction::Vertical(
         scrollable::Scrollbar::new().width(6.0).scroller_width(6.0).spacing(4.0)
     ))
@@ -281,9 +278,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
                     card(view_battery(app, snap)),
                 ].width(Length::FillPortion(1)).spacing(8)
             )
-            // Match the right column's halved inset (10px inner padding +
-            // the scrollbar area), so the left cards sit as far from the
-            // window edge as the right ones.
+            // Match right column inset for symmetric card alignment.
             .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 })
             .width(Length::FillPortion(1)),
             right_column.width(Length::FillPortion(1)),
@@ -296,10 +291,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     }).width(Length::Fill);
 
     let mut root = column![header].spacing(5);
-    // The banner slot is always present (same Container widget type) so the
-    // content subtree keeps its Tree state (canvas cache, scroll offsets)
-    // when a warning appears/disappears mid-session. Root spacing is 0, so an
-    // empty slot adds no dead gap between the header and the cards.
+    // Keep banner slot always present to preserve Tree state when warnings appear.
     let banner_slot: Element<'_, Message> = match (config_warning, cli_warning) {
         (Some(w), None) => container(w).padding(iced::Padding::from([4, 0])).into(),
         (None, Some(w)) => container(w).padding(iced::Padding::from([4, 0])).into(),
@@ -310,15 +302,11 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     };
     root = root.push(banner_slot);
     let root = root.push(content);
-    // The window height follows the content: the probe reports the laid-out
-    // height of this column to App, which resizes the window to match.
+    // Probe reports content height so window resizes to fit.
     crate::probe::HeightProbe::wrap(root.into(), Arc::clone(&app.content_height))
 }
 
-/// About/Settings page — intentionally bypasses `ViewSnapshot` caching and reads
-/// `App` live. This is a modal screen (not the hot main view) and is shown
-/// infrequently, so the extra rebuild cost is negligible and it avoids
-/// snapshotting rarely-used settings state.
+/// About page reads `App` live; modal and infrequent so it bypasses snapshot cache.
 fn view_settings(app: &App) -> Element<'_, Message> {
     let versions = read_lock(&app.state.system.versions);
 
@@ -539,8 +527,7 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
                 let mut settings_content = column![].spacing(4).padding(4);
                 settings_content = settings_content.push(text("Sensors").size(FONT_BODY));
 
-                // History window selector: same segmented style as the fan
-                // mode buttons, highlighting the active length.
+                // Same segmented style as fan mode buttons; highlights active window.
                 let mut window_row = row![
                     text("Chart Window:").size(FONT_BODY),
                 ].spacing(8).align_y(iced::Alignment::Center);
@@ -555,8 +542,7 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
                 settings_content = settings_content.push(window_row);
 
                 for (idx, name) in cache.keys.iter().enumerate() {
-                    // Small Vec (≤8) — linear `contains` is cheaper than
-                    // building a `HashSet` per frame and has no allocation.
+                    // Small Vec: linear search is cheaper than HashSet with no allocation.
                     let color = SENSOR_COLORS[idx % SENSOR_COLORS.len()];
                     let is_on = all_empty || config.telemetry.selected_sensors.contains(name);
                     let on_off = if is_on { "On" } else { "Off" };
@@ -569,10 +555,7 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
                                     .width(14).height(14).center_x(14).center_y(14)
                                     .style(move |_theme| iced::widget::container::Style {
                                         background: Some(bg_color.into()),
-                                        // White ring matching the slider
-                                        // thumbs / curve control points;
-                                        // dot + 1px ring keep the same visual
-                                        // footprint as the original 16px dot.
+                                        // White ring matches slider thumbs and curve points.
                                         border: iced::Border::default().rounded(7).color(iced::Color::WHITE).width(1),
                                         ..Default::default()
                                     })
@@ -803,8 +786,7 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                                             .width(14).height(14).center_x(14).center_y(14)
                                             .style(move |_theme| iced::widget::container::Style {
                                                 background: Some(bg_color.into()),
-                                                // White ring matching the
-                                                // sensor-settings toggles.
+                                                // White ring matches sensor toggles.
                                                 border: iced::Border::default().rounded(7).color(iced::Color::WHITE).width(1),
                                                 ..Default::default()
                                             })
@@ -832,8 +814,7 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                 };
                 content = content.push(settings_panel);
 
-                // Sort a copy by temperature so the labels (P1..) follow the same
-                // left-to-right order the canvas draws the control points.
+                // Sort by temperature so labels follow canvas left-to-right order.
                 let mut points_sorted = curve.curve.points.clone();
                 points_sorted.sort_by_key(|p| p[0]);
                 for (chunk_idx, chunk) in points_sorted.chunks(3).enumerate() {
@@ -876,9 +857,7 @@ fn view_charge_limit_section(enabled: bool, value: u32) -> Element<'static, Mess
     ].spacing(4).into()
 }
 
-/// Resolve the charge limit to display: an unset limit means the hardware
-/// default (no software cap), so show it as disabled at 100% rather than a
-/// misleading 0%.
+/// Unset limit means no cap; show as disabled at 100%.
 fn charge_limit_display(limit: Option<crate::types::SettingU8>) -> (bool, u32) {
     match limit {
         Some(l) => (l.enabled, l.value as u32),
@@ -969,12 +948,10 @@ fn view_battery_verbose(battery: &crate::cli::ec_wrapper::BatteryData, show_deta
     Some(content.into())
 }
 
-/// Cap for the Battery & Power card. The outer row stretches the left column
-/// to match the right column's height, so a plain `Length::Fill` would make
-/// the card fill all leftover space even when its content is short.
+/// Height cap prevents Battery card from stretching with outer row.
 const BATTERY_SECTION_MAX_HEIGHT: f32 = 300.0;
 
-/// Cap for the Misc card (keyboard backlight, fingerprint LED, ports).
+/// Height cap for Misc card.
 const MISC_SECTION_MAX_HEIGHT: f32 = 300.0;
 
 fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message> {
@@ -1025,8 +1002,7 @@ fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
         }
 
         let right_pad = iced::Padding::ZERO.right(14.0);
-        // Shrink to content with a height cap: compact when the details are
-        // collapsed, internally scrollable when the verbose rows are open.
+        // Height cap keeps card compact; scrollable when details expand.
         container(
             scrollable(container(content).padding(right_pad)).height(Length::Shrink)
         )
@@ -1258,7 +1234,6 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
 fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     let mut content = column![].spacing(2);
 
-    // Header with settings toggle
     let settings_label = if snap.show_cpu_power_settings { "[-] Settings" } else { "[+] Settings" };
     content = content.push(
         row![
@@ -1309,8 +1284,7 @@ fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
         return content.into();
     }
 
-    // Summary line (always visible). The CPU enforces the lower of the MSR
-    // and MMIO power-limit registers, so show the effective (min) value.
+    // Show effective (min) limit; CPU enforces lower of MSR and MMIO.
     let pl1_color = if snap.pl_custom_applied { COLOR_GREEN } else { COLOR_HEADER };
     let pl2_color = if snap.pl_custom_applied { COLOR_GREEN } else { COLOR_HEADER };
     content = content.push(row![
@@ -1325,11 +1299,9 @@ fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
         },
     ].spacing(4));
 
-    // Settings panel (collapsible, with border)
     if snap.show_cpu_power_settings {
         let mut settings_content = column![].spacing(4).padding(4);
 
-        // MSR (static) read-only PL1/PL2
         settings_content = settings_content.push(text("MSR (Read-only)").size(FONT_BODY));
         settings_content = settings_content.push(row![
             text(format!("  PL1: {:.1}W ({:.2}s)", info.pl1_msr, info.pl1_time_s)).size(FONT_BODY),
@@ -1342,7 +1314,6 @@ fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             text(if info.pl2_msr_clamped { " [Cl]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
         ].spacing(4));
 
-        // MMIO (static) read-only PL1/PL2
         settings_content = settings_content.push(text("MMIO (Read-only)").size(FONT_BODY));
         settings_content = settings_content.push(row![
             text(format!("  PL1: {:.1}W ({:.2}s)", info.pl1_mmio, info.pl1_mmio_time_s)).size(FONT_BODY),
@@ -1355,7 +1326,7 @@ fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             text(if info.pl2_mmio_clamped { " [Cl]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
         ].spacing(4));
 
-        // Editable PL1/PL2 — writes to MSR 0x610
+        // Editable PL1/PL2 writes to MSR 0x610.
         settings_content = settings_content.push(text("PL1/PL2 Control").size(FONT_BODY));
         settings_content = settings_content.push(row![
             text("  PL1:").size(FONT_BODY),
@@ -1382,21 +1353,18 @@ fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             text("Cl").size(FONT_SMALL),
         ].spacing(4).align_y(iced::Alignment::Center));
 
-        // Validation error
         if let Some(ref err) = snap.cpu_power_error {
             settings_content = settings_content.push(text(err.as_str())
                 .size(FONT_SMALL)
                 .style(|_theme| iced::widget::text::Style { color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)) }));
         }
 
-        // Sync status
         if snap.sync_enabled {
             settings_content = settings_content.push(text("Syncing MSR 0x610 every 250ms")
                 .size(FONT_SMALL)
                 .style(|_theme| iced::widget::text::Style { color: Some(COLOR_GREEN) }));
         }
 
-        // Buttons
         settings_content = settings_content.push(row![
             button(text("Apply").size(FONT_BODY))
                 .on_press(Message::CpuPowerApply)

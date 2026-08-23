@@ -16,28 +16,20 @@ use crate::style::*;
 use crate::util::{read_lock, with_write_lock};
 use crate::views;
 
-/// Window width (logical px) used for auto-resizing. The width is fixed by
-/// the user's preferred layout; only the height follows the content.
+/// Fixed window width (logical px) for auto-resizing; height follows content.
 const AUTO_WIDTH: f32 = 900.0;
-/// Ceiling for the auto-resized window height (logical px), so the window
-/// never outgrows the screen work area (fan curve mode can be very tall).
+/// Maximum auto-resized window height (logical px) to fit screen work area.
 const AUTO_MAX_HEIGHT: f32 = 1100.0;
-/// Maximum number of debug report files kept in the temp directory.
+/// Maximum debug report files kept in temp directory.
 const MAX_DEBUG_REPORTS: usize = 5;
 
-/// Monotonic per-process version assigned to each config snapshot at save
-/// time. Used to order concurrent config writes: config::save_versioned
-/// skips a write whose version is older than the newest one on disk, so the
-/// debounced background save can never roll the file back past a newer
-/// shutdown-time save.
+/// Monotonic version for config snapshots to prevent stale debounced writes from overwriting newer saves.
 fn next_config_version() -> u64 {
     static CONFIG_VERSION: AtomicU64 = AtomicU64::new(0);
     CONFIG_VERSION.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-/// Delete the oldest `framework_crate_debug_*.txt` files in `dir` until at
-/// most `keep` remain. Older reports are stale snapshots that only waste
-/// temp space, so each new report reaps the surplus.
+/// Prunes oldest `framework_crate_debug_*.txt` files in `dir` to keep at most `keep`.
 fn prune_debug_reports(dir: std::path::PathBuf, keep: usize) {
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return;
@@ -63,9 +55,7 @@ fn prune_debug_reports(dir: std::path::PathBuf, keep: usize) {
     }
 }
 
-/// Execute a closure on the EC client via spawn_blocking. If the EC client
-/// is not available, the task completes silently. Errors from the closure
-/// are logged as warnings.
+/// Executes closure on EC client via spawn_blocking; no-ops silently if unavailable.
 pub(crate) fn run_ec_task(
     ec_client: &Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
     done: Message,
@@ -87,9 +77,7 @@ pub(crate) fn run_ec_task(
     )
 }
 
-/// Flush the persisted charge limit to EC. Used on quit so the hardware
-/// reflects the saved value even though config_save_task skips EC writes
-/// once shutdown is set.
+/// Flushes persisted charge limit to EC on quit (config_save_task skips EC writes during shutdown).
 fn apply_quit_charge_limit(ec: &cli::EcClient, limit: &Option<crate::types::SettingU8>) {
     if let Some(limit) = limit {
         let pct = if limit.enabled { limit.value } else { 100 };
@@ -99,10 +87,7 @@ fn apply_quit_charge_limit(ec: &cli::EcClient, limit: &Option<crate::types::Sett
     }
 }
 
-/// Like `run_ec_task`, but the closure returns a `Result` and the outcome is
-/// reported back via `Message::EcOpResult` so the UI can surface EC write
-/// failures (e.g. keyboard backlight / fingerprint LED) instead of only
-/// logging them.
+/// Like `run_ec_task` but reports `Result` via `Message::EcOpResult` to surface EC write failures.
 pub(crate) fn run_ec_task_result(
     ec_client: &Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
     f: impl FnOnce(Arc<cli::EcClient>) -> Result<(), String> + Send + 'static,
@@ -118,8 +103,7 @@ pub(crate) fn run_ec_task_result(
                     Err(e) => Err(format!("EC task failed: {}", e)),
                 }
             } else {
-                // No EC client (e.g. not running as admin): keep prior behavior
-                // of a silent no-op rather than surfacing a spurious error.
+                // No EC client: silently no-op to avoid spurious error.
                 Ok(())
             };
             Message::EcOpResult(res.err())
@@ -128,9 +112,7 @@ pub(crate) fn run_ec_task_result(
     )
 }
 
-/// Self-rescheduling UI tick. Sleeping via tokio::time lets the runtime
-/// park the thread between ticks, so an idle UI wakes ~1x/sec instead of
-/// hammering update()/view() at a fixed 50ms.
+/// Self-rescheduling UI tick via tokio::time to avoid busy polling.
 fn tick_task(ms: u64) -> Task<Message> {
     Task::perform(
         async move {
@@ -140,11 +122,7 @@ fn tick_task(ms: u64) -> Task<Message> {
     )
 }
 
-/// Refresh CPU power data (MSR/MMIO via PawnIO ioctls) off the UI thread.
-/// `after` runs in the same blocking task once the refresh completes (e.g.
-/// restarting the sync thread or writing BIOS defaults after resume).
-/// Completion arrives as `Message::CpuPowerDataRefreshed`, whose handler
-/// re-applies the edit fields from the fresh snapshot.
+/// Refreshes CPU power data off UI thread; `after` runs after refresh and completion sends `Message::CpuPowerDataRefreshed`.
 fn refresh_cpu_power_task(
     state: crate::cpu_power::CpuPowerState,
     after: impl FnOnce() + Send + 'static,
@@ -164,8 +142,7 @@ fn refresh_cpu_power_task(
     )
 }
 
-/// Stop the CPU power sync thread off the UI thread — the join can block
-/// up to the 250ms sync interval.
+/// Stops CPU power sync thread off UI thread (join may block up to 250ms).
 fn stop_sync_task(state: crate::cpu_power::CpuPowerState) -> Task<Message> {
     Task::perform(
         async move {
@@ -254,9 +231,7 @@ pub struct App {
     pub show_cpu_power_settings: bool,
     pub show_battery_details: bool,
     pub show_settings: bool,
-    /// When true the window starts hidden to tray (set by --minimized from
-    /// the schtasks logon trigger). The first Tick after init_complete
-    /// dispatches MinimizeToTray to actually hide the window.
+    /// Starts hidden to tray when launched with --minimized.
     pub start_minimized: bool,
     pub init_complete: bool,
     pub config_save_failed: bool,
@@ -280,22 +255,16 @@ pub struct App {
     pub last_curve_edit_ts: Instant,
     pub last_curve_points: Vec<[u32; 2]>,
     pub icon_create_in_flight: bool,
-    /// Consecutive iconic check count – auto-minimize only triggers after
-    /// is_iconic() returns true for at least this many consecutive 5-second
-    /// check cycles, preventing false positives during the restore transition.
+    /// Consecutive iconic checks required before auto-minimizing to tray.
     pub iconic_check_count: u32,
     pub(crate) cached_snapshot: Option<crate::views::ViewSnapshot>,
-    /// Laid-out height (logical px) of the main view, reported by the
-    /// HeightProbe widget every layout pass. The window is resized to match.
+    /// Measured main view height (logical px) for window autosizing.
     pub content_height: Arc<Mutex<Option<f32>>>,
-    /// Id of the (single) window, learned from the first Resized event.
+    /// Single window ID learned from first Resized event.
     pub window_id: Option<iced::window::Id>,
-    /// Current window height (logical px), tracked via Resized events.
+    /// Current window height (logical px) tracked via Resized events.
     pub window_height: Option<f32>,
-    /// Whether the window height has been fitted to content. Once set, the
-    /// window stays at that height until a content-affecting toggle
-    /// (sensor/battery/curve/CPU settings) resets it via `height_set = false`,
-    /// allowing re-autosize for the new layout.
+    /// Whether window height is fitted to content; resets on layout-changing toggles.
     pub height_set: bool,
     pub modules_download_error: Option<String>,
     pub pl1_edit: String,
@@ -474,8 +443,7 @@ impl App {
                     with_write_lock(&state.system.ec_client, |guard| {
                         *guard = Arc::new(Some(Arc::clone(&arc_ec)));
                     });
-                    // Published the authoritative client; the background loop
-                    // may now use (or recover) it instead of racing one of its own.
+                    // Publish authoritative EC client for background loop.
                     state.system.ec_init_done.store(true, Ordering::Release);
                     let versions = Arc::clone(&state.system.versions);
                     let ec_cl = Arc::clone(&arc_ec);
@@ -499,8 +467,7 @@ impl App {
                             }
                         }
                     }
-                    // Capture BIOS defaults from the first RAPL read. Do not write
-                    // MSR here — the user has not asked to change power limits.
+                    // Capture BIOS defaults; do not write MSR without user request.
                     if state.system.intel_cpu.load(Ordering::Acquire) {
                         state.cpu_power.refresh();
                         state.cpu_power.init_bios_defaults();
@@ -534,10 +501,7 @@ impl App {
         ])
     }
 
-    /// Keeps the window height in sync with the measured content height.
-    /// Only active once the main view is up (init complete, not on the
-    /// settings / quit-warning screens), and only when the difference is
-    /// larger than sub-pixel rounding, so it converges and stays quiet.
+    /// Syncs window height to measured content height when active.
     fn autosize_task(&self) -> Option<Task<Message>> {
         if !self.init_complete || self.show_settings || self.show_quit_warning || self.height_set {
             return None;
@@ -556,11 +520,7 @@ impl App {
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         let mut task = self.update_inner(message);
-        // Rebuild the snapshot again AFTER the handlers: many config/UI
-        // handlers set view_dirty during dispatch, and rebuilding only at
-        // the top of update_inner would leave the UI stale until the next
-        // Tick (up to a second when idle). The second call is a no-op when
-        // nothing changed.
+        // Rebuild snapshot after handlers that may set view_dirty; no-op if unchanged.
         self.maybe_rebuild_snapshot();
         if let Some(resize) = self.autosize_task() {
             self.height_set = true;
@@ -574,10 +534,7 @@ impl App {
             && (self.state.lifecycle.view_dirty.load(Ordering::Acquire) || self.cached_snapshot.is_none())
         {
             if !self.state.lifecycle.visible.load(Ordering::Acquire) {
-                // Hidden to tray: the UI cannot be seen, so skip the snapshot
-                // rebuild even though the background loop keeps setting
-                // view_dirty. The Show action sets view_dirty again when the
-                // window returns, so the snapshot is rebuilt on restore.
+                // Skip rebuild while hidden; Show will mark dirty and rebuild on restore.
                 self.state.lifecycle.view_dirty.store(false, Ordering::Release);
                 return;
             }
@@ -592,7 +549,7 @@ impl App {
             return tick_task(self.tick_interval_ms - elapsed);
         }
         self.last_tick = Instant::now();
-        // Debounce curve_full_points recomputation (100ms after last slider edit)
+        // Debounce curve_full_points recomputation 100ms after last edit.
         if self.pending_curve_update && self.last_curve_edit_ts.elapsed().as_millis() >= 100 {
             self.pending_curve_update = false;
             self.update_curve_full_points();
@@ -600,7 +557,7 @@ impl App {
         self.cli_present = self.state.system.cli_available.load(Ordering::Acquire);
         self.config_save_failed = self.state.lifecycle.bg_config_save_failed.load(Ordering::Relaxed);
 
-        // AC→battery: auto-reset PL1/PL2 to BIOS defaults
+        // AC→battery: reset PL1/PL2 to BIOS defaults.
         if self.cpu_power_supported()
             && self.state.lifecycle.pl_reset_pending.swap(false, Ordering::Acquire)
                     && self.pl_custom_applied.load(Ordering::Acquire)
@@ -633,23 +590,18 @@ impl App {
         }
 
         if self.tray_initialized {
-            // Complete a pending two-phase reinit before checking liveness:
-            // the old pump may have just exited, and poll_reinit() must
-            // respawn the fresh pump before is_alive() is consulted.
+            // Complete pending tray reinit before liveness check.
             self.tray.poll_reinit();
             if !self.tray.is_alive() {
-                // Message pump thread died (crash or stuck shutdown): drop the
-                // dead state so the next tick spawns a fresh pump, and cancel
-                // any pending minimize so the window never hangs half-hidden.
+                // Tray pump died; reset state and cancel pending minimize.
                 tracing::warn!("Tray message pump thread exited unexpectedly");
                 self.tray_initialized = false;
                 self.pending_minimize_to_tray = false;
                 self.tray.reset();
             } else {
-                // Retry icon creation until the tray thread is ready —
-                // show_icon_async() is a non-blocking no-op until then.
+                // Retry icon creation until tray thread is ready.
                 self.tray.show_icon_async();
-                // Only validate HWND every 5 seconds to avoid repeated FindWindowW syscalls
+                // Validate HWND every 5s to avoid frequent syscalls.
                 const HWND_CHECK_INTERVAL_MS: u64 = 5000;
                 if now_ms.saturating_sub(self.last_hwnd_check_ts) >= HWND_CHECK_INTERVAL_MS {
                     self.last_hwnd_check_ts = now_ms;
@@ -659,9 +611,7 @@ impl App {
                             self.tray.request_reinit(hwnd);
                             self.tray.show_icon_async();
                         } else {
-                            // Reset the pump state too: tray_initialized alone
-                            // would skip the init() branch above, and the old
-                            // pump would keep running against the dead HWND.
+                            // Reset pump state so next tick re-initializes.
                             self.tray.reset();
                             self.tray_initialized = false;
                             tracing::error!("Cannot find window after HWND invalidation");
@@ -713,7 +663,7 @@ impl App {
             }
         }
 
-        // Detect sync thread death (MSR write failure caused it to exit).
+        // Detect sync thread death (MSR write failure).
         if self.state.cpu_power.sync_enabled.load(Ordering::Acquire)
             && !self.state.cpu_power.is_sync_alive()
         {
@@ -744,11 +694,7 @@ impl App {
                 self.mutate_config(|cfg| {
                     cfg.fan.manual = Some(crate::types::ManualConfig { duty_pct: duty });
                 });
-                // last_applied_duty is NOT updated here: it tracks the duty
-                // actually written by the background task (which stores it on
-                // a successful EC write). The slider position reads the config
-                // value above, so the quit warning only ever shows a duty the
-                // fans are really at.
+                // Do not update last_applied_duty here; it tracks actual EC writes.
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
@@ -770,9 +716,7 @@ impl App {
                     }
                 });
                 self.mutate_config(|cfg| {
-                    // Copy the live vector so edits on slots the config does
-                    // not know about yet (added by ensure_per_fan_duty after
-                    // a hardware fan-count change) persist too.
+                    // Copy live duties to preserve values for newly added fans.
                     let live = read_lock(&self.state.fan.per_fan_duty);
                     cfg.fan.per_fan_duty = (*live).clone();
                 });
@@ -782,11 +726,7 @@ impl App {
             }
             Message::FanCurvePointMoved(idx, temp, duty) => {
                 let duty = duty.clamp(0, 100);
-                // Keep this point's temperature strictly between its sorted
-                // neighbors (>=1°C gap). Duplicate temps collapse in
-                // curve_full_points and produce a phantom control point that is
-                // drawn but has no effect on the actual fan curve, and would be
-                // persisted as silent config corruption.
+                // Clamp temperature between neighbors to avoid duplicate temps collapsing control points.
                 let temp = {
                     let cfg = read_lock(&self.state.lifecycle.config);
                     let points = cfg
@@ -857,8 +797,7 @@ impl App {
                         curve.poll_ms = ms;
                     }
                 });
-                // No tick reschedule needed: the background loop reads the
-                // curve poll interval from the config each iteration.
+                // Background loop reads poll interval directly; no tick reschedule needed.
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.save_config();
                 Some(Task::none())
@@ -917,8 +856,7 @@ impl App {
                 };
                 self.mutate_config(|cfg| {
                     if let Some(curve) = cfg.fan.curve.as_mut() {
-                        // Single-sensor selection: the curve is driven by
-                        // exactly one temperature sensor.
+                        // Curve is driven by single selected sensor.
                         curve.curve.sensors = vec![name];
                     }
                 });
@@ -953,9 +891,7 @@ impl App {
         match *message {
             Message::CloseRequested(id) => {
                 self.closing_window_id = Some(id);
-                // If startup failed (e.g. not running as administrator) there is
-                // no tray to minimize into, so honor the error screen's
-                // instruction and actually quit instead of hiding the window.
+                // No tray on startup failure; quit directly instead of minimizing.
                 if self.startup_error.is_some() {
                     self.tray.shutdown();
                     self.state.lifecycle.shutdown.store(true, Ordering::Release);
@@ -1002,8 +938,7 @@ impl App {
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 self.icon_create_in_flight = false;
                 self.iconic_check_count = 0;
-                // Clear any pending hide: the window is now visible again
-                // and a deferred minimize must not re-hide it on the next tick.
+                // Clear pending hide; window is visible again.
                 self.pending_minimize_to_tray = false;
                 Some(Task::none())
             }
@@ -1045,15 +980,9 @@ impl App {
                         if !self.cpu_power_supported() {
                             return Some(Task::none());
                         }
-                        // Re-read MSR/MMIO off the UI thread — the thread
-                        // join and PawnIO ioctls are both slow, and hardware
-                        // state is undefined after resume.
+                        // Re-read MSR/MMIO off UI thread; hardware state is undefined after resume.
                         let was_sync = self.state.cpu_power.sync_enabled.load(Ordering::Acquire);
-                        // Keep pl_custom_applied when the sync was running:
-                        // the custom limits are still in force (we restart
-                        // the sync below), and the flag also gates the
-                        // AC→battery PL reset — clearing it would silently
-                        // disable that reset for sync users.
+                        // Keep pl_custom_applied if sync was active to preserve AC->battery reset gating.
                         if !was_sync {
                             self.pl_custom_applied.store(false, Ordering::Release);
                         }
@@ -1063,10 +992,7 @@ impl App {
                         let after = {
                             let cpu_power = cpu_power.clone();
                             move || {
-                                // Re-read the flag inside the closure: the refresh
-                                // window is several hundred ms and the user may have
-                                // toggled sync since `was_sync` was captured — never
-                                // undo a newer choice.
+                                // Re-read flag; user may have toggled sync during refresh window.
                                 if cpu_power.sync_enabled.load(Ordering::Acquire) {
                                     let info = cpu_power.snapshot();
                                     let _ = cpu_power.start_sync(
@@ -1076,14 +1002,7 @@ impl App {
                                     );
                                 } else if custom_applied.load(Ordering::Acquire) {
                                     cpu_power.stop_sync();
-                                    // Only restore when the user had applied custom
-                                    // limits: without a custom apply the firmware's
-                                    // own power management is authoritative, and
-                                    // blindly writing boot-time (possibly AC) defaults
-                                    // could override the OEM's battery-mode protection.
-                                    // Additionally refuse when the snapshot's capture
-                                    // power source differs from the current one — an
-                                    // AC snapshot must never land on battery.
+                                    // Only restore custom limits; skip if power source mismatches.
                                     if let Some(bios) = bios {
                                         let ac_now = crate::cpu_power::read_ac_present();
                                         let source_matches = bios.captured_on_ac == ac_now;
@@ -1112,9 +1031,7 @@ impl App {
                 self.show_quit_warning = false;
                 self.state.lifecycle.shutdown.store(true, Ordering::Release);
                 let limit = read_lock(&self.state.lifecycle.config).battery.charge_limit_max_pct;
-                // Run the EC restore first and only quit once it completes,
-                // so "Restore Auto & Exit" actually restores the fan before
-                // the process exits. Also flush the charge limit to EC.
+                // Restore fan before quitting; also flush charge limit to EC.
                 Some(run_ec_task(&self.state.system.ec_client, Message::QuitShutdown, move |ec| {
                     if let Err(e) = ec.autofanctrl() {
                         warn!("Failed to restore auto fan control on quit: {}", e);
@@ -1131,8 +1048,7 @@ impl App {
                 self.state.lifecycle.shutdown.store(true, Ordering::Release);
                 let duty = self.quit_duty_value;
                 let limit = read_lock(&self.state.lifecycle.config).battery.charge_limit_max_pct;
-                // Same as QuitWithRestore: write the quit duty first, then quit.
-                // Also flush the charge limit to EC.
+                // Write quit duty before quitting; also flush charge limit.
                 Some(run_ec_task(&self.state.system.ec_client, Message::QuitShutdown, move |ec| {
                     if let Err(e) = ec.set_fan_duty(duty, None) {
                         warn!("Failed to set quit fan duty: {}", e);
@@ -1144,7 +1060,7 @@ impl App {
                 self.show_quit_warning = false;
                 self.tray.shutdown();
                 let limit = read_lock(&self.state.lifecycle.config).battery.charge_limit_max_pct;
-                // Flush the charge limit to EC before the final shutdown/close.
+                // Flush charge limit to EC before shutdown.
                 Some(run_ec_task(&self.state.system.ec_client, Message::QuitShutdown, move |ec| {
                     apply_quit_charge_limit(&ec, &limit);
                 }))
@@ -1190,9 +1106,7 @@ impl App {
                 self.rebuild_sensor_cache();
                 self.cached_snapshot = Some(crate::views::ViewSnapshot::from_app(self));
                 self.state.lifecycle.view_dirty.store(false, Ordering::Release);
-                // When launched by the schtasks logon trigger (--minimized),
-                // hide to tray immediately after init so the window never
-                // flashes on screen.
+                // Hide to tray immediately when launched with --minimized.
                 if self.start_minimized {
                     self.start_minimized = false;
                     return Task::batch([
@@ -1204,10 +1118,7 @@ impl App {
             }
             Message::StartupError(msg) => {
                 self.startup_error = Some(msg);
-                // Still bootstrap the tick loop: the tray is created here and
-                // the periodic refresh keeps running. Otherwise (Task::none())
-                // the tray would never initialize and CloseRequested would hide
-                // the window into a tray that doesn't exist.
+                // Keep tick loop running to initialize tray despite startup error.
                 tick_task(0)
             }
             Message::WindowResized(id, size) => {
@@ -1239,8 +1150,7 @@ impl App {
             Message::ToggleCpuPowerSettings => {
                 self.show_cpu_power_settings = !self.show_cpu_power_settings;
                 self.height_set = false;
-                // This flag lives in the cached ViewSnapshot, so mark it dirty
-                // or the toggle only appears after an unrelated background poll.
+                // Mark dirty; flag is snapshot-backed.
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
@@ -1266,8 +1176,7 @@ impl App {
                 run_ec_task_result(&self.state.system.ec_client, move |ec| ec.fp_led_level_set(level))
             }
             Message::EcOpResult(err) => {
-                // Surface a failed peripheral EC write (keyboard backlight /
-                // fingerprint LED) to the UI instead of only logging it.
+                // Surface peripheral EC write failure to UI.
                 self.ec_op_error = err;
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
@@ -1279,7 +1188,7 @@ impl App {
             }
             Message::ToggleExpansionCardDebug => {
                 self.expansion_card_debug = !self.expansion_card_debug;
-                // Also snapshot-backed (view_misc reads it from the snapshot).
+                // Mark dirty; snapshot-backed value.
                 self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                 Task::none()
             }
@@ -1417,9 +1326,7 @@ impl App {
                     self.state.lifecycle.view_dirty.store(true, Ordering::Release);
                     Task::none()
                 } else {
-                    // Refresh the PawnIO version cache and re-read MSR/MMIO off
-                    // the UI thread; the fresh readback re-populates the edit
-                    // fields via Message::CpuPowerDataRefreshed.
+                    // Refresh PawnIO version and re-read MSR/MMIO off UI thread.
                     self.cpu_power_error = None;
                     crate::cpu_power::invalidate_pawnio_version();
                     refresh_cpu_power_task(self.state.cpu_power.clone(), || {
@@ -1528,20 +1435,12 @@ impl App {
                     Ok(()) => {
                         self.pl_custom_applied.store(true, Ordering::Release);
                         self.cpu_power_error = None;
-                        // Refresh readback and, if sync was running, restart it
-                        // with the values just read back from hardware — both
-                        // off the UI thread (refresh does PawnIO ioctls,
-                        // start_sync joins the old sync thread). Using the
-                        // post-refresh snapshot instead of re-parsing the edit
-                        // fields avoids racing the user typing during the
-                        // ~100ms MSR write.
+                        // Refresh readback and restart sync with fresh values if enabled.
                         let cpu_power = self.state.cpu_power.clone();
                         let after = {
                             let cpu_power = cpu_power.clone();
                             move || {
-                                // Re-read the live flag inside the closure: the
-                                // refresh window is ~100ms and the user may have
-                                // toggled sync since restart_sync was captured.
+                                // Re-read flag; user may have toggled sync during refresh.
                                 if !cpu_power.sync_enabled.load(Ordering::Acquire) {
                                     return;
                                 }
@@ -1603,9 +1502,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.state.cpu_power.sync_enabled.store(true, Ordering::Release);
-                        // Sync enforces custom limits every 250ms, so the
-                        // AC→battery PL reset (gated on pl_custom_applied in
-                        // handle_tick_message) must trigger for sync users too.
+                        // Ensure AC->battery reset triggers for sync users.
                         self.pl_custom_applied.store(true, Ordering::Release);
                         self.cpu_power_error = None;
                         tracing::info!("CPU power sync started");
@@ -1626,8 +1523,7 @@ impl App {
             }
             Message::CpuPowerSyncReset => self.handle_cpu_power_sync_reset(),
             Message::CpuPowerResetDone(_ok) => {
-                // Refresh readback from hardware and update edit fields
-                // so the UI shows the BIOS defaults that were just written.
+                // Refresh readback to show restored BIOS defaults.
                 refresh_cpu_power_task(self.state.cpu_power.clone(), || {})
             }
             Message::CpuPowerDataRefreshed => {
@@ -1652,9 +1548,7 @@ impl App {
             self.config_save_failed = false;
         } else {
             debug!("Config save channel dropped — falling back to sync save");
-            // Synchronous save ensures durability when the async channel is gone.
-            // On the hot path this is rare (only if config_save_task panicked);
-            // during normal operation the channel-based path is used.
+            // Fallback synchronous save when channel is dropped.
             let cfg_owned: Config = (*cfg).clone();
             drop(cfg);
             if let Err(e) = crate::config::save_versioned(&cfg_owned, ver, true) {
@@ -1668,11 +1562,7 @@ impl App {
         }
     }
 
-    /// Synchronous config save — called only during shutdown paths
-    /// (QuitWithoutRestore / CloseRequested). Using spawn_blocking here risks
-    /// the write not completing before process::exit, so sync I/O is acceptable.
-    /// Versioned so a slower debounced background save of an older snapshot
-    /// cannot overwrite this newer one.
+    /// Synchronous config save for shutdown paths.
     fn save_config_now(&mut self) {
         let cfg = read_lock(&self.state.lifecycle.config);
         let ver = next_config_version();
@@ -1681,8 +1571,7 @@ impl App {
         }
     }
 
-    /// Mutate the config under a write lock. Caller must call `save_config()`
-    /// afterwards if the change should be persisted.
+    /// Mutates config under write lock; caller must persist with save_config().
     fn mutate_config(&self, f: impl FnOnce(&mut Config)) {
         with_write_lock(&self.state.lifecycle.config, |guard| {
             f(Arc::make_mut(guard));
@@ -1725,7 +1614,7 @@ impl App {
         )
     }
 
-    /// Validate CPU power inputs. Returns Ok((pl1, pl2, pl1_time)) or Err(error message).
+    /// Validates CPU power inputs; returns Ok((pl1, pl2, pl1_time)) or Err.
     fn validate_cpu_power_inputs(&self) -> Result<(f64, f64, f64), String> {
         let pl1: f64 = self.pl1_edit.parse().map_err(|_| "PL1 is not a valid number".to_string())?;
         let pl2: f64 = self.pl2_edit.parse().map_err(|_| "PL2 is not a valid number".to_string())?;
@@ -1754,7 +1643,7 @@ impl App {
         Ok((pl1, pl2, pl1_time))
     }
 
-    /// Populate edit fields from a CPU power snapshot.
+    /// Populates edit fields from CPU power snapshot.
     fn apply_edit_fields_from_snapshot(&mut self, info: &crate::cpu_power::CpuPowerInfo) {
         let (pl1, pl2, p1en, p2en, p1cl, p2cl, t1, _t2) = info.init_edit_fields();
         self.pl1_edit = pl1;
@@ -1839,7 +1728,7 @@ impl App {
         views::view_main(self)
     }
 
-    /// Rebuild sensor_cache sorted and colors from current config + keys.
+    /// Rebuilds sensor cache sorted list and colors from current config.
     pub(crate) fn rebuild_sensor_cache(&self) {
         let cache = read_lock(&self.state.thermal.sensor_cache);
         let config = read_lock(&self.state.lifecycle.config);
@@ -1847,7 +1736,7 @@ impl App {
         let colors: Vec<iced::Color> = sorted.iter()
             .map(|name| crate::style::sensor_color(name, &cache.keys))
             .collect();
-        // Must drop the read lock on sensor_cache before acquiring a write lock below.
+        // Drop read lock before acquiring write lock.
         drop(cache);
         with_write_lock(&self.state.thermal.sensor_cache, |g| {
             let old = Arc::make_mut(g);

@@ -12,35 +12,22 @@ const WM_TRAYICON: u32 = WM_APP + 1;
 const WM_COMMAND_READY: u32 = WM_APP + 2;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONUP: u32 = 0x0205;
-/// Sent to top-level windows when the taskbar is created (e.g. Explorer
-/// restarts); the shell has destroyed our tray icon and it must be re-added.
+/// Explorer restart notification; tray icon must be re-added.
 const WM_TASKBARCREATED: u32 = 0x0526;
 
-// SAFETY: These thread-locals are only accessed from the tray message pump thread.
-// tray_wnd_proc is a Windows callback that runs on the same thread that created
-// the window (via create_hidden_window), so all accesses are single-threaded.
-// No locking needed since thread-local storage is inherently thread-safe.
+// SAFETY: Thread-locals accessed only on pump thread that created the window.
 thread_local! {
     static EVENT_TX: std::cell::RefCell<Option<mpsc::Sender<TrayEvent>>> = const { std::cell::RefCell::new(None) };
     static TRAY_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
-    /// Main window HWND, used to restore the window immediately on a tray
-    /// show event. The UI tick interval is much slower while hidden (2s), so
-    /// waiting for the tick to process the event would delay the restore by
-    /// up to 2s; the pump thread restores the window right away (all the
-    /// Win32 calls in restore_window_from_tray are thread-safe) and the main
-    /// thread only synchronizes its visible/view_dirty state afterwards.
+    /// Main window HWND for immediate restore without waiting for 2s UI tick.
     static APP_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
-    /// HICON for the tray icon, kept so the wnd_proc can re-add the icon when
-    /// Explorer restarts (WM_TASKBARCREATED). Owned by the pump thread only.
+    /// Cached HICON for re-adding icon on WM_TASKBARCREATED.
     static TRAY_HICON: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
 }
 
 static TRAY_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
-/// Wake the tray thread with WM_COMMAND_READY so it drains command_rx.
-/// Returns false (and logs) when the post fails — normally because the
-/// thread's message queue does not exist yet. Callers with a pending
-/// command must re-post until the thread is ready.
+/// Wakes tray thread to drain command queue; caller must retry on failure.
 pub fn notify_tray_thread() -> bool {
     let tid = TRAY_THREAD_ID.load(Ordering::Acquire);
     if tid == 0 {
@@ -48,8 +35,7 @@ pub fn notify_tray_thread() -> bool {
     }
     let ok = unsafe { PostThreadMessageW(tid, WM_COMMAND_READY, 0, 0) != 0 };
     if !ok {
-        // Debug: the pump polls `notify_tray_thread` at 2 Hz while waiting for
-        // the thread's queue to exist, so a warn here would spam the log.
+        // NOTE: Polled at 2 Hz while queue missing; debug to avoid log spam.
         tracing::debug!("PostThreadMessageW to tray thread {} failed (queue not ready?)", tid);
     }
     ok
@@ -129,8 +115,6 @@ unsafe extern "system" fn tray_wnd_proc(
             EVENT_TX.with(|tx| {
                 if let Some(sender) = tx.borrow().as_ref() {
                     let _ = sender.send(TrayEvent::Show);
-                    // Also signal the App to mark the window recently restored so
-                    // the auto-minimize-to-tray logic doesn't immediately re-hide it.
                     let _ = sender.send(TrayEvent::Restored);
                 }
             });
@@ -140,12 +124,9 @@ unsafe extern "system" fn tray_wnd_proc(
                     handle_tray_right_click(sender);
                 }
             });
-            // Re-arm the wake that TrackPopupMenu's modal loop may have
-            // swallowed. If a Shutdown/Reinit command arrived while the menu
-            // was open, its WM_COMMAND_READY wake-up is consumed by the modal
-            // loop, so the outer GetMessageW never sees it and the pump hangs.
-            // Re-posting here (after TrackPopupMenu returns) lets the outer
-            // loop drain the buffered command once the menu is dismissed.
+            // TrackPopupMenu runs a modal loop that consumes the thread's
+            // WM_COMMAND_READY wake. Re-post after the menu so the outer
+            // GetMessageW drains the buffered Shutdown/Reinit command.
             let _ = unsafe {
                 PostThreadMessageW(TRAY_THREAD_ID.load(Ordering::Acquire), WM_COMMAND_READY, 0, 0)
             };
@@ -153,7 +134,6 @@ unsafe extern "system" fn tray_wnd_proc(
         return 0;
     }
     if msg == WM_TASKBARCREATED {
-        // Explorer restarted and destroyed the tray icon; re-add it.
         let hwnd = TRAY_HWND.with(|h| h.get());
         let icon = TRAY_HICON.with(|h| h.get());
         if hwnd != 0 && icon != 0 {
@@ -179,10 +159,9 @@ unsafe extern "system" fn tray_wnd_proc(
         }
     }
     if msg == system_info::show_request_message_id() {
-        // A second instance asked us to restore our own window. We own the
-        // saved placement, so perform the restore here (the Win32 calls in
-        // restore_window_from_tray are thread-safe) and notify the main thread
-        // to sync its visible/view_dirty state.
+        // Second instance requested restore via the tray window. The running
+        // instance owns SAVED_PLACEMENT, so it restores here and notifies App
+        // to sync visible state.
         APP_HWND.with(|hwnd| {
             let app_hwnd = hwnd.get();
             if app_hwnd != 0 {
@@ -192,8 +171,6 @@ unsafe extern "system" fn tray_wnd_proc(
         EVENT_TX.with(|tx| {
             if let Some(sender) = tx.borrow().as_ref() {
                 let _ = sender.send(TrayEvent::Show);
-                // Mark the window recently restored so the auto-minimize logic
-                // (which triggers after 2 iconic checks) doesn't re-hide it.
                 let _ = sender.send(TrayEvent::Restored);
             }
         });
@@ -210,9 +187,6 @@ pub fn spawn_message_pump(
     app_hwnd: isize,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        // Catch panics so a failure in the pump doesn't silently kill the thread
-        // (leaving TRAY_THREAD_ID stale and the tray class leaked). cleanup_and_exit
-        // runs on normal exit; on panic we at least log it.
         if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             message_pump_loop(event_tx, command_rx, icon_ready_tx, thread_ready_tx, app_hwnd);
         })) {
@@ -222,22 +196,18 @@ pub fn spawn_message_pump(
 }
 
 fn cleanup_and_exit(tray_icon_loaded: bool, tray_hwnd: *mut core::ffi::c_void, hicon: Option<isize>) {
-    // Clear the thread id so notify_tray_thread() stops posting to a dead thread.
     TRAY_THREAD_ID.store(0, Ordering::Release);
     if tray_icon_loaded {
         system_info::shell_notify_delete(tray_hwnd as isize);
     }
     if let Some(icon) = hicon {
         unsafe {
-            // Release the HICON from CreateIconFromResourceEx, or every
-            // pump exit (shutdown / reinit) leaks one GDI handle.
+            // SAFETY: HICON from CreateIconFromResourceEx must be freed to avoid GDI leak.
             DestroyIcon(icon as *mut core::ffi::c_void);
         }
     }
     unsafe {
         DestroyWindow(tray_hwnd);
-        // Unregister the hidden window's class so a subsequent reinit()
-        // does not depend on the ERROR_CLASS_ALREADY_EXISTS retry path.
         let class_name: Vec<u16> = "FrameworkControlTray\0".encode_utf16().collect();
         let h_instance = GetModuleHandleW(std::ptr::null());
         UnregisterClassW(class_name.as_ptr(), h_instance);
@@ -267,9 +237,6 @@ fn message_pump_loop(
     let tray_hwnd = create_hidden_window();
     if tray_hwnd.is_null() {
         tracing::error!("Failed to create tray message window");
-        // Route every exit through cleanup_and_exit so TRAY_THREAD_ID is
-        // cleared and the window class is unregistered; otherwise a stale
-        // TID makes PostThreadMessageW fail and the class leaks.
         cleanup_and_exit(false, tray_hwnd, None);
         return;
     }
@@ -292,9 +259,7 @@ fn message_pump_loop(
         }
     }
 
-    // Prime the message queue with one GetMessageW call. This creates the
-    // thread's message queue (required before PostThreadMessageW can succeed)
-    // and confirms the thread is ready to receive WM_COMMAND_READY messages.
+    // NOTE: Primes queue so PostThreadMessageW can succeed.
     {
         let mut msg: MSG = unsafe { std::mem::zeroed() };
         let result = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
@@ -303,15 +268,12 @@ fn message_pump_loop(
             cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
             return;
         }
-        // Process the primed message normally
         unsafe {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     }
 
-    // Signal the main thread that we are in the message loop and ready
-    // to process WM_COMMAND_READY notifications.
     let _ = thread_ready_tx.send(());
 
     loop {
@@ -327,10 +289,7 @@ fn message_pump_loop(
         }
 
         if msg.message == WM_COMMAND_READY {
-            // Drain ALL queued commands per wake. A single try_recv here lets
-            // the UI's 500ms CreateIcon re-posts (see tray/mod.rs) starve a
-            // queued Shutdown: the wake is consumed, the icon retried, and the
-            // shutdown is never processed — the pump would never exit.
+            // NOTE: Drains all commands per wake to prevent Shutdown starvation.
             loop {
                 match command_rx.try_recv() {
                     Ok(TrayCommand::Shutdown) => {
@@ -345,10 +304,7 @@ fn message_pump_loop(
                                     tray_hwnd as isize, icon, "Framework Crate", WM_TRAYICON,
                                 );
                                 tray_icon_loaded = ok;
-                                // try_send: the channel is sync(1) and the UI re-posts
-                                // CreateIcon while the icon is pending — a blocking
-                                // send() would freeze this thread in GetMessageW and
-                                // the tray icon would stop responding to clicks.
+                                // NOTE: try_send avoids blocking GetMessageW on sync(1) channel.
                                 let _ = icon_ready_tx.try_send(ok);
                                 if ok {
                                     tracing::info!("Tray icon created");
@@ -399,8 +355,6 @@ fn create_hidden_window() -> *mut core::ffi::c_void {
 
         let mut atom = RegisterClassW(&wc);
         if atom == 0 {
-            // ERROR_CLASS_ALREADY_EXISTS = 1410. If the class is already registered
-            // from a previous reinit(), unregister it and try again.
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(1410) {
                 tracing::info!("Window class already registered, unregistering and retrying");
@@ -426,7 +380,7 @@ fn create_hidden_window() -> *mut core::ffi::c_void {
         );
 
         if !hwnd.is_null() {
-            ShowWindow(hwnd, 0); // SW_HIDE — initialize show state
+            ShowWindow(hwnd, 0);
         }
 
         hwnd

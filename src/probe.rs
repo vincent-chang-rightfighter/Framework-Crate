@@ -7,14 +7,7 @@ use iced::advanced::{mouse, overlay, Clipboard, Shell, Widget};
 use iced::{Element, Event, Length, Rectangle, Size, Vector};
 use parking_lot::Mutex;
 
-/// Wraps an element and records its laid-out height (logical pixels) into the
-/// shared report after every layout pass. The app reads the report in
-/// `update()` and resizes the window to match, so the window height always
-/// fits the content (no dead space at the bottom, no clipping in the common
-/// case). Width is left untouched.
-///
-/// The widget is transparent: layout, events, drawing and overlays are all
-/// delegated to the wrapped element.
+/// Records laid-out height into shared report to auto-size window.
 pub struct HeightProbe<'a, Message> {
     content: Element<'a, Message>,
     report: Arc<Mutex<Option<f32>>>,
@@ -29,8 +22,6 @@ impl<'a, Message> std::fmt::Debug for HeightProbe<'a, Message> {
 }
 
 impl<'a, Message: Clone + 'a> HeightProbe<'a, Message> {
-    /// Wraps `content` into an element that records the content height into
-    /// `report` on every layout pass.
     pub fn wrap(
         content: Element<'a, Message>,
         report: Arc<Mutex<Option<f32>>>,

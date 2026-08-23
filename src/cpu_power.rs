@@ -20,7 +20,7 @@ const PAWNIO_MODULES_VERSION: &str = "0.2.10";
 const INTEL_MSR_SHA256: &str = "d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a21cb48413c9b92e5f";
 const INTEL_MCHBAR_SHA256: &str = "3f82b832d99b4aac37d2a20fdb7c9baa2a3bc0488612c9019c9484eb0e8a6eae";
 
-/// Get the local modules directory path (%APPDATA%/framework-crate/modules/).
+/// Returns local modules directory (%APPDATA%/framework-crate/modules/).
 fn modules_dir() -> std::path::PathBuf {
     let base = dirs::config_dir()
         .or_else(dirs::data_local_dir)
@@ -42,11 +42,7 @@ fn verify_module_hash(path: &std::path::Path, expected: &str) -> Result<(), &'st
     Ok(())
 }
 
-/// Read a module blob once and verify its hash on the in-memory bytes.
-///
-/// Do NOT verify-then-re-read: between the two reads an attacker (or a
-/// concurrent modules update) could swap the file — the hash would pass on
-/// version A while the handle loads version B.
+/// Reads module blob and verifies hash on same bytes to prevent TOCTOU.
 fn read_verified_module(path: &std::path::Path, expected: &str) -> Result<Vec<u8>, &'static str> {
     let bytes = std::fs::read(path).map_err(|_| "module blob missing")?;
     if sha256_hex(&bytes) != expected {
@@ -62,19 +58,18 @@ fn verify_cached_modules(dir: &std::path::Path) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Check if required module blobs are already cached locally and match the pinned hashes.
+/// Checks if module blobs are cached and hash-verified.
 pub fn modules_downloaded() -> bool {
     verify_cached_modules(&modules_dir()).is_ok()
 }
 
-/// Download PawnIO Modules ZIP and extract blobs. Returns Ok or error.
+/// Downloads PawnIO Modules ZIP and extracts blobs.
 pub fn download_and_extract_modules() -> Result<(), &'static str> {
     let dir = modules_dir();
     std::fs::create_dir_all(&dir).map_err(|_| "failed to create modules directory")?;
 
     let zip_path = dir.join(format!("pawnio_modules_{}.zip", PAWNIO_MODULES_VERSION));
-    // Release asset naming on github.com/namazso/PawnIO.Modules:
-    // tag "0.2.10" ships "release_0_2_10.zip".
+    // Release asset: tag 0.2.10 ships release_0_2_10.zip.
     let url = format!(
         "https://github.com/namazso/PawnIO.Modules/releases/download/{}/release_{}.zip",
         PAWNIO_MODULES_VERSION,
@@ -89,16 +84,13 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
         let _ = std::fs::remove_file(&zip_path);
     }
 
-    // Write PowerShell script to a unique temp file (avoids all escaping
-    // issues, and concurrent downloads never collide on the same path).
+    // Write PowerShell script to unique temp file to avoid collisions.
     let script_path = std::env::temp_dir().join(format!(
         "pawnio_download_{}_{}.ps1",
         std::process::id(),
         crate::util::monotonic_ms(),
     ));
-    // PowerShell single-quoted strings escape ' as ''.  zip/dir come from
-    // %APPDATA% and could contain ' — without escaping the script would
-    // break or allow injection.  url is pinned but escaped for completeness.
+    // Escape single quotes for PowerShell single-quoted strings.
     let esc = |s: &str| s.replace('\'', "''");
     let script = format!(
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n\
@@ -157,7 +149,7 @@ fn invalidate_blob_cache() {
     let _ = MCHBAR_BLOB_CACHE.lock().map(|mut g| *g = None);
 }
 
-/// Load IntelMSR module blob (cached after first verified load).
+/// Loads IntelMSR blob (cached after first verified load).
 fn load_intel_msr_blob() -> Result<Vec<u8>, &'static str> {
     {
         if let Ok(guard) = MSR_BLOB_CACHE.lock()
@@ -174,7 +166,7 @@ fn load_intel_msr_blob() -> Result<Vec<u8>, &'static str> {
     Ok(blob)
 }
 
-/// Load IntelMCHBAR module blob (cached after first verified load).
+/// Loads IntelMCHBAR blob (cached after first verified load).
 fn load_intel_mchbar_blob() -> Result<Vec<u8>, &'static str> {
     {
         if let Ok(guard) = MCHBAR_BLOB_CACHE.lock()
@@ -217,21 +209,17 @@ pub struct CpuPowerInfo {
 }
 
 impl CpuPowerInfo {
-    /// Effective PL1: the CPU enforces the lower of the MSR and MMIO
-    /// registers, so the effective limit is whichever is tighter. Falls
-    /// back to the value actually read when the other register is
-    /// unavailable (0).
+    /// Effective PL1 (lower of MSR and MMIO).
     pub fn effective_pl1(&self) -> f64 {
         effective_limit(self.pl1_msr, self.pl1_mmio)
     }
 
-    /// Effective PL2: see [`CpuPowerInfo::effective_pl1`].
+    /// Effective PL2 (lower of MSR and MMIO).
     pub fn effective_pl2(&self) -> f64 {
         effective_limit(self.pl2_msr, self.pl2_mmio)
     }
 
-    /// Pre-fill edit fields from current MSR values.
-    /// Returns (pl1_watts, pl2_watts, pl1_enabled, pl2_enabled, pl1_clamped, pl2_clamped, pl1_time_s, pl2_time_s).
+    /// Pre-fills edit fields from current MSR values.
     pub fn init_edit_fields(&self) -> (String, String, bool, bool, bool, bool, String, String) {
         if self.available {
             (
@@ -250,7 +238,7 @@ impl CpuPowerInfo {
     }
 }
 
-/// Lower of two power limits, ignoring 0 (meaning "not read / unavailable").
+/// Lower of two limits, ignoring 0 (unavailable).
 fn effective_limit(msr: f64, mmio: f64) -> f64 {
     match (msr > 0.0, mmio > 0.0) {
         (true, true) => msr.min(mmio),
@@ -260,8 +248,7 @@ fn effective_limit(msr: f64, mmio: f64) -> f64 {
     }
 }
 
-/// Decode power limit from raw 32-bit half of the register.
-/// Returns (watts, enabled, clamped, time_window_y, time_window_z).
+/// Decodes power limit from raw 32-bit half.
 fn decode_power_limit(raw_val: u64, unit: f64) -> (f64, bool, bool, u32, u32) {
     let raw_bits = (raw_val & 0x7FFF) as f64;
     let enabled = (raw_val >> 15) & 1 == 1;
@@ -272,14 +259,12 @@ fn decode_power_limit(raw_val: u64, unit: f64) -> (f64, bool, bool, u32, u32) {
     (raw_bits * unit, enabled, clamped, time_y, time_z)
 }
 
-/// Decode time window from Y and Z fields into seconds.
-/// Time = 2^Y × (1 + Z/4) × Time_Unit
+/// Decodes time window (2^Y * (1+Z/4) * Time_Unit).
 fn decode_time_window(y: u32, z: u32, time_unit: f64) -> f64 {
     (1u64 << y) as f64 * (1.0 + z as f64 / 4.0) * time_unit
 }
 
-/// Encode time window in seconds into Y and Z fields.
-/// Returns (y, z) where Time ≈ 2^Y × (1 + Z/4) × Time_Unit.
+/// Encodes time window into Y and Z fields.
 fn encode_time_window(time_s: f64, time_unit: f64) -> (u32, u32) {
     if time_unit <= 0.0 || time_s <= 0.0 {
         return (0, 0);
@@ -293,9 +278,7 @@ fn encode_time_window(time_s: f64, time_unit: f64) -> (u32, u32) {
     (y as u32, z as u32)
 }
 
-/// Encode a power limit value into a 32-bit register half.
-/// Bits [14:0] = power limit, [15] = enable, [16] = clamp,
-/// [21:17] = time window Y (5 bits), [23:22] = time window Z (2 bits).
+/// Encodes power limit into 32-bit register half.
 fn encode_power_limit(watts: f64, enabled: bool, clamped: bool, unit: f64, time_y: u32, time_z: u32) -> u32 {
     let max_raw = ((1u32 << 15) - 1) as f64; // 15-bit field: max 32767
     let raw = (watts / unit).round().clamp(0.0, max_raw) as u32;
@@ -307,7 +290,7 @@ fn encode_power_limit(watts: f64, enabled: bool, clamped: bool, unit: f64, time_
     val
 }
 
-/// Power limit parameters for PL1/PL2.
+/// Power limit parameters.
 #[derive(Clone, Copy)]
 struct PowerLimitParams {
     pl1_watts: f64,
@@ -322,10 +305,7 @@ struct PowerLimitParams {
     time_unit: f64,
 }
 
-/// Write the MSR_PKG_POWER_LIMIT register (0x610) via IntelMSR module.
-///
-/// Reads the current MSR value to preserve time window fields, then applies
-/// the new PL1/PL2 settings and writes back via ioctl_write_msr.
+/// Writes MSR_PKG_POWER_LIMIT (0x610) via IntelMSR.
 fn write_msr_pl1_pl2(
     msr_handle: &PawnioHandle,
     params: &PowerLimitParams,
@@ -348,12 +328,8 @@ fn write_msr_pl1_pl2(
     exec_ioctl(msr_handle, "ioctl_write_msr", &inp, &mut out2)
         .map_err(|_| "ioctl_write_msr failed — is IntelMSR module loaded?")?;
 
-    // Verify the write actually landed: re-read 0x610 and compare the
-    // decoded limits within encoding tolerance. The CPU silently drops
-    // the write when the register is BIOS-locked (bit 63); without this
-    // check the UI would report success for a limit that was never
-    // applied. The clamp bit is a hint that BIOS/EC may rewrite, so it
-    // is not compared.
+    // Verify the write landed by re-reading MSR 0x610. The CPU silently
+    // drops the write when the limit is BIOS-locked.
     let tolerance = params.power_unit.max(0.25);
     let mut rb_out = [0u64; 1];
     if exec_ioctl(msr_handle, "ioctl_read_msr", &[0x610], &mut rb_out).is_err() {
@@ -362,10 +338,7 @@ fn write_msr_pl1_pl2(
     let rb_raw = rb_out[0];
     let (rb_pl1, rb_pl1_en, ..) = decode_power_limit(rb_raw, params.power_unit);
     let (rb_pl2, rb_pl2_en, ..) = decode_power_limit(rb_raw >> 32, params.power_unit);
-    // Compare against the clamped/encoded target, not the raw request:
-    // encode_power_limit clamps to the 15-bit field, so an out-of-range
-    // request decodes back to the clamp point and comparing against the
-    // requested watts would falsely report the register as locked.
+    // Compare against encoded target, not raw request, to avoid false lock detection.
     let expected_pl1 = ((pl1_enc & 0x7FFF) as f64) * params.power_unit;
     let expected_pl2 = ((pl2_enc & 0x7FFF) as f64) * params.power_unit;
     if (rb_pl1 - expected_pl1).abs() > tolerance
@@ -384,10 +357,7 @@ fn write_msr_pl1_pl2(
     Ok(())
 }
 
-/// Write the PACKAGE_POWER_LIMIT_MMIO register (MCHBAR + 0x59A0) via IntelMCHBAR module.
-///
-/// This is the dynamic (in-effect) power limit register. Writing here takes
-/// effect immediately without requiring a MSR write.
+/// Writes PACKAGE_POWER_LIMIT_MMIO (MCHBAR+0x59A0) via IntelMCHBAR.
 fn write_mmio_pl1_pl2(
     mchbar_handle: &PawnioHandle,
     params: &PowerLimitParams,
@@ -416,7 +386,7 @@ fn write_mmio_pl1_pl2(
     Ok(())
 }
 
-/// Public wrapper: write MSR 0x610 (opens IntelMSR handle internally).
+/// Writes MSR 0x610 (opens IntelMSR handle internally).
 #[allow(clippy::too_many_arguments)]
 pub fn write_msr_pl1_pl2_public(
     pl1_watts: f64,
@@ -477,16 +447,14 @@ pub fn write_mmio_pl1_pl2_public(
     write_mmio_pl1_pl2(&mchbar_handle, &params)
 }
 
-/// Write both MSR and MMIO from a persisted `BiosDefaults` so Reset fully
-/// restores the original factory `min(MSR, MMIO)` state.
+/// Writes both MSR and MMIO from `BiosDefaults` to restore factory state.
 pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<(), &'static str> {
     write_msr_pl1_pl2_public(
         bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
         bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
         bios.power_unit, bios.time_unit,
     )?;
-    // MMIO may be absent on older persisted files (defaults 0) or on systems
-    // where MCHBAR was unreadable at first run — best-effort only.
+    // MMIO may be absent on older files; best-effort only.
     if bios.pl1_mmio_watts > 0.0 || bios.pl2_mmio_watts > 0.0 {
         let _ = write_mmio_pl1_pl2_public(
             bios.pl1_mmio_watts, bios.pl1_mmio_enabled, bios.pl1_mmio_clamped, bios.pl1_mmio_time_s,
@@ -497,7 +465,7 @@ pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Loaded PawnIO handle with associated DLL functions.
+/// PawnIO handle with DLL functions.
 struct PawnioHandle {
     handle: HANDLE,
     exec_fn: PawnioExecute,
@@ -512,7 +480,7 @@ impl Drop for PawnioHandle {
     }
 }
 
-/// Global DLL function pointers (loaded once).
+/// Global DLL pointers (loaded once).
 static DLL_OPEN: std::sync::OnceLock<PawnioOpen> = std::sync::OnceLock::new();
 static DLL_LOAD: std::sync::OnceLock<PawnioLoad> = std::sync::OnceLock::new();
 static DLL_EXEC: std::sync::OnceLock<PawnioExecute> = std::sync::OnceLock::new();
@@ -520,7 +488,7 @@ static DLL_CLOSE: std::sync::OnceLock<PawnioClose> = std::sync::OnceLock::new();
 
 const DLL_PATH: &str = r"C:\Program Files\PawnIO\PawnIOLib.dll";
 
-/// Try to install PawnIO via winget.
+/// Installs PawnIO via winget.
 pub fn install_pawnio() -> Result<(), &'static str> {
     use std::process::Command;
     tracing::info!("Installing PawnIO via winget...");
@@ -537,12 +505,12 @@ pub fn install_pawnio() -> Result<(), &'static str> {
     }
 }
 
-/// Check if PawnIO DLL is installed.
+/// Checks if PawnIO DLL is installed.
 pub fn is_pawnio_installed() -> bool {
     std::path::Path::new(DLL_PATH).exists()
 }
 
-/// Initialize DLL function pointers (called once).
+/// Initializes DLL function pointers (once).
 fn init_dll_fns() -> Result<(), &'static str> {
     use windows_sys::Win32::System::LibraryLoader::{LoadLibraryA, GetProcAddress};
 
@@ -557,10 +525,7 @@ fn init_dll_fns() -> Result<(), &'static str> {
     }
 
     unsafe {
-        // GetProcAddress returns FARPROC (a generic fn pointer type). rustc
-        // does not check ABI compatibility when transmuting between fn
-        // pointer types, so use transmute_copy with a compile-time size
-        // assertion instead — the accepted pattern for dynamic DLL loading.
+        // Transmute FARPROC safely with size assertion.
         const _: () = assert!(
             std::mem::size_of::<PawnioOpen>()
                 == std::mem::size_of::<windows_sys::Win32::Foundation::FARPROC>()
@@ -585,7 +550,7 @@ fn init_dll_fns() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Open a PawnIO handle and load a module blob.
+/// Opens PawnIO handle and loads module blob.
 fn open_handle(blob: &[u8]) -> Result<PawnioHandle, &'static str> {
     init_dll_fns()?;
 
@@ -615,7 +580,7 @@ fn open_handle(blob: &[u8]) -> Result<PawnioHandle, &'static str> {
     })
 }
 
-/// Execute a named IOCTL in a loaded module.
+/// Executes named IOCTL in loaded module.
 fn exec_ioctl(
     handle: &PawnioHandle,
     name: &str,
@@ -640,22 +605,18 @@ fn exec_ioctl(
     if hr != 0 {
         return Err("ioctl failed");
     }
-    // The driver reports how many u64 entries it wrote (bytes / 8); a short
-    // write leaves the output buffer stale/zeroed and must not be treated as
-    // valid data.
+    // Short write leaves buffer stale; must not be treated as valid.
     if return_size != outputs.len() {
         return Err("ioctl short read");
     }
     Ok(return_size)
 }
 
-/// Read all CPU power information via PawnIO modules.
+/// Reads all CPU power info via PawnIO modules.
 pub fn read_cpu_power() -> CpuPowerInfo {
     let mut info = CpuPowerInfo::default();
 
-    // Load the two module handles independently: a missing MCHBAR module
-    // must not discard the MSR data (and vice versa). Each failure is
-    // recorded but only reported if neither source ends up working.
+    // Load handles independently; failure of one does not discard the other.
     let msr_handle = match load_intel_msr_blob().and_then(|b| open_handle(&b)) {
         Ok(h) => Some(h),
         Err(e) => {
@@ -673,7 +634,7 @@ pub fn read_cpu_power() -> CpuPowerInfo {
         }
     };
 
-    // Read MSR 0x606 (MSR_RAPL_POWER_UNIT) — required to decode any limit.
+    // Read MSR 0x606 for RAPL units; required to decode limits.
     let mut units_ok = false;
     if let Some(ref handle) = msr_handle {
         let mut out = [0u64; 1];
@@ -689,15 +650,14 @@ pub fn read_cpu_power() -> CpuPowerInfo {
         }
     }
     if !units_ok {
-        // Keep any earlier root-cause message (e.g. IntelMSR module load
-        // failure) instead of masking it with this generic one.
+        // Keep earlier root-cause error instead of masking.
         if info.error_msg.is_none() {
             info.error_msg = Some("Failed to read MSR 0x606");
         }
         return info;
     }
 
-    // Read MSR 0x610 (MSR_PKG_POWER_LIMIT) for static PL1/PL2.
+    // Read MSR 0x610 for static PL1/PL2.
     let mut msr610_ok = false;
     if let Some(ref handle) = msr_handle {
         let mut out = [0u64; 1];
@@ -720,7 +680,7 @@ pub fn read_cpu_power() -> CpuPowerInfo {
         }
     }
 
-    // Read MMIO at MCHBAR + 0x59A0 (PACKAGE_POWER_LIMIT_MMIO) via IntelMCHBAR.
+    // Read MMIO at MCHBAR+0x59A0 via IntelMCHBAR.
     let mmio_offset = 0x59A0u64;
     let mut mmio_ok = false;
     if let Some(ref handle) = mchbar_handle {
@@ -743,8 +703,7 @@ pub fn read_cpu_power() -> CpuPowerInfo {
         }
     }
 
-    // Both limit registers unreadable: report unavailable instead of
-    // presenting all-zero limits as valid data.
+    // Both registers unreadable: report unavailable.
     if !msr610_ok && !mmio_ok {
         if info.error_msg.is_none() {
             info.error_msg = Some("Failed to read MSR 0x610 and MMIO power limits");
@@ -755,8 +714,8 @@ pub fn read_cpu_power() -> CpuPowerInfo {
     info
 }
 
-/// Background sync thread that continuously writes MSR 0x610
-/// to counter EC overwriting.
+/// Sync thread that continuously writes MSR 0x610 and MMIO to counter
+/// firmware/EC overwrites. Runs until `external_alive` is dropped.
 struct SyncThread {
     running: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
@@ -772,10 +731,7 @@ impl SyncThread {
         }
     }
 
-    /// Start the sync thread with the given PL1/PL2 parameters.
-    /// `external_alive` is `CpuPowerState.sync_alive` — kept in sync with the
-    /// thread's real lifecycle so the UI tick can detect thread death
-    /// (PawnIO load failure, handle open failure, panic) without locking.
+    /// Starts sync thread; `external_alive` tracks liveness without locking.
     fn start(&mut self, params: PowerLimitParams, external_alive: Arc<AtomicBool>) -> Result<(), &'static str> {
         self.stop();
 
@@ -807,7 +763,7 @@ impl SyncThread {
         Ok(())
     }
 
-    /// Stop the sync thread.
+    /// Stops sync thread.
     fn stop(&mut self) {
         self.running.store(false, Ordering::Release);
         if let Some(handle) = self.handle.take() {
@@ -817,7 +773,7 @@ impl SyncThread {
     }
 }
 
-/// Main loop for the sync thread. Writes MSR 0x610 and MMIO every 250ms.
+/// Sync thread main loop; writes MSR and MMIO every 250ms.
 fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
     // Load IntelMSR module and open a persistent handle.
     let msr_blob = match load_intel_msr_blob() {
@@ -836,7 +792,7 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
         }
     };
 
-    // Load IntelMCHBAR module for MMIO write (may fail if module is read-only).
+    // Load IntelMCHBAR for MMIO write (may fail).
     let mchbar_handle = match load_intel_mchbar_blob().and_then(|b| open_handle(&b)) {
         Ok(h) => Some(h),
         Err(e) => {
@@ -849,19 +805,12 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
         params.pl1_watts, params.pl1_time_s, params.pl2_watts, params.pl2_time_s,
         mchbar_handle.is_some());
 
-    // Consecutive write failures. An EC/firmware override makes the read-back
-    // verification fail, but the sync must survive it: keep retrying (the
-    // override ends when the user or firmware stops fighting) instead of
-    // dying on the first error.
+    // Track consecutive failures; keep retrying despite overrides.
     let mut write_failures: u32 = 0;
     let mut mmio_write_failures: u32 = 0;
     while running.load(Ordering::Relaxed) {
-        // Unconditional periodic rewrite: the whole point of this thread is to
-        // re-assert the user's limits against EC/firmware overrides. The
-        // register is NOT re-read here — a previous "skip when equal"
-        // optimization compared against our own last write (never the live
-        // hardware value), which silently disabled the sync after its first
-        // successful write.
+        // Unconditionally re-assert limits every 250ms. The whole point of
+        // this thread is to win against firmware/EC overwrites.
         match write_msr_pl1_pl2(&msr_handle, &params) {
             Ok(()) => {
                 write_failures = 0;
@@ -890,9 +839,7 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
                 }
             }
         }
-        // Back off on persistent failures: a BIOS-locked register can never
-        // succeed, and hammering the driver at 4 Hz forever wastes CPU and
-        // kernel I/O for a write that will not land. Cap at 5s between tries.
+        // Back off on persistent failures; cap at 5s.
         let interval_ms = if write_failures >= 10 {
             5000
         } else if write_failures >= 4 {
@@ -906,10 +853,7 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
     debug!("Sync thread stopped");
 }
 
-/// BIOS power limit defaults — captured once at first run and persisted to disk,
-/// never overwritten by subsequent refreshes so Reset always returns to the
-/// original factory values.  Stores both MSR and MMIO so the effective
-/// `min(MSR, MMIO)` is fully restored.
+/// BIOS defaults captured once at first run and persisted for Reset.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BiosDefaults {
     pub pl1_watts: f64,
@@ -938,10 +882,7 @@ pub struct BiosDefaults {
     pub pl2_mmio_time_s: f64,
     pub power_unit: f64,
     pub time_unit: f64,
-    /// Power source at capture time. The snapshot reflects the OEM's limits
-    /// for THAT source; restoring an AC snapshot while on battery would
-    /// override the firmware's lower battery-mode protection, so resume
-    /// only writes when the source matches.
+    /// Power source at capture; resume only restores when source matches.
     #[serde(default = "default_true_fn")]
     pub captured_on_ac: bool,
 }
@@ -962,10 +903,7 @@ fn bios_defaults_file_exists() -> bool {
     bios_defaults_path().map(|p| p.exists()).unwrap_or(false)
 }
 
-/// Read the current AC-present state from the shared battery snapshot.
-/// Defaults to `true` (AC) when no reading exists yet — matching the
-/// pre-existing conservative default so the first capture records AC
-/// semantics unless the battery path has already published data.
+/// Reads current AC-present state from shared snapshot (defaults to AC).
 pub fn read_ac_present() -> bool {
     match BATTERY_AC_SNAPSHOT.read() {
         Ok(guard) => *guard,
@@ -978,8 +916,7 @@ pub fn read_ac_present() -> bool {
 
 static BATTERY_AC_SNAPSHOT: std::sync::RwLock<bool> = std::sync::RwLock::new(true);
 
-/// Publish the current AC state for `read_ac_present`. Called by the
-/// background thermal loop alongside its battery poll.
+/// Publishes AC state for `read_ac_present`.
 pub fn publish_ac_snapshot(ac_present: bool) {
     if let Ok(mut guard) = BATTERY_AC_SNAPSHOT.write() {
         *guard = ac_present;
@@ -989,15 +926,13 @@ pub fn publish_ac_snapshot(ac_present: bool) {
 fn load_persisted_bios_defaults() -> Option<BiosDefaults> {    let path = bios_defaults_path().ok()?;
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        // Missing file = first run, caller may capture current values.
+        // Missing file: first run.
         Err(_) => return None,
     };
     match toml::from_str::<BiosDefaults>(&content) {
         Ok(parsed) => Some(parsed),
         Err(e) => {
-            // The file EXISTS but is corrupt. Never overwrite the original
-            // factory snapshot with live values in this case — back it up
-            // and refuse to capture until the user deletes it.
+            // Corrupt file: back up and refuse to overwrite.
             let backup = path.with_extension(format!(
                 "toml.corrupt-{}",
                 crate::util::current_time_ms()
@@ -1025,12 +960,11 @@ fn persist_bios_defaults(defaults: &BiosDefaults) -> Result<(), String> {
             .map_err(|e| format!("create bios_defaults dir failed: {}", e))?;
     }
     let content = toml::to_string_pretty(defaults).map_err(|e| e.to_string())?;
-    // Write via temp file and atomic replace so a crash mid-write never leaves
-    // a corrupt bios_defaults.toml (same pattern as config.rs).
+    // Atomic write via temp file to avoid corruption.
     let tmp = path.with_extension(format!("tmp.{}", crate::util::current_time_ms()));
     std::fs::write(&tmp, content.as_bytes())
         .map_err(|e| format!("write tmp bios_defaults failed: {}", e))?;
-    // Use MoveFileExW on Windows for atomic replace; fallback to rename.
+    // Use MoveFileExW for atomic replace; fallback to rename.
     #[cfg(windows)]
     {
         use std::ffi::OsStr;
@@ -1062,17 +996,14 @@ fn persist_bios_defaults(defaults: &BiosDefaults) -> Result<(), String> {
     }
 }
 
-/// Shared CPU power state for background task and UI.
+/// Shared CPU power state.
 #[derive(Clone)]
 pub struct CpuPowerState {
     pub info: Arc<parking_lot::RwLock<Arc<CpuPowerInfo>>>,
     pub available: Arc<AtomicBool>,
     pub sync_enabled: Arc<AtomicBool>,
     sync_thread: Arc<parking_lot::Mutex<SyncThread>>,
-    /// Lives OUTSIDE the sync_thread mutex so `is_sync_alive()` (called on
-    /// the UI tick) never blocks behind a stop/start that is joining the
-    /// thread (which can take seconds while the sync thread sleeps between
-    /// write attempts).
+    /// Outside mutex so liveness check never blocks on join.
     sync_alive: Arc<AtomicBool>,
     bios: Arc<parking_lot::RwLock<Arc<Option<BiosDefaults>>>>,
 }
@@ -1106,17 +1037,13 @@ impl CpuPowerState {
         }
     }
 
-    /// Capture BIOS defaults from current MSR read. On first ever run the
-    /// values are persisted to `bios_defaults.toml` alongside `config.toml`;
-    /// subsequent runs load the persisted file so Reset always returns to the
-    /// original factory values even after the user has modified PL1/PL2.
-    /// Safe to call multiple times — only the first successful capture writes.
+    /// Captures BIOS defaults; persists on first run for Reset.
     pub fn init_bios_defaults(&self) {
         // Already in memory — nothing to do.
         if self.bios_defaults().is_some() {
             return;
         }
-        // Try to load previously persisted originals.
+        // Try loading persisted originals.
         if let Some(persisted) = load_persisted_bios_defaults() {
             with_write_lock(&self.bios, |guard| {
                 *guard = Arc::new(Some(persisted));
@@ -1125,17 +1052,14 @@ impl CpuPowerState {
                 persisted.pl1_watts, persisted.pl1_time_s, persisted.pl2_watts, persisted.pl2_time_s);
             return;
         }
-        // If the file exists but is corrupt, load_persisted_bios_defaults()
-        // already backed it up and logged — do NOT capture live values over
-        // it (that would destroy the factory snapshot permanently).
+        // If file exists but corrupt, do not overwrite; already backed up.
         if bios_defaults_file_exists() {
             warn!("bios_defaults.toml exists but could not be loaded; refusing to overwrite with live values");
             return;
         }
         let info = self.snapshot();
         if !info.available { return; }
-        // Record the power source at capture time so resume can refuse to
-        // restore an AC snapshot onto battery (or vice versa).
+        // Record power source to prevent cross-source restore on resume.
         let captured_on_ac = read_ac_present();
         let defaults = BiosDefaults {
             pl1_watts: info.pl1_msr,
@@ -1171,7 +1095,7 @@ impl CpuPowerState {
             defaults.pl1_watts, defaults.pl1_time_s, defaults.pl2_watts, defaults.pl2_time_s);
     }
 
-    /// Get BIOS defaults captured at startup.
+    /// Returns BIOS defaults captured at startup.
     pub fn bios_defaults(&self) -> Option<BiosDefaults> {
         *crate::util::read_lock(&self.bios)
     }
@@ -1180,7 +1104,7 @@ impl CpuPowerState {
         crate::util::read_lock(&self.info).clone()
     }
 
-    /// Start the sync thread that continuously writes MSR 0x610.
+    /// Starts sync thread that continuously writes MSR 0x610.
     #[allow(clippy::too_many_arguments)]
     pub fn start_sync(
         &self,
@@ -1207,9 +1131,7 @@ impl CpuPowerState {
             power_unit,
             time_unit,
         };
-        // Stop any previous thread, joining OUTSIDE the mutex: the old thread
-        // may be mid-sleep (up to 5s during write-failure backoff) and holding
-        // the lock across that join would block is_sync_alive() on the UI tick.
+        // Join old thread outside mutex to avoid blocking liveness check.
         let old_handle = {
             let mut thread = self.sync_thread.lock();
             thread.running.store(false, Ordering::Release);
@@ -1225,14 +1147,12 @@ impl CpuPowerState {
         Ok(())
     }
 
-    /// Check if the sync thread is still alive (hasn't exited on its own).
-    /// Lock-free: reads a dedicated atomic, never blocks on the mutex that
-    /// stop/start hold while joining.
+    /// Checks if sync thread is still alive (lock-free).
     pub fn is_sync_alive(&self) -> bool {
         self.sync_alive.load(Ordering::Acquire)
     }
 
-    /// Stop the sync thread.
+    /// Stops sync thread.
     pub fn stop_sync(&self) {
         let old_handle = {
             let mut thread = self.sync_thread.lock();
@@ -1254,7 +1174,7 @@ impl CpuPowerState {
 /// Cached PawnIO version.
 static PAWNIO_VERSION: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
 
-/// Read PawnIO version from DLL file metadata (no subprocess needed).
+/// Reads PawnIO version from DLL metadata.
 fn fetch_pawnio_version_from_dll() -> Option<String> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
@@ -1277,7 +1197,7 @@ fn fetch_pawnio_version_from_dll() -> Option<String> {
             return None;
         }
 
-        // Query the root block to get fixed file info (contains product version).
+        // Query root block for fixed file info.
         let mut ffi_ptr: *mut std::ffi::c_void = ptr::null_mut();
         let mut ffi_len: u32 = 0;
         let root: Vec<u16> = std::ffi::OsStr::new("\\")
@@ -1294,15 +1214,12 @@ fn fetch_pawnio_version_from_dll() -> Option<String> {
             return None;
         }
 
-        // VS_FIXEDFILEINFO is 52 bytes (13 u32s); the product version fields
-        // we read live at offsets 16/20, so require at least 24 bytes.
+        // VS_FIXEDFILEINFO: need 24 bytes for product version at offsets 16/20.
         if ffi_len < 24 {
             return None;
         }
 
-        // VS_FIXEDFILEINFO layout: first 2 u32 are Signature and StrucVersion,
-        // then dwFileVersionMS (offset 8), dwFileVersionLS (offset 12),
-        // then dwProductVersionMS (offset 16), dwProductVersionLS (offset 20).
+        // VS_FIXEDFILEINFO: product version at offsets 16 and 20.
         let ffi = ffi_ptr as *const u8;
         let ms = ptr::read_unaligned(ffi.add(16) as *const u32);
         let ls = ptr::read_unaligned(ffi.add(20) as *const u32);
@@ -1315,7 +1232,7 @@ fn fetch_pawnio_version_from_dll() -> Option<String> {
     }
 }
 
-/// Get PawnIO version (cached).
+/// Returns cached PawnIO version.
 pub fn pawnio_version() -> Option<String> {
     {
         let guard = PAWNIO_VERSION.read();
@@ -1332,14 +1249,12 @@ pub fn pawnio_version() -> Option<String> {
     ver
 }
 
-/// Clear the cached PawnIO version so the next pawnio_version() re-reads
-/// the DLL metadata. Call after installing or upgrading PawnIO — the cache
-/// would otherwise report the old version for the rest of the process.
+/// Clears cached PawnIO version so next call re-reads DLL metadata.
 pub fn invalidate_pawnio_version() {
     *PAWNIO_VERSION.write() = None;
 }
 
-/// Get the embedded PawnIO Modules blob version.
+/// Returns embedded PawnIO Modules blob version.
 pub fn pawnio_modules_version() -> &'static str {
     PAWNIO_MODULES_VERSION
 }

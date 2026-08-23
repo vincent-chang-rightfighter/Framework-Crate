@@ -39,13 +39,7 @@ struct MemoryStatusEx {
     ull_avail_extended_virtual: u64,
 }
 
-// ============================================================================
-// Raw Win32 FFI declarations
-//
-// These are hand-declared because some APIs are not available in the
-// `windows-sys` feature set we use, or we need finer control over the
-// #[link] attributes. All functions are safe to call with valid handles.
-// ============================================================================
+// Raw Win32 FFI declarations (hand-declared for finer control).
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -135,9 +129,7 @@ unsafe extern "system" {
     fn keybd_event(bVk: u8, bScan: u8, dwFlags: u32, dwExtraInfo: usize);
 }
 
-// ============================================================================
-// Win32 structs and constants for window management / tray
-// ============================================================================
+// Win32 structs and constants for window management.
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -172,9 +164,7 @@ struct WINDOWPLACEMENT {
 
 const GWL_EXSTYLE: i32 = -20;
 const WS_EX_TOOLWINDOW: isize = 0x00000080;
-/// winit sets WS_EX_APPWINDOW by default (window_state.rs ON_TASKBAR).
-/// It forces a taskbar button even when WS_EX_TOOLWINDOW is set, so it must
-/// be cleared while parked and restored afterwards.
+/// Winit's WS_EX_APPWINDOW forces taskbar button; must be cleared while parked.
 const WS_EX_APPWINDOW: isize = 0x0004_0000;
 const SW_SHOWMAXIMIZED: u32 = 3;
 const SW_RESTORE: u32 = 9;
@@ -187,48 +177,36 @@ const SWP_SHOWWINDOW: u32 = 0x0040;
 /// Classic off-screen parking coordinates (far outside the virtual screen).
 const OFFSCREEN: i32 = -32000;
 
-/// The Windows SDK WINDOWPLACEMENT is 44 bytes on both x86 and x64
-/// (rcDevice exists only in the _MAC variant). SetWindowPlacement fails if
-/// `length` does not match sizeof(WINDOWPLACEMENT), so pin the size at
-/// compile time.
+/// WINDOWPLACEMENT is 44 bytes; SetWindowPlacement requires exact length.
 const _: () = assert!(std::mem::size_of::<WINDOWPLACEMENT>() == 44);
 
-/// Placement saved when the window is parked, used to restore its on-screen
-/// position and size.
+/// Saved placement for restoring parked window.
 static SAVED_PLACEMENT: std::sync::Mutex<Option<WINDOWPLACEMENT>> = std::sync::Mutex::new(None);
 
-/// "Hide" the window by parking it off-screen instead of SW_HIDE. The window
-/// stays WS_VISIBLE, so WM_PAINT keeps arriving and the swapchain stays valid
-/// while hidden — on restore there is no white/blank frame.
+/// Hides window by parking off-screen to keep WM_PAINT and swapchain valid.
 pub fn hide_window_to_tray(hwnd: isize) {
     if !is_window(hwnd) {
-        // The winit window may already be destroyed (or the handle is stale
-        // from a reinit in progress); operating on a dead/reused handle can
-        // mutate an unrelated window.
+        // Skip if HWND is stale; operating on dead handle could mutate another window.
         tracing::debug!("hide_window_to_tray: HWND {} no longer valid, skipping", hwnd);
         return;
     }
     let h = hwnd as *mut core::ffi::c_void;
-    // SAFETY: hwnd is a valid window handle from FindWindowW/CreateWindowExW.
+    // SAFETY: hwnd is valid window handle.
     unsafe {
         let mut placement = std::mem::zeroed::<WINDOWPLACEMENT>();
         placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
         if GetWindowPlacement(h, &mut placement) != 0 {
-            // Guard: if the window is already parked off-screen, its
-            // "normal" position reads -32000 and would overwrite the real
-            // saved coordinates — a second hide (e.g. minimize + close
-            // racing) would then make the window unrecoverable from the
-            // tray. Only accept an on-screen position.
+            // Only save if the window is on-screen. A second hide while already
+            // parked would save the off-screen (-32000) position and make the
+            // next restore unrecoverable.
             if placement.rcNormalPosition.left > -10000 {
                 *SAVED_PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()) = Some(placement);
             }
         }
-        // Park off-screen. NOTE: SetWindowPlacement clamps negative coordinates
-        // back to the virtual screen origin (0,0), leaving the window visible;
-        // SetWindowPos does not, so it must be used for parking.
-        // Maximized windows ignore SetWindowPos positioning (a no-op that would
-        // leave the window on screen), so unmaximize first — the saved
-        // placement still carries SW_SHOWMAXIMIZED and restore re-maximizes.
+        // Park off-screen with SetWindowPos. SetWindowPlacement clamps negative
+        // coordinates to (0,0) leaving the window visible, so it cannot park.
+        // Maximized windows ignore SetWindowPos, so unmaximize first; the saved
+        // placement still carries SW_SHOWMAXIMIZED for restore.
         if IsZoomed(h) != 0 {
             ShowWindow(h, SW_RESTORE as i32);
         }
@@ -241,39 +219,35 @@ pub fn hide_window_to_tray(hwnd: isize) {
             0,
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
-        // Remove taskbar / alt-tab presence while parked. WS_EX_TOOLWINDOW
-        // alone is not enough: winit's default WS_EX_APPWINDOW forces a
-        // taskbar button even alongside it, so clear that too. SWP_FRAMECHANGED
-        // makes the taskbar re-evaluate the extended style.
+        // Remove taskbar/alt-tab presence while parked.
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
         SetWindowLongPtrW(h, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW);
         SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-        // Drop keyboard focus so keystrokes don't reach the invisible window.
+        // Drop focus so keystrokes do not reach invisible window.
         SetFocus(std::ptr::null_mut());
     }
 }
 
-/// Restore a parked window back on screen at its saved position.
+/// Restores a window previously parked off-screen to its saved position
+/// and re-adds taskbar / Alt-Tab presence.
 pub fn restore_window_from_tray(hwnd: isize) {
     if !is_window(hwnd) {
         tracing::debug!("restore_window_from_tray: HWND {} no longer valid, skipping", hwnd);
         return;
     }
     let h = hwnd as *mut core::ffi::c_void;
-    // SAFETY: hwnd is a valid window handle from FindWindowW/CreateWindowExW.
+    // SAFETY: hwnd is valid window handle.
     unsafe {
-        // Re-add taskbar / alt-tab presence (restore WS_EX_APPWINDOW that
-        // winit set at creation). GWL_STYLE is left untouched (it was never
-        // modified while parked, so no restore is needed). SWP_FRAMECHANGED
-        // makes the taskbar and DWM re-evaluate.
+        // Re-add taskbar / Alt-Tab presence. WS_EX_APPWINDOW (set by winit)
+        // forces a taskbar button, so clear WS_EX_TOOLWINDOW and restore
+        // WS_EX_APPWINDOW, then SWP_FRAMECHANGED to re-evaluate.
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
         SetWindowLongPtrW(h, GWL_EXSTYLE, (ex & !WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW);
         SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 
-        // Explicitly restore from iconic state FIRST. SetWindowPlacement with
+        // Clear iconic state before repositioning. SetWindowPlacement with
         // SW_RESTORE alone is unreliable when the window was parked off-screen
-        // with WS_EX_TOOLWINDOW while iconic. ShowWindow(SW_RESTORE) clears
-        // the iconic flag before we attempt to reposition.
+        // with WS_EX_TOOLWINDOW while iconic.
         if IsIconic(h) != 0 {
             ShowWindow(h, SW_RESTORE as i32);
         }
@@ -282,9 +256,8 @@ pub fn restore_window_from_tray(hwnd: isize) {
             SAVED_PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()).take()
         {
             placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
-            // Preserve maximized state if the window was maximized before
-            // parking; otherwise restore to normal. Never SW_SHOWMINIMIZED,
-            // which would re-trigger the auto-minimize-to-tray path.
+            // Preserve maximized state if it was maximized before parking;
+            // never restore as minimized, which would re-trigger auto-minimize.
             placement.showCmd = if placement.showCmd == SW_SHOWMAXIMIZED {
                 SW_SHOWMAXIMIZED
             } else {
@@ -316,9 +289,7 @@ pub fn restore_window_from_tray(hwnd: isize) {
     force_foreground_window(hwnd);
 }
 
-/// Force a window to the foreground, working around the Windows restriction
-/// that only the foreground process can call SetForegroundWindow successfully.
-/// Simulates an Alt key press to trick Windows into allowing the call.
+/// Forces window to foreground via Alt key trick to bypass foreground restriction.
 pub fn force_foreground_window(hwnd: isize) {
     let h = hwnd as *mut core::ffi::c_void;
     const VK_MENU: u8 = 0x12; // Alt key
@@ -334,8 +305,7 @@ pub fn force_foreground_window(hwnd: isize) {
 
 #[cfg(target_arch = "x86_64")]
 pub fn cpu_name() -> String {
-    // CPUID is available on all x86_64 CPUs. Leaves 0x80000002–0x80000004
-    // are standard AMD/Intel vendor strings with no side effects.
+    // CPUID leaves 0x80000002-0x80000004 return brand string.
     let mut brand = [0u8; 48];
     for (leaf, offset) in [(0x80000002u32, 0), (0x80000003, 16), (0x80000004, 32)] {
         let result = core::arch::x86_64::__cpuid_count(leaf, 0);
@@ -381,12 +351,10 @@ pub fn total_memory_gb() -> String {
         ull_avail_virtual: 0,
         ull_avail_extended_virtual: 0,
     };
-    // SAFETY: GlobalMemoryStatusEx is a safe win32 API call with a properly
-    // initialised MemoryStatusEx struct (dw_length set). The buffer is stack-allocated.
+    // SAFETY: GlobalMemoryStatusEx with valid struct.
     let ok = unsafe { GlobalMemoryStatusEx(&mut mem) };
     if ok != 0 && mem.ull_total_phys > 0 {
-        // Round, not ceil: 15.5 GiB is "16 GB" either way, but 15.2 GiB
-        // must not be reported as 16 GB.
+        // Round to nearest GB.
         let gb = ((mem.ull_total_phys as f64 / 1024.0 / 1024.0 / 1024.0).round()) as u64;
         format!("{} GB", gb)
     } else {
@@ -395,8 +363,7 @@ pub fn total_memory_gb() -> String {
 }
 
 pub fn os_version() -> String {
-    // Open the registry key once and query all values to avoid redundant
-    // RegOpenKeyExW/RegCloseKey syscalls (was 3 opens = 9 syscalls, now 1 = 3).
+    // Query registry once to avoid redundant syscalls.
     let key_path = to_wide("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion");
     let mut hkey: HKEY = std::ptr::null_mut();
     let key_opened = unsafe {
@@ -416,8 +383,7 @@ pub fn os_version() -> String {
         (None, None, None)
     };
 
-    // SAFETY: RtlGetVersion is always available on Windows NT. The struct is
-    // zero-initialised with dw_os_version_info_size set to the correct size.
+    // SAFETY: RtlGetVersion with valid struct.
     let (major, minor, build) = unsafe {
         let mut info = OsVersionInfoW {
             dw_os_version_info_size: std::mem::size_of::<OsVersionInfoW>() as u32,
@@ -467,8 +433,7 @@ pub fn os_version() -> String {
 }
 
 pub fn display_resolution() -> String {
-    // SAFETY: GetSystemMetrics is a side-effect-free win32 user32 call that
-    // returns cached system-wide metrics. Safe to call any time.
+    // SAFETY: GetSystemMetrics returns cached metrics.
     let w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
     if w > 0 && h > 0 {
@@ -479,9 +444,7 @@ pub fn display_resolution() -> String {
 }
 
 pub fn display_refresh_rate() -> String {
-    // SAFETY: GetDC with null hwnd returns the screen DC. GetDeviceCaps reads
-    // a cached capability value. ReleaseDC releases the DC. No external state
-    // is modified.
+    // SAFETY: GetDC/GetDeviceCaps/ReleaseDC with screen DC.
     unsafe {
         let hdc = GetDC(std::ptr::null_mut());
         if hdc.is_null() {
@@ -505,9 +468,7 @@ fn registry_query_value(hkey: HKEY, value_name: *const u16) -> Option<String> {
     let mut buf_size: u32 = 0;
     let mut data_type: u32 = 0;
 
-    // SAFETY: First call with null data ptr to query required buffer size.
-    // hkey is a valid open handle from RegOpenKeyExW, value_name is a
-    // null-terminated UTF-16 string owned by the caller.
+    // SAFETY: Query required buffer size with null data ptr.
     let rc = unsafe {
         RegQueryValueExW(
             hkey,
@@ -526,9 +487,7 @@ fn registry_query_value(hkey: HKEY, value_name: *const u16) -> Option<String> {
     let mut buf: Vec<u16> = vec![0u16; (buf_size / 2) as usize];
     let mut size = buf_size;
 
-    // SAFETY: Second call with allocated buffer of the correct size returned
-    // by the first call. hkey is valid, value_name is valid. Buffer is
-    // properly sized and written as u8 bytes.
+    // SAFETY: Second call with correctly sized buffer.
     let rc = unsafe {
         RegQueryValueExW(
             hkey,
@@ -558,9 +517,7 @@ fn registry_query_dword_from(hkey: HKEY, value_name: *const u16) -> Option<u32> 
     let mut data_type: u32 = 0;
     let mut buf: [u8; 4] = [0; 4];
     let mut buf_size: u32 = 4;
-    // SAFETY: hkey is a valid open handle from RegOpenKeyExW. Buffer is a
-    // fixed 4-byte stack array sized for REG_DWORD. value_name is a valid
-    // null-terminated UTF-16 string.
+    // SAFETY: Valid handle and 4-byte buffer for REG_DWORD.
     let rc = unsafe {
         RegQueryValueExW(hkey, value_name, std::ptr::null_mut(), &mut data_type, buf.as_mut_ptr(), &mut buf_size)
     };
@@ -573,27 +530,21 @@ fn registry_query_dword_from(hkey: HKEY, value_name: *const u16) -> Option<u32> 
 const STARTUP_TASK_NAME: &str = "FrameworkCrate";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-/// Process-wide single-instance guard backed by a Windows named mutex.
-/// The handle is intentionally never closed — the OS releases it when the
-/// process exits, which is exactly the desired lifetime.
+/// Process-wide single-instance guard backed by Windows named mutex.
 pub struct SingleInstanceGuard {
     _handle: *mut core::ffi::c_void,
 }
 
-// The raw handle is only owned, never dereferenced after acquire; the guard
-// is not shared across threads beyond Move semantics.
+// Handle is owned, not dereferenced; Move-only across threads.
 unsafe impl Send for SingleInstanceGuard {}
 
-/// Deliberately empty: the OS releases the named mutex when the process
-/// exits. An explicit `CloseHandle` would free it early if the guard were
-/// accidentally dropped before `main` returns.
+/// OS releases mutex on process exit; explicit close would free it early.
 impl Drop for SingleInstanceGuard {
     fn drop(&mut self) {}
 }
 
 impl SingleInstanceGuard {
-    /// Try to acquire the named mutex. Returns `Err(())` when another
-    /// instance already holds it.
+    /// Tries to acquire named mutex; Err if another instance holds it.
     pub fn acquire(name: &str) -> Result<Self, ()> {
         #[link(name = "kernel32")]
         unsafe extern "system" {
@@ -607,23 +558,17 @@ impl SingleInstanceGuard {
         }
         const ERROR_ALREADY_EXISTS: u32 = 183;
         let wide = to_wide(name);
-        // SAFETY: name is a null-terminated UTF-16 string; no security
-        // attributes needed. A non-null handle with ERROR_ALREADY_EXISTS
-        // means another instance owns the mutex.
+        // SAFETY: Null-terminated UTF-16 name; non-null handle with ERROR_ALREADY_EXISTS means owned.
         let handle = unsafe { CreateMutexW(std::ptr::null(), 1, wide.as_ptr()) };
         if handle.is_null() {
-            // Mutex creation failed (rare) — allow this instance rather than
-            // blocking the app on a non-critical guard.
+            // Allow instance on rare creation failure.
             tracing::warn!("CreateMutexW failed; single-instance check skipped");
             return Ok(Self { _handle: handle });
         }
-        // SAFETY: trivial syscall wrapper reading thread-local error code,
-        // valid immediately after CreateMutexW in the same thread.
+        // SAFETY: GetLastError immediately after CreateMutexW.
         let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
         if exists {
-            // Close our handle to the *existing* named mutex; closing only
-            // decrements its reference count — the owning instance keeps it
-            // alive. Leaking it would leave a kernel handle per launch attempt.
+            // Close handle to existing mutex; owning instance keeps it alive.
             unsafe { CloseHandle(handle); }
             return Err(());
         }
@@ -631,9 +576,7 @@ impl SingleInstanceGuard {
     }
 }
 
-/// Whether the app is registered to launch at Windows startup via a
-/// scheduled task (ONLOGON with highest privileges, so it starts elevated
-/// without a UAC prompt).
+/// Whether app is registered to launch at startup via scheduled task.
 pub fn startup_launch_enabled() -> bool {
     std::process::Command::new("schtasks")
         .args(["/Query", "/TN", STARTUP_TASK_NAME])
@@ -643,31 +586,20 @@ pub fn startup_launch_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Register (enabled) or remove (disabled) the Windows startup scheduled
-/// task. `/RL HIGHEST` runs the app elevated at logon without a UAC prompt;
-/// registering such a task requires the app itself to be running elevated.
+/// Registers or removes Windows startup scheduled task (requires elevation for HIGHEST).
 pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     let output = if enabled {
         let exe = std::env::current_exe()
             .map_err(|e| format!("cannot resolve exe path: {e}"))?;
         let exe_str = exe.to_str().ok_or("exe path is not valid UTF-8")?;
-        // Reject characters that would break the schtasks command line or allow
-        // injection via the /TR value. current_exe() is trusted, but a path
-        // containing quotes or shell metachars would produce a malformed task.
+        // Reject characters that would break schtasks command line or allow injection.
         if exe_str.contains('"') || exe_str.contains('\'') || exe_str.contains('&') || exe_str.contains('|') || exe_str.contains(';') || exe_str.contains('%') || exe_str.contains('^') {
             return Err("exe path contains invalid characters".to_string());
         }
-        // Use raw_arg for the /TR value so a path with spaces is passed as a
-        // single quoted argument without double-escaping.  Command::args would
-        // escape the inner quotes as \" and the task would store literal
-        // backslashes, failing to launch on paths like `C:\Program Files\...`.
+        // Use raw_arg for /TR to avoid double-escaping paths with spaces.
         let mut cmd = std::process::Command::new("schtasks");
         cmd.args(["/Create", "/TN", STARTUP_TASK_NAME, "/TR"]);
-        // --minimized tells the single-instance guard to exit silently
-        // without restoring the existing window (avoids disrupting the
-        // user on lock-screen unlock, which also triggers ONLOGON).
-        // The /TR value is a full command line, so the exe path needs its
-        // own quotes INSIDE the /TR quotes: `"\"C:\path\app.exe\" --minimized"`.
+        // --minimized avoids restoring window on ONLOGON (e.g. lock-screen unlock).
         cmd.raw_arg(format!("\"\\\"{}\\\" --minimized\"", exe_str));
         cmd.args(["/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]);
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -683,9 +615,7 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
-    // schtasks outputs errors in the system locale encoding (Big5/GBK on
-    // Chinese Windows), not UTF-8. from_utf8_lossy produces mojibake.
-    // Fall back to a generic message when the bytes are not valid UTF-8.
+    // schtasks errors may be non-UTF8 (locale encoding); fall back to generic message.
     let stderr = String::from_utf8(output.stderr.clone()).unwrap_or_default();
     let stdout = String::from_utf8(output.stdout.clone()).unwrap_or_default();
     let detail = if !stderr.trim().is_empty() {
@@ -702,18 +632,11 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     }
 }
 
-// --- Tray icon functions ---
-//
-// SAFETY: All tray functions take `hwnd: isize` which is a window handle
-// obtained from FindWindowW or CreateWindowExW. The handles are guaranteed
-// valid for the lifetime of the tray manager. Window operations are
-// side-effect-free or modify only the specified window's state.
+// Tray icon functions: SAFETY hwnd is valid handle from FindWindowW/CreateWindowExW.
 
 pub fn find_window_by_title(title: &str) -> Option<isize> {
     let wide = to_wide(title);
-    // SAFETY: FindWindowW searches for a window whose title matches the string.
-    // null class name means match any class. wide is null-terminated UTF-16.
-    // Returns null if no match found, which we convert to None.
+    // SAFETY: FindWindowW with null class matches any class.
     let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
     if hwnd.is_null() {
         None
@@ -722,22 +645,16 @@ pub fn find_window_by_title(title: &str) -> Option<isize> {
     }
 }
 
-/// Window class of the running instance's hidden tray message window, created
-/// by the tray message pump (see tray/message_pump.rs).
+/// Hidden tray message window class.
 const TRAY_WINDOW_CLASS: &str = "FrameworkControlTray";
 
-/// Registered message a second instance posts to the running instance's tray
-/// window to request it restore its own (off-screen-parked) main window.
-///
-/// `RegisterWindowMessageW` returns the same message id for the same string
-/// across all processes, so the sender (`request_show_running_instance`) and
-/// the pump's `tray_wnd_proc` compute an identical value.
+/// Message ID for second instance to request restore of parked window.
 pub fn show_request_message_id() -> u32 {
     let wide = to_wide("FrameworkCrateShow");
     unsafe { RegisterWindowMessageW(wide.as_ptr()) }
 }
 
-/// Find the running instance's hidden tray window by its class name.
+/// Finds running instance's hidden tray window.
 pub fn find_tray_window() -> Option<isize> {
     let wide = to_wide(TRAY_WINDOW_CLASS);
     let hwnd = unsafe {
@@ -746,10 +663,7 @@ pub fn find_tray_window() -> Option<isize> {
     if hwnd.is_null() { None } else { Some(hwnd as isize) }
 }
 
-/// From a second instance, ask the already-running instance to restore its own
-/// window. A second process cannot restore the parked window because its
-/// `SAVED_PLACEMENT` is None; the running instance owns that state and must
-/// perform the restore itself (it posts a message to its tray window).
+/// Asks running instance to restore its parked window (only owner has saved placement).
 pub fn request_show_running_instance() {
     if let Some(hwnd) = find_tray_window() {
         post_message(hwnd, show_request_message_id(), 0, 0);
@@ -757,25 +671,18 @@ pub fn request_show_running_instance() {
 }
 
 pub fn is_iconic(hwnd: isize) -> bool {
-    // SAFETY: IsIconic checks if the specified window is minimized (iconic).
-    // hwnd is a valid window handle. Returns non-zero if iconic.
+    // SAFETY: IsIconic checks if window is minimized.
     unsafe { IsIconic(hwnd as *mut core::ffi::c_void) != 0 }
 }
 
 pub fn is_window(hwnd: isize) -> bool {
-    // SAFETY: IsWindow checks if the specified handle is a valid window handle.
-    // hwnd is a handle we obtained earlier; this validates it's still valid.
+    // SAFETY: IsWindow validates handle.
     unsafe { IsWindow(hwnd as *mut core::ffi::c_void) != 0 }
 }
 
-/// Load an ICO icon from raw bytes and return an HICON handle.
-///
-/// SAFETY: The returned HICON must be destroyed with DestroyIcon when no longer
-/// needed. However, in our case the icon is used for the lifetime of the tray
-/// and destroyed implicitly when the process exits.
+/// Loads ICO icon from bytes and returns HICON handle.
 pub fn load_icon_from_bytes(data: &[u8]) -> Option<isize> {
-    // ICO header: reserved(2) + type(2) + count(2) = 6 bytes
-    // Each entry: 16 bytes starting at offset 6 + i*16
+    // ICO: 6-byte header + 16-byte entries.
     if data.len() < 22 {
         return None;
     }
@@ -790,8 +697,7 @@ pub fn load_icon_from_bytes(data: &[u8]) -> Option<isize> {
         return None;
     }
 
-    // Find the entry with the largest dimensions (width * height).
-    // ICO stores 0 for 256px entries, so treat 0 as 256.
+    // Find largest entry; 0 means 256px.
     let mut best_entry: Option<(u32, u32)> = None; // (bytes_in_res, image_offset)
     let mut best_area: u32 = 0;
 
@@ -866,11 +772,7 @@ pub fn load_icon_from_bytes(data: &[u8]) -> Option<isize> {
     }
 }
 
-/// Add a tray icon to the system notification area.
-///
-/// SAFETY: hwnd must be a valid window handle that will receive callback_msg
-/// messages. icon must be a valid HICON from LoadIcon/CreateIconFromResourceEx.
-/// tip is truncated to 127 characters (Windows limit).
+/// Adds tray icon; SAFETY hwnd and HICON must be valid.
 pub fn shell_notify_add(hwnd: isize, icon: isize, tip: &str, callback_msg: u32) -> bool {
     let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
@@ -882,47 +784,31 @@ pub fn shell_notify_add(hwnd: isize, icon: isize, tip: &str, callback_msg: u32) 
     let tip_wide = to_wide(tip);
     let copy_len = tip_wide.len().min(127);
     nid.szTip[..copy_len].copy_from_slice(&tip_wide[..copy_len]);
-    // Always keep the buffer NUL-terminated: a tip longer than 127 UTF-16
-    // units would otherwise copy its terminator out of the slice.
+    // Keep buffer NUL-terminated when tip exceeds limit.
     nid.szTip[copy_len] = 0;
-    // SAFETY: Shell_NotifyIconW modifies the system tray icon list.
-    // nid is properly initialized with all required fields.
+    // SAFETY: Shell_NotifyIconW with valid NID.
     unsafe { Shell_NotifyIconW(NIM_ADD, &nid) != 0 }
 }
 
-/// Remove a tray icon from the system notification area.
-///
-/// SAFETY: hwnd must match the handle used in shell_notify_add.
+/// Removes tray icon; SAFETY hwnd must match add handle.
 pub fn shell_notify_delete(hwnd: isize) -> bool {
     let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd as *mut core::ffi::c_void;
     nid.uID = 1;
-    // SAFETY: Shell_NotifyIconW with NIM_DELETE removes the icon.
-    // nid is properly initialized with cbSize, hWnd, and uID.
+    // SAFETY: Shell_NotifyIconW with NIM_DELETE.
     unsafe { Shell_NotifyIconW(NIM_DELETE, &nid) != 0 }
 }
 
-/// Post a message to a window's message queue (non-blocking).
-///
-/// SAFETY: hwnd must be a valid window handle. The message is placed in the
-/// queue and processed asynchronously by the window's message pump.
+/// Posts message to window queue; SAFETY hwnd must be valid.
 pub fn post_message(hwnd: isize, msg: u32, wparam: usize, lparam: isize) {
-    // SAFETY: PostMessageW places a message in the message queue of the specified window.
-    // hwnd is a valid window handle. Returns immediately without waiting.
+    // SAFETY: PostMessageW with valid hwnd.
     unsafe { PostMessageW(hwnd as *mut core::ffi::c_void, msg, wparam, lparam); }
 }
 
-/// Show a tray context menu at the specified screen coordinates.
-///
-/// Returns the menu command ID (ID_SHOW or ID_QUIT) if the user selects an item,
-/// or None if the menu is dismissed without selection.
-///
-/// SAFETY: hwnd must be a valid window handle for the tray icon.
-/// The menu is created, displayed, and destroyed within this function.
+/// Shows tray context menu at coordinates; returns selected command ID.
 pub fn show_tray_menu(hwnd: isize, x: i32, y: i32) -> Option<u32> {
-    // SAFETY: CreatePopupMenu creates a new empty popup menu.
-    // Returns null if the function fails (out of resources).
+    // SAFETY: CreatePopupMenu; null on failure.
     let menu = unsafe { CreatePopupMenu() };
     if menu.is_null() {
         return None;
@@ -931,17 +817,13 @@ pub fn show_tray_menu(hwnd: isize, x: i32, y: i32) -> Option<u32> {
     let show_text = to_wide("Show Framework Crate");
     let quit_text = to_wide("Exit");
 
-    // SAFETY: AppendMenuW adds items to the menu. Menu is valid from CreatePopupMenu.
-    // ID_SHOW and ID_QUIT are constants used to identify menu items.
+    // SAFETY: AppendMenuW with valid menu.
     unsafe {
         AppendMenuW(menu, 0, ID_SHOW as usize, show_text.as_ptr());
         AppendMenuW(menu, 0, ID_QUIT as usize, quit_text.as_ptr());
     }
 
-    // SAFETY: TrackPopupMenu displays the menu and returns the selected command.
-    // TPM_RIGHTBUTTON: menu appears on right-click.
-    // TPM_RETURNCMD: returns command ID instead of sending WM_COMMAND.
-    // The menu is destroyed after this call.
+    // SAFETY: TrackPopupMenu with TPM_RETURNCMD.
     let cmd = unsafe {
         TrackPopupMenu(
             menu,
@@ -954,10 +836,10 @@ pub fn show_tray_menu(hwnd: isize, x: i32, y: i32) -> Option<u32> {
         )
     };
 
-    // SAFETY: DestroyMenu frees the menu handle. Menu is valid from CreatePopupMenu.
+    // SAFETY: DestroyMenu with valid handle.
     unsafe { DestroyMenu(menu); }
 
-    // Send WM_NULL to ensure the tray icon callback is processed
+    // Ensure tray callback is processed.
     post_message(hwnd, WM_NULL, 0, 0);
 
     if cmd > 0 { Some(cmd as u32) } else { None }

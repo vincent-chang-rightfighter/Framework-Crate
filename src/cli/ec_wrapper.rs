@@ -100,15 +100,10 @@ pub struct UsbCPort {
     pub dp_alt_mode: bool,
 }
 
-// ============================================================================
-// PD port classification helpers (ported from framework-control-windows-Iced)
-// ============================================================================
+// PD port classification helpers.
 
-/// Watts at or below this (with Source) are treated as DisplayPort.
-const DISPLAY_CARD_WATTS_THRESHOLD: f32 = 3.0;
-/// Watts at or below this (Source + PD, no DP alt) are treated as HDMI.
-/// USB-C default charging is 7.5W (5V/1.5A), so stay below that.
-const HDMI_SOURCE_WATTS_MAX: f32 = 6.0;
+const DISPLAY_CARD_WATTS_THRESHOLD: f32 = 3.0; // Above this is HDMI.
+const HDMI_SOURCE_WATTS_MAX: f32 = 6.0; // Below 7.5W default charging.
 
 fn is_low_power_display_source(watts: Option<f32>) -> bool {
     matches!(watts, Some(w) if w > 0.0 && w <= HDMI_SOURCE_WATTS_MAX)
@@ -158,9 +153,6 @@ pub fn classify_pd_port<'a>(
     display_card_installed: bool,
     ever_seen_sink: bool,
 ) -> &'static str {
-    /// Maximum number of history samples used for classification.
-    /// Callers should pass exactly 3 samples (from `PdPortsHistory`); extras
-    /// are silently ignored.
     const MAX_HIST: usize = 3;
     let empty = Vec::new();
     let mut hist_buf: [&Vec<UsbCPort>; MAX_HIST] = [&empty; MAX_HIST];
@@ -194,8 +186,7 @@ pub fn classify_pd_port<'a>(
         return result;
     }
     if port.pd_contract && role_is(port, "Source") {
-        // HDMI/DP cards often omit DP-alt in EC PD state but still draw a
-        // small Source contract (~3–5W). USB-C charging starts at 7.5W.
+        // HDMI/DP can omit DP-alt but still draw ~3-5W Source; charging starts at 7.5W.
         if display_card_installed || is_low_power_display_source(port.negotiated_watts) {
             let result = classify_display_source(port.negotiated_watts, display_card_installed);
             tracing::debug!("[classify] Port {} → {} (Source+PD, no dp_alt, watts={:?})", port.port, result, port.negotiated_watts);
@@ -302,10 +293,7 @@ fn sensor_name_for_index(platform: Option<Platform>, index: usize) -> String {
     name.to_string()
 }
 
-/// Per-platform sensor name tables are immutable once resolved. `thermal()`
-/// polls every cycle, so cache the names (keyed by platform) and only clone
-/// the one String needed per sensor instead of re-matching + re-allocating.
-/// Cache of per-platform sensor name tables (platform, names).
+/// Cached per-platform sensor names to avoid re-matching on every thermal poll.
 type SensorNamesCache = std::sync::Mutex<Option<(Option<Platform>, Vec<String>)>>;
 
 static SENSOR_NAMES: std::sync::OnceLock<SensorNamesCache> = std::sync::OnceLock::new();
@@ -347,12 +335,7 @@ impl EcClient {
                     0xFC..=0xFF => continue,
                     _ => {
                         let temp = byte as i32 - 73;
-                        // EC returns 0x00 (and a few low values) when a sensor
-                        // is missing or its read failed. Decoding those to
-                        // negative temperatures would let the fan curve see
-                        // e.g. -73°C and park the fans at 0% duty while real
-                        // silicon could be hot. Drop implausible readings
-                        // instead of feeding them to control.
+                        // Drop implausible low readings; e.g. 0x00 would decode to -73°C and park fans while silicon is hot.
                         if temp <= 0 {
                             continue;
                         }
@@ -453,9 +436,7 @@ impl EcClient {
                     (entry.fw_version >> 8) & 0xFF,
                     entry.fw_version & 0xFF
                 );
-                // Keep the FIRST fw_type == 1 entry. Later entries would
-                // overwrite it with the last UEFI payload's version, which
-                // is not the system BIOS version the UI labels it as.
+                // Keep first fw_type == 1; later entries are not the system BIOS version.
                 if entry.fw_type == 1 && data.uefi_version.is_none() {
                     data.uefi_version = Some(version);
                 }
@@ -466,9 +447,7 @@ impl EcClient {
     }
 
     pub fn set_fan_duty(&self, percent: u32, fan_index: Option<u32>) -> Result<(), String> {
-        // Clamp at the wrapper boundary so no caller can write an invalid
-        // duty to the EC (all current callers clamp, but a future one must
-        // not be able to send >100).
+        // Clamp at wrapper so no caller can send >100 to EC.
         let percent = percent.min(100);
         self.ec
             .fan_set_duty(fan_index, percent)
@@ -490,12 +469,7 @@ impl EcClient {
 
     pub fn kblight_set(&self, percent: u32) -> Result<(), String> {
         let percent = percent.min(100) as u8;
-        // framework_lib swallows the EC write error (only debug_asserts), so
-        // verify the write by reading the value back. duty<->percent rounding
-        // is off by at most one, hence the ±1 tolerance. The EC applies the
-        // new duty asynchronously, so retry the readback briefly before
-        // declaring a genuine mismatch (an immediate read can return stale
-        // data right after the write).
+        // framework_lib ignores write errors; verify via readback with ±1 tolerance and brief retries for async EC update.
         self.ec.set_keyboard_backlight(percent);
         let mut last: Option<u8> = None;
         for _ in 0..5 {
@@ -662,9 +636,7 @@ mod tests {
 
     #[test]
     fn usbc_that_was_sink_is_never_usba() {
-        // Port reported Sink (idle USB-C expansion-card port) in an old
-        // sample, now hosts a USB-C device and looks exactly like a USB-A
-        // port (Source+noPD, stable). The permanent marker must win.
+        // Sink history must prevent misclassifying as USB-A even when currently stable Source+noPD.
         let p = port("Source", false, false, Some(7.5));
         let hist = [vec![port("Sink", false, false, None)]];
         assert_eq!(

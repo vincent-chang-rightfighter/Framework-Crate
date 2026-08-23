@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
-// Validation constants for config values
-// POLL_MS_MIN reuses the public UI constant to avoid duplication.
+// POLL_MS_MIN reuses public UI constant to avoid duplication.
 const POLL_MS_MIN: u64 = crate::style::POLL_RATE_MIN_MS as u64;
 pub const POLL_MS_MAX: u64 = 2000;
 pub const UI_REFRESH_MS_MIN: u64 = 50;
@@ -15,8 +14,7 @@ pub const CURVE_POLL_MS_MAX: u64 = 5000;
 const HYSTERESIS_C_MAX: u32 = 10;
 const RATE_LIMIT_MIN: u32 = 1;
 const RATE_LIMIT_MAX: u32 = 100;
-/// Maximum temperature (°C) of the curve editor domain and the plots. The
-/// legacy 0–100 range left readings above 100°C pinned to the plot edge.
+/// Maximum curve domain temperature (°C); extends legacy 0–100 to avoid pinning.
 pub const CURVE_TEMP_MAX: u32 = 110;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -30,16 +28,11 @@ pub struct Config {
 }
 
 impl Config {
-    /// Validate and clamp all config values to their allowed ranges.
-    ///
-    /// This ensures the config file never contains values that could cause
-    /// hardware damage or application instability.
+    /// Clamps all values to safe ranges to prevent hardware damage or instability.
     pub fn validate(&mut self) {
-        // Telemetry settings
         self.telemetry.poll_ms = self.telemetry.poll_ms.clamp(POLL_MS_MIN, POLL_MS_MAX);
         self.telemetry.ui_refresh_ms = self.telemetry.ui_refresh_ms.clamp(UI_REFRESH_MS_MIN, UI_REFRESH_MS_MAX);
 
-        // Fan control settings
         if let Some(ref mut manual) = self.fan.manual {
             manual.duty_pct = manual.duty_pct.clamp(DUTY_PCT_MIN, DUTY_PCT_MAX);
         }
@@ -51,17 +44,12 @@ impl Config {
                 *down = (*down).clamp(RATE_LIMIT_MIN, RATE_LIMIT_MAX);
             }
             if curve.curve.points.is_empty() {
-                // An explicit `points = []` in the file is degenerate: the
-                // curve editor would render no draggable points at all.
-                // Fill in the defaults so the curve stays editable.
+                // Empty points leaves editor undraggable; restore defaults.
                 curve.curve.points = default_points();
                 debug!("Curve points were empty — restored default points");
             }
             if curve.curve.sensors.len() > 1 {
-                // The curve is driven by exactly one temperature sensor
-                // (single selection in the UI). Older configs could carry
-                // multiple sensors; prefer a non-battery sensor so Battery
-                // never drives the fan (matches curve_control_temp).
+                // Curve uses single sensor; migrate old multi-select, prefer non-battery.
                 if let Some(idx) = curve.curve.sensors.iter().position(|s| !is_battery_sensor(s)) {
                     let keep = curve.curve.sensors[idx].clone();
                     debug!("Curve sensors were multi-select — kept {} (Battery removed)", keep);
@@ -72,17 +60,11 @@ impl Config {
                 }
             }
             for point in &mut curve.curve.points {
-                // Both axes are canvas coordinates too: values outside the
-                // plot domain would draw off-plot, so clamp instead of
-                // trusting the editor.
+                // Clamp to plot domain to keep points drawable.
                 point[0] = point[0].clamp(0, CURVE_TEMP_MAX);
                 point[1] = point[1].clamp(0, 100);
             }
-            // Dedupe by temperature, keeping the highest duty on a collision
-            // and preserving original order. curve_full_points collapses
-            // duplicate temps, so a stored duplicate would create a phantom
-            // control point that is drawn but never affects the curve; this
-            // keeps the persisted config free of such duplicates.
+            // Dedupe by temp keeping highest duty; avoids phantom points that don't affect curve.
             let mut deduped: Vec<[u32; 2]> = Vec::new();
             for &[t, d] in &curve.curve.points {
                 if let Some(existing) = deduped.iter_mut().find(|p| p[0] == t) {
@@ -97,7 +79,6 @@ impl Config {
             *duty = (*duty).clamp(DUTY_PCT_MIN, DUTY_PCT_MAX);
         }
 
-        // Battery settings
         if let Some(ref mut limit) = self.battery.charge_limit_max_pct {
             limit.value = limit.value.clamp(crate::style::CHARGE_LIMIT_MIN as u8, crate::style::CHARGE_LIMIT_MAX as u8);
         }
@@ -167,8 +148,7 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManualConfig {
-    /// Default: a legacy/partial `[fan.manual]` table degrades to 0% (fans
-    /// off — a safe neutral value) instead of rejecting the whole file.
+    /// Missing duty defaults to 0% (safe neutral) instead of rejecting file.
     #[serde(default)]
     pub duty_pct: u32,
 }
@@ -209,13 +189,10 @@ fn default_rate_limit_pct_per_step() -> u32 {
 }
 
 pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
-    // BTreeMap keyed by temperature: later points override earlier ones
-    // ("last wins" on duplicate temps) and iteration is naturally sorted.
+    // BTreeMap sorted by temp; last wins on duplicates.
     let mut map: BTreeMap<u32, u32> = BTreeMap::new();
     let has_zero = points.iter().any(|p| p[0] == 0);
-    // Span the full plot domain: a point at the max temperature guarantees
-    // the fan ramps to 100% before the edge instead of jumping at the last
-    // defined point.
+    // Ensure full domain coverage so fan hits 100% before edge.
     let has_max = points.iter().any(|p| p[0] == CURVE_TEMP_MAX);
     if !has_zero {
         map.insert(0, 0);
@@ -273,8 +250,7 @@ pub fn is_battery_sensor(name: &str) -> bool {
     name.eq_ignore_ascii_case("battery")
 }
 
-/// Temperature that drives the fan curve: configured sensors if set,
-/// otherwise the hottest non-battery sensor.
+/// Temp driving fan curve: configured sensor or hottest non-battery fallback.
 pub fn curve_control_temp(temps: &BTreeMap<String, i32>, sensors: &[String]) -> i32 {
     let non_battery = || {
         temps.iter()

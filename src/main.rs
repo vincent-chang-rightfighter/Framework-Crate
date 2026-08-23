@@ -25,12 +25,7 @@ pub use style::*;
 
 include!(concat!(env!("OUT_DIR"), "/icon_rgba.rs"));
 
-/// Tokio executor limited to two worker threads. This is a tray app: the
-/// Win32 tray message pump owns a native thread, and the background loop is
-/// one async task whose EC calls all run via `spawn_blocking` (which uses
-/// tokio's separate blocking pool, not these workers). Two workers cover the
-/// async loop and the iced runtime tasks, and keep the whole background
-/// pipeline pinned onto the LP-E core (see `pin_to_slowest_core`).
+/// Tokio executor with 2 workers for tray app; EC calls use blocking pool, workers cover async loop and iced tasks pinned to LP-E core.
 struct SmallTokioExecutor {
     rt: tokio::runtime::Runtime,
 }
@@ -61,23 +56,15 @@ impl iced::Executor for SmallTokioExecutor {
     }
 }
 
-/// Single-instance guard. A second process (manual relaunch, or overlap with
-/// the schtasks logon task) would issue parallel EC I/O on the same LPC bus
-/// and race the tray window class / config writes.
+/// Single-instance guard; prevents parallel EC I/O and tray/config races from second process.
 fn acquire_single_instance(minimized: bool) -> Option<system_info::SingleInstanceGuard> {
     match system_info::SingleInstanceGuard::acquire("FrameworkCrateSingleInstance") {
         Ok(guard) => Some(guard),
         Err(()) => {
             eprintln!("Framework Crate is already running.");
-            // Only bring the existing window to the foreground when the
-            // second instance was started manually (no --minimized). The
-            // schtasks ONLOGON trigger also fires on lock-screen unlock;
-            // silently exiting in that case avoids disrupting the user.
+            // Only foreground existing window on manual launch; schtasks fires on unlock so stay silent.
             if !minimized {
-                // Ask the already-running instance to restore its own window.
-                // A second process cannot restore the parked window (its
-                // SAVED_PLACEMENT is None), so it signals the running
-                // instance's tray window, which restores using its own state.
+                // Signal running instance to restore; second process cannot restore parked window itself.
                 system_info::request_show_running_instance();
             }
             std::process::exit(0);
@@ -87,7 +74,7 @@ fn acquire_single_instance(minimized: bool) -> Option<system_info::SingleInstanc
 
 fn main() {
     let minimized = std::env::args().any(|a| a == "--minimized");
-    // Hold for the whole process lifetime.
+    // Hold guard for process lifetime.
     let _single_instance = acquire_single_instance(minimized);
 
     #[cfg(not(test))]
@@ -108,7 +95,7 @@ fn main() {
     ) {
         Ok(icon) => Some(icon),
         Err(e) => {
-            // Don't panic before any UI is shown: run icon-less instead.
+            // Run without icon instead of panicking before UI shows.
             tracing::error!("Failed to load window icon: {}", e);
             None
         }
@@ -128,8 +115,7 @@ fn main() {
         .theme(app_theme)
         .executor::<SmallTokioExecutor>()
         .window(iced::window::Settings {
-            // NOTE: `.window(...)` overrides any earlier `.window_size()`
-            // / `.resizable()` calls, so the size must be set here.
+            // NOTE: .window overrides earlier size calls; set size here.
             size: iced::Size::new(900.0, 613.0),
             resizable: false,
             icon: window_icon,
@@ -148,8 +134,6 @@ mod tests {
     use super::*;
     use crate::types::{sorted_sensor_list, FanControlMode};
     use std::sync::atomic::Ordering;
-
-    // Tests: sorted_sensor_list ordering
 
     #[test]
     fn sorted_sensor_list_empty_selected_uses_all_keys() {
@@ -174,8 +158,6 @@ mod tests {
         let result = sorted_sensor_list(&selected, &keys);
         assert_eq!(result, vec!["A", "B", "C"]);
     }
-
-    // Tests: Config serialization round-trip
 
     #[test]
     fn config_round_trip_toml() {
@@ -249,10 +231,7 @@ mod tests {
         assert_eq!(original, deserialized);
     }
 
-    // --- Integration tests: UI state toggles ---
-
-    // App::new(false) loads/saves the config file (test-isolated via config_path),
-    // so serialize tests that touch it to avoid cross-test state pollution.
+    // Serialize tests touching config to avoid cross-test pollution.
     static APP_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn app_config_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -302,8 +281,6 @@ mod tests {
         let _ = app.update(Message::ToggleBatteryDetails);
         assert!(!app.show_battery_details);
     }
-
-    // --- Integration tests: Config changes through messages ---
 
     #[tokio::test]
     async fn fan_mode_curve_creates_default_config() {
@@ -392,8 +369,6 @@ mod tests {
         assert_eq!(cfg.telemetry.ui_refresh_ms, 200);
     }
 
-    // --- Integration tests: Config validation ---
-
     #[test]
     fn validate_battery_charge_limit_clamps_high() {
         let mut cfg = types::Config::default();
@@ -409,8 +384,6 @@ mod tests {
         cfg.validate();
         assert_eq!(cfg.battery.charge_limit_max_pct.unwrap().value, 25);
     }
-
-    // --- Integration tests: Quit flow ---
 
     #[tokio::test]
     async fn close_request_in_non_manual_does_not_show_warning() {

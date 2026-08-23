@@ -3,24 +3,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-/// Serialize all config writes through a single lock so there is a single
-/// writer for the hot save path and shutdown-time persists.
+/// Serializes config writes so only one writer persists at a time.
 static CONFIG_SAVE_LOCK: Mutex<()> = Mutex::new(());
 
-/// Unique suffix per save call so concurrent writers (background task and
-/// exit-time sync save) never collide on the same temp file.
-/// Uses SeqCst for clarity; also correct under `CONFIG_SAVE_LOCK` with Relaxed.
+/// Per-save unique suffix to avoid temp file collisions between concurrent writers.
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Version of the newest config snapshot written to disk. Writers bump and
-/// compare versions (see save_versioned) so a slow debounced background save
-/// can never overwrite a newer shutdown-time save with stale data.
+/// Newest persisted config version; prevents stale debounced saves from overwriting newer shutdown saves.
 static LAST_SAVED_VERSION: AtomicU64 = AtomicU64::new(0);
 
-/// Generate a full temp file extension (e.g. "toml.12345.0.42.tmp") in one
-/// allocation. The process id makes the name unique across concurrently
-/// running instances (each starts its counter at 0, so timestamp+counter
-/// alone can collide when two instances save in the same millisecond).
+/// Builds unique temp extension from timestamp, PID, and counter for cross-process uniqueness.
 fn unique_tmp_extension() -> String {
     let counter = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
     let timestamp = crate::util::current_time_ms();
@@ -48,7 +40,7 @@ pub fn config_path() -> Result<PathBuf, String> {
 fn default_config_dir() -> PathBuf {
     #[cfg(test)]
     {
-        // Tests must never touch the real user config.
+        // Keep tests off the real user config.
         std::env::temp_dir().join("framework-crate-tests")
     }
     #[cfg(not(test))]
@@ -60,9 +52,7 @@ fn default_config_dir() -> PathBuf {
     }
 }
 
-/// Preserve a corrupt config file before it is overwritten by the next
-/// save.  Called on both read errors (IO / non-UTF-8) and parse errors
-/// (invalid TOML).
+/// Backs up corrupt config before next save overwrites it.
 fn backup_corrupt_config(path: &std::path::Path) {
     let backup = path.with_extension(format!(
         "toml.corrupt-{}-{}-{}",
@@ -90,10 +80,7 @@ pub fn load() -> Result<Config, String> {
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
-                // An IO error or non-UTF-8 byte sequence also means the
-                // file is corrupt and would be silently overwritten by the
-                // next save — preserve it the same way we do for parse
-                // errors.
+                // IO or non-UTF-8 corruption would be silently overwritten; preserve it.
                 backup_corrupt_config(&path);
                 return Err(format!("Failed to read {}: {}", path.display(), e));
             }
@@ -101,10 +88,7 @@ pub fn load() -> Result<Config, String> {
         let mut config: Config = match toml::from_str(&content) {
             Ok(cfg) => cfg,
             Err(e) => {
-                // The app falls back to defaults and continues on load error,
-                // and the next save overwrites the file — so preserve the
-                // corrupt file first, otherwise the user's configuration is
-                // silently lost.
+                // Load falls back to defaults and next save overwrites; preserve corrupt file.
                 backup_corrupt_config(&path);
                 return Err(format!("Failed to parse {}: {}", path.display(), e));
             }
@@ -115,11 +99,7 @@ pub fn load() -> Result<Config, String> {
     Ok(Config::default())
 }
 
-/// Versioned write: skips the write entirely when a NEWER version has
-/// already landed on disk. The version check happens under CONFIG_SAVE_LOCK
-/// so it is atomic with respect to concurrent writers — this closes the
-/// shutdown race where a stale debounced background save lands after the
-/// newer shutdown-time save_config_now() and rolls the file back.
+/// Skips write if newer version already persisted; check is under lock to avoid shutdown race.
 pub fn save_versioned(config: &Config, ver: u64, sync: bool) -> Result<(), String> {
     let _guard = CONFIG_SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let newest = LAST_SAVED_VERSION.load(Ordering::SeqCst);
@@ -135,8 +115,7 @@ pub fn save_versioned(config: &Config, ver: u64, sync: bool) -> Result<(), Strin
 }
 
 fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
-    // Clone is required because validate() and sort_by_key() mutate in-place;
-    // we must not alter the caller's Config.
+    // Clone to avoid mutating caller's Config during validate/sort.
     let mut config = config.clone();
     config.validate();
     if let Some(ref mut curve) = config.fan.curve {
@@ -191,8 +170,7 @@ fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
 }
 
 fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path, sync: bool) -> Result<(), String> {
-    // On Windows, std::fs::rename fails if dest exists.
-    // Use MoveFileExW with MOVEFILE_REPLACE_EXISTING for atomic replacement.
+    // Windows rename fails if dest exists; use MoveFileExW for atomic replace.
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -205,13 +183,7 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path, sync: bool) -> 
         let tmp_wide: Vec<u16> = OsStr::new(tmp).encode_wide().chain(std::iter::once(0)).collect();
         let dest_wide: Vec<u16> = OsStr::new(dest).encode_wide().chain(std::iter::once(0)).collect();
 
-        // MOVEFILE_REPLACE_EXISTING alone guarantees atomic rename on the same volume.
-        // tmp is created alongside dest (same directory via with_extension), so this is always same-volume.
-        // SAFETY: MoveFileExW atomically replaces dest with tmp on the same volume.
-        // Both paths are null-terminated UTF-16 wide strings. tmp and dest are on
-        // the same directory (same volume), so MOVEFILE_REPLACE_EXISTING is atomic.
-        // Only use WRITE_THROUGH when durability is required (sync=true, e.g. quit);
-        // debounced background saves use `sync=false` and avoid the extra flush.
+        // SAFETY: Paths are null-terminated UTF-16; tmp and dest share directory so replace is atomic. Use WRITE_THROUGH only when sync is required.
         let flags = if sync {
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
         } else {
@@ -221,19 +193,14 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path, sync: bool) -> 
         if success != 0 {
             return Ok(());
         }
-        // Fallback: copy dest → bak (not rename) so dest remains until the
-        // final replace succeeds; if power is lost after copy, dest is still
-        // intact.  .bak is preserved after success so users can manually
-        // recover if needed.
+        // Fallback: copy dest to .bak so dest survives until replace succeeds; .bak kept for manual recovery.
         let bak = dest.with_extension("toml.bak");
         if dest.exists() {
-            // Copy, not rename — dest stays in place until the atomic
-            // MoveFileExW/rename below succeeds.
+            // Copy preserves dest until atomic replace succeeds.
             if let Err(e) = std::fs::copy(dest, &bak) {
                 tracing::warn!("Failed to back up config to {:?}: {}", bak, e);
             }
-            // Windows rename fails if dest exists, so remove it only after a
-            // successful backup copy.
+            // Remove dest only after successful backup; Windows rename needs absent dest.
             let _ = std::fs::remove_file(dest);
         }
         match std::fs::rename(tmp, dest) {
@@ -251,7 +218,7 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path, sync: bool) -> 
     #[cfg(not(windows))]
     {
         let _ = sync;
-        // On Unix, rename is atomic and replaces dest
+        // Unix rename atomically replaces dest.
         std::fs::rename(tmp, dest).map_err(|e| format!("rename failed: {}", e))
     }
 }
@@ -308,8 +275,7 @@ mod tests {
         std::fs::write(&tmp, "new").unwrap();
         atomic_replace(&tmp, &dest, true).unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
-        // Note: .bak is only created in the fallback path (when MoveFileExW fails).
-        // On Windows with atomic MoveFileExW, no .bak is expected.
+        // NOTE: .bak only in fallback path; atomic MoveFileExW creates none.
     }
 
     #[test]
@@ -320,7 +286,7 @@ mod tests {
         std::fs::write(&tmp, "new").unwrap();
         atomic_replace(&tmp, &dest, true).unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
-        // No .bak should be created when dest didn't exist
+        // No .bak when dest was absent.
         assert!(!dest.with_extension("toml.bak").exists());
     }
 
@@ -333,12 +299,12 @@ mod tests {
         cfg.telemetry.poll_ms = 1000;
         cfg.battery.charge_limit_max_pct = Some(SettingU8 { enabled: true, value: 80 });
 
-        // Serialize with header like save() does
+        // Serialize with header as save does.
         let body = toml::to_string_pretty(&cfg).unwrap();
         let content = format!("# Framework Crate configuration\n{}\n", body);
         std::fs::write(&path, &content).unwrap();
 
-        // Load via toml parse (same logic as load(); TOML ignores # comments)
+        // TOML ignores # comments so direct parse matches load logic.
         let raw = std::fs::read_to_string(&path).unwrap();
         let loaded: Config = toml::from_str(&raw).unwrap();
         assert_eq!(loaded.fan.mode, FanControlMode::Manual);

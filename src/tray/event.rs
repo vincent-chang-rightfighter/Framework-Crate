@@ -4,9 +4,7 @@ pub enum TrayEvent {
     MenuShow,
     MenuQuit,
     PowerResumed,
-    /// Sent by the pump after it performs the actual window restore (e.g. on a
-    /// tray-icon double-click or a cross-instance show request), so the App can
-    /// mark the window as recently restored and suppress the auto-minimize.
+    /// Signals App to suppress auto-minimize after pump-driven restore.
     Restored,
 }
 

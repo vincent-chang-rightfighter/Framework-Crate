@@ -9,27 +9,17 @@ use crate::temp_chart;
 use crate::types::{Config, BatteryInfo};
 use crate::util::{read_lock, with_write_lock};
 
-/// Re-exported history type alias used by peripherals.
 pub type PdPortsHistory = VecDeque<Arc<Vec<cli::ec_wrapper::UsbCPort>>>;
 
-/// Fan control related state.
 #[derive(Clone)]
 pub struct FanState {
-    /// Current fan control mode (raw u64 for atomic access).
     pub mode: Arc<AtomicU64>,
-    /// Last duty cycle applied to the EC fan.
     pub last_applied_duty: Arc<AtomicU64>,
-    /// Last known fan max RPM (periodically refreshed).
     pub fan_max_rpm: Arc<AtomicU64>,
-    /// Timestamp of last fan_max_rpm reset.
     pub last_fan_rpm_reset: Arc<AtomicU64>,
-    /// Full fan curve points (with zero/100 endpoints added).
     pub curve_full_points: Arc<RwLock<Arc<Vec<[u32; 2]>>>>,
-    /// Number of fans detected (0 = unknown).
     pub fan_count: Arc<AtomicU64>,
-    /// Whether to apply unified duty to all fans (true) or per-fan (false).
     pub unified_duty: Arc<AtomicBool>,
-    /// Per-fan duty values (index = fan number).
     pub per_fan_duty: Arc<RwLock<Arc<Vec<u32>>>>,
 }
 
@@ -48,14 +38,10 @@ impl Default for FanState {
     }
 }
 
-/// Thermal telemetry state.
 #[derive(Clone)]
 pub struct ThermalState {
-    /// Latest thermal data from EC.
     pub data: Arc<RwLock<Arc<Option<cli::ec_wrapper::ThermalData>>>>,
-    /// Temperature history for chart rendering.
     pub history: Arc<RwLock<Arc<temp_chart::ThermalHistory>>>,
-    /// Sensor cache: sorted names, colors.
     pub sensor_cache: Arc<RwLock<Arc<crate::app::SensorCache>>>,
 }
 
@@ -69,7 +55,6 @@ impl Default for ThermalState {
     }
 }
 
-/// Read-only snapshot of thermal state for rendering.
 pub struct ThermalSnapshot {
     pub data: Arc<Option<cli::ec_wrapper::ThermalData>>,
     pub sensor_cache: Arc<crate::app::SensorCache>,
@@ -77,7 +62,6 @@ pub struct ThermalSnapshot {
 }
 
 impl ThermalState {
-    /// Take a consistent snapshot of all thermal fields.
     pub fn snapshot(&self, now_ms: i64) -> ThermalSnapshot {
         ThermalSnapshot {
             data: Arc::clone(&read_lock(&self.data)),
@@ -89,21 +73,13 @@ impl ThermalState {
     }
 }
 
-/// Peripheral state (keyboard, expansion cards, USB-C ports).
 #[derive(Clone)]
 pub struct PeripheralState {
-    /// Keyboard backlight level (0–100).
     pub kblight: Arc<RwLock<Arc<Option<u32>>>>,
-    /// Detected expansion cards.
     pub expansion_cards: Arc<RwLock<Arc<Vec<cli::ec_wrapper::ExpansionCard>>>>,
-    /// USB-C port state.
     pub pd_ports: Arc<RwLock<Arc<Vec<cli::ec_wrapper::UsbCPort>>>>,
-    /// History of PD port snapshots (for stability classification).
     pub pd_ports_history: Arc<RwLock<Arc<PdPortsHistory>>>,
-    /// Ports that have ever reported a Sink power role (index = port number).
-    /// Only USB-C ports can sink, so once seen these ports are permanently
-    /// USB-C and must never be reclassified as USB-A even if the short
-    /// history window no longer contains the Sink samples.
+    /// NOTE: Ports once seen as Sink are permanently USB-C.
     pub pd_usb_c_seen: Arc<RwLock<Arc<Vec<bool>>>>,
 }
 
@@ -119,7 +95,6 @@ impl Default for PeripheralState {
     }
 }
 
-/// Read-only snapshot of peripheral state for rendering.
 pub struct PeripheralSnapshot {
     pub kblight: Arc<Option<u32>>,
     pub expansion_cards: Arc<Vec<cli::ec_wrapper::ExpansionCard>>,
@@ -129,7 +104,6 @@ pub struct PeripheralSnapshot {
 }
 
 impl PeripheralState {
-    /// Take a consistent snapshot of all peripheral fields.
     pub fn snapshot(&self) -> PeripheralSnapshot {
         PeripheralSnapshot {
             kblight: Arc::clone(&read_lock(&self.kblight)),
@@ -141,12 +115,10 @@ impl PeripheralState {
     }
 }
 
-/// Battery state.
 #[derive(Clone)]
 pub struct BatteryState {
-    /// Latest battery/power data.
     pub info: Arc<RwLock<Arc<Option<BatteryInfo>>>>,
-    /// Previous AC power state (used to detect AC→Battery transitions).
+    /// NOTE: Tracks AC→battery transitions.
     pub prev_ac_present: Arc<AtomicBool>,
 }
 
@@ -159,24 +131,14 @@ impl Default for BatteryState {
     }
 }
 
-/// System-level state (EC client, hardware info, sensor cache).
 #[derive(Clone)]
 pub struct SystemState {
-    /// Whether the CLI/EC client is available.
     pub cli_available: Arc<AtomicBool>,
-    /// The EC client instance.
     pub ec_client: Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
-    /// Whether the startup init task has finished publishing (or failing to
-    /// create) the EC client. While false, the background loop must NOT
-    /// create its own client — the init task owns startup EC creation, and
-    /// a concurrent second `EcClient` would issue parallel EC I/O and
-    /// clobber the "authoritative" client.
+    /// NOTE: While false, background loop must not create EC client concurrently.
     pub ec_init_done: Arc<AtomicBool>,
-    /// Firmware/hardware version data.
     pub versions: Arc<RwLock<Arc<Option<cli::ec_wrapper::VersionsData>>>>,
-    /// Detected platform family (for feature gating).
     pub platform: Arc<RwLock<Arc<cli::ec_wrapper::PlatformFamily>>>,
-    /// Intel CPU (GenuineIntel). CPU Power / PawnIO is Intel-only.
     pub intel_cpu: Arc<AtomicBool>,
 }
 
@@ -193,29 +155,17 @@ impl Default for SystemState {
     }
 }
 
-/// Lifecycle and UI coordination state.
 #[derive(Clone)]
 pub struct LifecycleState {
-    /// Application configuration (shared with config_save_task).
     pub config: Arc<RwLock<Arc<Config>>>,
-    /// Background telemetry poll interval (ms).
     pub poll_ms: Arc<AtomicU64>,
-    /// Application shutdown flag.
     pub shutdown: Arc<AtomicBool>,
-    /// Window visibility (tray minimize).
     pub visible: Arc<AtomicBool>,
-    /// Last user interaction timestamp (for idle detection).
     pub last_interaction_ts: Arc<AtomicU64>,
-    /// Background config save failure flag.
     pub bg_config_save_failed: Arc<AtomicBool>,
-    /// View needs rebuild flag.
     pub view_dirty: Arc<AtomicBool>,
-    /// Last system resume timestamp (ms since epoch). Set by the tray
-    /// message pump when `WM_POWERBROADCAST` indicates a resume from
-    /// sleep/hibernate. The background task watches this and resets the
-    /// EC client and fan state when it changes.
+    /// NOTE: Set on WM_POWERBROADCAST resume; triggers EC client reset.
     pub last_resume_ts: Arc<AtomicU64>,
-    /// AC→battery transition detected: auto-reset PL1/PL2 on next tick.
     pub pl_reset_pending: Arc<AtomicBool>,
 }
 

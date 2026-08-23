@@ -3,18 +3,15 @@ use std::sync::Arc;
 use iced::{Color, Element, Length, Point, Size};
 use iced::widget::canvas::Cache;
 
-// Unit suffix only on the last label of each axis ("110°C", "100%").
-// "100" is right-aligned (see below) so it never crowds "110°C".
+// Unit suffix only on last label; "100" is right-aligned to avoid crowding "110°C".
 const AXIS_LABELS_X: [&str; 7] = ["0", "20", "40", "60", "80", "100", "110°C"];
 const AXIS_LABELS_Y: [&str; 6] = ["0", "20", "40", "60", "80", "100%"];
-/// Temperature axis range: extends past the config domain (0–100°C) so
-/// sensor readings above 100°C stay visible on the plot.
+/// Temperature axis range; extends past 100°C so high readings stay visible.
 const TEMP_RANGE: f32 = crate::types::CURVE_TEMP_MAX as f32;
 const POINT_RADIUS: f32 = 3.0;
 const HIT_RADIUS: f32 = 12.0;
 
-/// A live sensor reading drawn on the curve: the sensor's current
-/// temperature projected onto the curve, using its sensor color.
+/// Live sensor reading projected onto the curve.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SensorMark {
     pub temp: i32,
@@ -26,8 +23,7 @@ pub fn view_curve(
     all_pts: Arc<Vec<[u32; 2]>>,
     marks: Arc<Vec<SensorMark>>,
 ) -> Element<'static, crate::Message> {
-    // Build a mapping from sorted position back to the original config
-    // index so that dragging a rendered point emits the correct index.
+    // Map sorted position to original index so drag emits correct index.
     let mut sorted_indices: Vec<usize> = (0..points.len()).collect();
     sorted_indices.sort_by_key(|&i| points[i][0]);
     iced::widget::canvas(CurveRenderer {
@@ -48,24 +44,18 @@ struct CurveRenderer {
     marks: Arc<Vec<SensorMark>>,
 }
 
-/// Persistent state living in the widget `Tree` — survives `view()` rebuilds.
+/// State in widget Tree; survives `view()` rebuilds.
 struct CurveState {
     cache: Cache<iced::Renderer>,
     cached_key: Cell<(*const (), usize)>,
     last_points: std::cell::RefCell<Option<Arc<[[u32; 2]]>>>,
-    /// Snapshot of the sensor marks from the previous draw — used to detect
-    /// live temperature changes that need a cache clear.
+    /// Previous marks to detect temperature changes needing cache clear.
     last_marks: std::cell::RefCell<Option<Arc<Vec<SensorMark>>>>,
-    /// Index (into the config's original point order) being dragged.
-    /// Storing the config index (not the sorted position) keeps the drag
-    /// identity stable when a dragged point crosses another point: the
-    /// sorted position changes every frame during a drag, but the identity
-    /// of the point under the cursor must not.
+    /// Config index being dragged; stable identity when points cross.
     dragging: Cell<Option<usize>>,
-    /// Index (into the config's original point order) under the cursor.
+    /// Config index under cursor.
     hover: Cell<Option<usize>>,
-    /// Previous hover/drag values — used to detect when the highlight
-    /// needs a cache clear so the circles redraw with updated colours.
+    /// Previous hover/drag to detect highlight needing redraw.
     last_hover: Cell<Option<usize>>,
     last_drag: Cell<Option<usize>>,
 }
@@ -85,7 +75,7 @@ impl Default for CurveState {
     }
 }
 
-/// Layout constants matching `draw_curve_contents`.
+/// Layout matching `draw_curve_contents`.
 struct Layout {
     origin: Point,
     plot_w: f32,
@@ -93,24 +83,22 @@ struct Layout {
 }
 
 impl Layout {
-    /// Left gutter reserved for the Y-axis labels (room for a right-aligned
-    /// "100%" plus breathing room).
+    /// Left gutter for Y-axis labels.
     const LEFT_GUTTER: f32 = 34.0;
-    /// Top margin so the top Y-axis label is not clipped by the canvas edge.
+    /// Top margin to avoid clipping top label.
     const TOP_MARGIN: f32 = 10.0;
     const RIGHT_MARGIN: f32 = 5.0;
-    /// Vertical space below the plot reserved for the X-axis labels.
+    /// Space below plot for X-axis labels.
     const AXIS_LABEL_SPACE: f32 = 14.0;
 
     fn new(size: Size) -> Self {
-        // Guard against degenerate sizes: a negative/zero plot dimension would
-        // make screen_to_canvas produce inf/NaN.
+        // Clamp to avoid inf/NaN on degenerate sizes.
         let plot_w = (size.width - Self::LEFT_GUTTER - Self::RIGHT_MARGIN).max(1.0);
         let plot_h = (size.height - Self::TOP_MARGIN - Self::RIGHT_MARGIN - Self::AXIS_LABEL_SPACE).max(1.0);
         Self { origin: Point::new(Self::LEFT_GUTTER, Self::TOP_MARGIN), plot_w, plot_h }
     }
 
-    /// Convert canvas-space (temp 0–110, duty 0–100) to screen coordinates.
+    /// Canvas (temp 0-110, duty 0-100) to screen.
     fn to_screen(&self, x: f32, y: f32) -> Point {
         Point::new(
             self.origin.x + (x / TEMP_RANGE) * self.plot_w,
@@ -118,7 +106,7 @@ impl Layout {
         )
     }
 
-    /// Convert screen coordinates back to canvas-space (temp, duty).
+    /// Screen back to canvas space.
     fn screen_to_canvas(&self, p: Point) -> (f32, f32) {
         let temp = (p.x - self.origin.x) / self.plot_w * TEMP_RANGE;
         let duty = (self.origin.y + self.plot_h - p.y) / self.plot_h * 100.0;
@@ -138,18 +126,14 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
     ) -> Option<iced::widget::canvas::Action<crate::Message>> {
         let layout = Layout::new(bounds.size());
 
-        // Drag in progress: keep it alive even when the cursor leaves the
-        // canvas, using the absolute position minus the canvas origin, and
-        // let the temp/duty clamps handle out-of-plot values. No hover or
-        // nearest-point work is done here — that keeps the drag path cheap
-        // under high-poll-rate mice (each CursorMoved still arrives here).
+        // Keep drag alive outside canvas; clamps handle out-of-plot values.
         if let Some(config_idx) = state.dragging.get() {
             let cursor_pos = match cursor.position_in(bounds) {
                 Some(p) => p,
                 None => match cursor.position() {
                     Some(abs) => Point::new(abs.x - bounds.x, abs.y - bounds.y),
                     None => {
-                        // Cursor left the window entirely — end the drag.
+                        // Cursor left window; end drag.
                         state.dragging.set(None);
                         return Some(iced::widget::canvas::Action::request_redraw());
                     }
@@ -157,9 +141,7 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
             };
             match event {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
-                    // Bounds-check the persistent drag index: if the point
-                    // count ever shrinks mid-drag (config reload restoring
-                    // defaults), end the drag instead of panicking.
+                    // Guard against config reload shrinking points mid-drag.
                     if config_idx >= self.points.len() {
                         state.dragging.set(None);
                         return Some(iced::widget::canvas::Action::request_redraw());
@@ -167,9 +149,7 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
                     let (raw_temp, raw_duty) = layout.screen_to_canvas(cursor_pos);
                     let temp = (raw_temp.round() as i32).clamp(0, crate::types::CURVE_TEMP_MAX as i32) as u32;
                     let duty = (raw_duty.round() as i32).clamp(0, 100) as u32;
-                    // Throttle: only publish when the rounded value actually
-                    // changes, otherwise every sub-pixel move triggers an app
-                    // update + view rebuild + cache redraw for nothing.
+                    // Only publish when rounded value changes to avoid redundant rebuilds.
                     if self.points[config_idx] != [temp, duty] {
                         return Some(iced::widget::canvas::Action::publish(
                             crate::Message::FanCurvePointMoved(config_idx, temp, duty),
@@ -186,8 +166,7 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
             return None;
         }
 
-        // Not dragging: hover tracking, only while the cursor is over the
-        // canvas.
+        // Hover tracking only while cursor is over canvas.
         let Some(cursor_pos) = cursor.position_in(bounds) else {
             if state.hover.get().is_some() {
                 state.hover.set(None);
@@ -195,7 +174,7 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
             }
             return None;
         };
-        // Use pre-sorted indices to avoid allocating a sorted Vec per mouse move.
+        // Use pre-sorted indices to avoid per-move allocation.
         let mut nearest: Option<usize> = None;
         let mut best_dist = f32::INFINITY;
         for &config_idx in &self.sorted_indices {
@@ -217,7 +196,6 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
                 }
             }
             iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
-                // Hover tracking.
                 let old_hover = state.hover.get();
                 if old_hover != nearest {
                     state.hover.set(nearest);
@@ -313,9 +291,7 @@ fn draw_curve_contents(
     let layout = Layout::new(size);
     let to_screen = |x: f32, y: f32| layout.to_screen(x, y);
 
-    // Everything drawn inside the plot is clipped to the plot rectangle, so
-    // thick strokes (curve, point rings, marker dots) can never bleed past
-    // the border. Axis labels are drawn afterwards, outside the clip.
+    // Clip plot contents so thick strokes never bleed past border.
     let plot_rect = iced::Rectangle::new(layout.origin, Size::new(layout.plot_w, layout.plot_h));
     frame.with_clip(plot_rect, |f| {
         f.fill_rectangle(layout.origin, Size::new(layout.plot_w, layout.plot_h), Color::from_rgb(0.12, 0.12, 0.15));
@@ -340,7 +316,6 @@ fn draw_curve_contents(
         f.stroke(&curve_path, iced::widget::canvas::Stroke::default()
             .with_color(crate::style::COLOR_CURVE).with_width(2.0));
 
-        // Draw control points as circles, in sorted temperature order.
         for &config_idx in sorted_indices.iter() {
             let p = &points[config_idx];
             let center = to_screen(p[0] as f32, p[1] as f32);
@@ -357,9 +332,7 @@ fn draw_curve_contents(
                 .with_color(stroke_color).with_width(2.0));
         }
 
-        // Live sensor markers drawn on top: dashed crosshair through the curve
-        // position at the sensor's current temperature, plus a dot in the
-        // sensor color.
+        // Live sensor markers: dashed crosshair plus colored dot.
         let plot_top = layout.origin.y;
         let plot_bottom = layout.origin.y + layout.plot_h;
         let plot_left = layout.origin.x;
@@ -393,14 +366,11 @@ fn draw_curve_contents(
         }
     });
 
-    // Axis labels, drawn outside the clipped region.
+    // Axis labels outside clipped region.
     let font = iced::Font::with_name("Consolas");
-    // X-axis (temperature) labels: 0..110. The "110" sits on the plot's
-    // right edge; right-align it so the trailing "0" stays inside the
-    // canvas instead of being clipped.
+    // X-axis: right-align 100/110°C to keep inside canvas.
     for (i, v) in [0u32, 20, 40, 60, 80, 100, 110].iter().enumerate() {
-        // Corner "0" left-aligns with the Y-axis column; "100"/"110°C"
-        // right-align so they never crowd the right edge.
+        // "0" left-aligns with gutter; high values right-align to avoid crowding.
         let (align_x, x) = if *v == 0 {
             (iced::alignment::Horizontal::Left, 2.0)
         } else if *v >= 100 {
@@ -420,10 +390,7 @@ fn draw_curve_contents(
             max_width: f32::INFINITY,
         });
     }
-    // Y-axis (duty) labels: 0..100 with a % sign, left-aligned at the gutter
-    // edge so every label starts on the same line. Skip the "0": the X-axis
-    // "0" at the bottom-left corner already marks the origin, so drawing
-    // both would overlap.
+    // Y-axis labels left-aligned; skip "0" to avoid overlap with X-axis origin.
     for (i, v) in [0u32, 20, 40, 60, 80, 100].iter().enumerate() {
         let y = layout.origin.y + layout.plot_h - (*v as f32 / 100.0) * layout.plot_h;
         if *v != 0 {
