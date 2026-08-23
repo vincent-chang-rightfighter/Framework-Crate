@@ -73,11 +73,12 @@ fn acquire_single_instance(minimized: bool) -> Option<system_info::SingleInstanc
             // second instance was started manually (no --minimized). The
             // schtasks ONLOGON trigger also fires on lock-screen unlock;
             // silently exiting in that case avoids disrupting the user.
-            if !minimized
-                && let Some(hwnd) = system_info::find_window_by_title("Framework Crate")
-            {
-                system_info::restore_window_from_tray(hwnd);
-                system_info::force_foreground_window(hwnd);
+            if !minimized {
+                // Ask the already-running instance to restore its own window.
+                // A second process cannot restore the parked window (its
+                // SAVED_PLACEMENT is None), so it signals the running
+                // instance's tray window, which restores using its own state.
+                system_info::request_show_running_instance();
             }
             std::process::exit(0);
         }

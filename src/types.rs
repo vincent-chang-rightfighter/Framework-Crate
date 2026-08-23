@@ -78,6 +78,20 @@ impl Config {
                 point[0] = point[0].clamp(0, CURVE_TEMP_MAX);
                 point[1] = point[1].clamp(0, 100);
             }
+            // Dedupe by temperature, keeping the highest duty on a collision
+            // and preserving original order. curve_full_points collapses
+            // duplicate temps, so a stored duplicate would create a phantom
+            // control point that is drawn but never affects the curve; this
+            // keeps the persisted config free of such duplicates.
+            let mut deduped: Vec<[u32; 2]> = Vec::new();
+            for &[t, d] in &curve.curve.points {
+                if let Some(existing) = deduped.iter_mut().find(|p| p[0] == t) {
+                    existing[1] = existing[1].max(d);
+                } else {
+                    deduped.push([t, d]);
+                }
+            }
+            curve.curve.points = deduped;
         }
         for duty in &mut self.fan.per_fan_duty {
             *duty = (*duty).clamp(DUTY_PCT_MIN, DUTY_PCT_MAX);

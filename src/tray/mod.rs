@@ -244,6 +244,13 @@ impl TrayManager {
     /// Drop all thread state so the next `init()` spawns a fresh pump.
     pub fn reset(&mut self) {
         self.command_tx = None;
+        // Wake the (possibly still-alive) pump so it observes the disconnected
+        // channel and runs cleanup_and_exit (unregistering the window class and
+        // destroying the hidden window). Without this, a live pump stays blocked
+        // in GetMessageW forever, the class leaks, and the next init()'s
+        // RegisterClassW fails (ERROR_CLASS_ALREADY_EXISTS) — killing the tray
+        // permanently for the rest of the process.
+        notify_tray_thread();
         self.event_rx = None;
         self.icon_ready_rx = None;
         self.thread_ready_rx = None;

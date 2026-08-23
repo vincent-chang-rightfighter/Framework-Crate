@@ -137,6 +137,15 @@ unsafe extern "system" fn tray_wnd_proc(
                     handle_tray_right_click(sender);
                 }
             });
+            // Re-arm the wake that TrackPopupMenu's modal loop may have
+            // swallowed. If a Shutdown/Reinit command arrived while the menu
+            // was open, its WM_COMMAND_READY wake-up is consumed by the modal
+            // loop, so the outer GetMessageW never sees it and the pump hangs.
+            // Re-posting here (after TrackPopupMenu returns) lets the outer
+            // loop drain the buffered command once the menu is dismissed.
+            let _ = unsafe {
+                PostThreadMessageW(TRAY_THREAD_ID.load(Ordering::Acquire), WM_COMMAND_READY, 0, 0)
+            };
         }
         return 0;
     }
@@ -165,6 +174,24 @@ unsafe extern "system" fn tray_wnd_proc(
             tracing::info!("[POWER] System suspending (wParam={:#x})", wparam_u32);
             return 0;
         }
+    }
+    if msg == system_info::show_request_message_id() {
+        // A second instance asked us to restore our own window. We own the
+        // saved placement, so perform the restore here (the Win32 calls in
+        // restore_window_from_tray are thread-safe) and notify the main thread
+        // to sync its visible/view_dirty state.
+        APP_HWND.with(|hwnd| {
+            let app_hwnd = hwnd.get();
+            if app_hwnd != 0 {
+                system_info::restore_window_from_tray(app_hwnd);
+            }
+        });
+        EVENT_TX.with(|tx| {
+            if let Some(sender) = tx.borrow().as_ref() {
+                let _ = sender.send(TrayEvent::Show);
+            }
+        });
+        return 0;
     }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }

@@ -738,8 +738,42 @@ impl App {
                 Some(Task::none())
             }
             Message::FanCurvePointMoved(idx, temp, duty) => {
-                let temp = temp.clamp(0, crate::types::CURVE_TEMP_MAX);
                 let duty = duty.clamp(0, 100);
+                // Keep this point's temperature strictly between its sorted
+                // neighbors (>=1°C gap). Duplicate temps collapse in
+                // curve_full_points and produce a phantom control point that is
+                // drawn but has no effect on the actual fan curve, and would be
+                // persisted as silent config corruption.
+                let temp = {
+                    let cfg = read_lock(&self.state.lifecycle.config);
+                    let points = cfg
+                        .fan
+                        .curve
+                        .as_ref()
+                        .map(|c| c.curve.points.as_slice())
+                        .unwrap_or(&[]);
+                    let mut others: Vec<i64> = points
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != idx)
+                        .map(|(_, p)| p[0] as i64)
+                        .collect();
+                    others.sort_unstable();
+                    let max_t = crate::types::CURVE_TEMP_MAX as i64;
+                    let mut lo: i64 = -1; // nothing below → allow down to 0
+                    let mut hi: i64 = max_t + 1; // nothing above → allow up to CURVE_TEMP_MAX
+                    for &t in &others {
+                        if t < temp as i64 {
+                            lo = lo.max(t);
+                        } else {
+                            hi = hi.min(t);
+                        }
+                    }
+                    let min_t = (lo + 1).max(0);
+                    let max_allowed = (hi - 1).min(max_t);
+                    (temp.clamp(0, crate::types::CURVE_TEMP_MAX) as i64)
+                        .clamp(min_t, max_allowed.max(min_t)) as u32
+                };
                 self.mutate_config(|cfg| {
                     if let Some(ref mut curve) = cfg.fan.curve
                         && idx < curve.curve.points.len()
@@ -876,6 +910,14 @@ impl App {
         match *message {
             Message::CloseRequested(id) => {
                 self.closing_window_id = Some(id);
+                // If startup failed (e.g. not running as administrator) there is
+                // no tray to minimize into, so honor the error screen's
+                // instruction and actually quit instead of hiding the window.
+                if self.startup_error.is_some() {
+                    self.tray.shutdown();
+                    self.state.lifecycle.shutdown.store(true, Ordering::Release);
+                    return Some(self.close_window());
+                }
                 Some(Task::perform(async {}, |_| Message::MinimizeToTray))
             }
             Message::MinimizeToTray => {
@@ -1108,7 +1150,11 @@ impl App {
             }
             Message::StartupError(msg) => {
                 self.startup_error = Some(msg);
-                Task::none()
+                // Still bootstrap the tick loop: the tray is created here and
+                // the periodic refresh keeps running. Otherwise (Task::none())
+                // the tray would never initialize and CloseRequested would hide
+                // the window into a tray that doesn't exist.
+                tick_task(0)
             }
             Message::WindowResized(id, size) => {
                 self.window_id = Some(id);

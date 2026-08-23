@@ -106,12 +106,14 @@ unsafe extern "system" {
 #[link(name = "user32")]
 unsafe extern "system" {
     fn FindWindowW(lpClassName: LPCWSTR, lpWindowName: LPCWSTR) -> *mut core::ffi::c_void;
+    fn FindWindowExW(hWndParent: *mut core::ffi::c_void, hWndChildAfter: *mut core::ffi::c_void, lpszClass: LPCWSTR, lpszWindow: LPCWSTR) -> *mut core::ffi::c_void;
     fn ShowWindow(hWnd: *mut core::ffi::c_void, nCmdShow: i32) -> i32;
     fn SetForegroundWindow(hWnd: *mut core::ffi::c_void) -> i32;
     fn IsIconic(hWnd: *mut core::ffi::c_void) -> i32;
     fn IsZoomed(hWnd: *mut core::ffi::c_void) -> i32;
     fn IsWindow(hWnd: *mut core::ffi::c_void) -> i32;
     fn PostMessageW(hWnd: *mut core::ffi::c_void, msg: u32, wParam: usize, lParam: isize) -> i32;
+    fn RegisterWindowMessageW(lpString: LPCWSTR) -> u32;
     fn CreatePopupMenu() -> *mut core::ffi::c_void;
     fn AppendMenuW(hMenu: *mut core::ffi::c_void, uFlags: u32, uIDNewItem: usize, lpNewItem: LPCWSTR) -> i32;
     fn TrackPopupMenu(hMenu: *mut core::ffi::c_void, uFlags: u32, x: i32, y: i32, nReserved: i32, hWnd: *mut core::ffi::c_void, prcRect: *const core::ffi::c_void) -> i32;
@@ -712,6 +714,40 @@ pub fn find_window_by_title(title: &str) -> Option<isize> {
         None
     } else {
         Some(hwnd as isize)
+    }
+}
+
+/// Window class of the running instance's hidden tray message window, created
+/// by the tray message pump (see tray/message_pump.rs).
+const TRAY_WINDOW_CLASS: &str = "FrameworkControlTray";
+
+/// Registered message a second instance posts to the running instance's tray
+/// window to request it restore its own (off-screen-parked) main window.
+///
+/// `RegisterWindowMessageW` returns the same message id for the same string
+/// across all processes, so the sender (`request_show_running_instance`) and
+/// the pump's `tray_wnd_proc` compute an identical value.
+pub fn show_request_message_id() -> u32 {
+    let wide = to_wide("FrameworkCrateShow");
+    unsafe { RegisterWindowMessageW(wide.as_ptr()) }
+}
+
+/// Find the running instance's hidden tray window by its class name.
+pub fn find_tray_window() -> Option<isize> {
+    let wide = to_wide(TRAY_WINDOW_CLASS);
+    let hwnd = unsafe {
+        FindWindowExW(std::ptr::null_mut(), std::ptr::null_mut(), wide.as_ptr(), std::ptr::null())
+    };
+    if hwnd.is_null() { None } else { Some(hwnd as isize) }
+}
+
+/// From a second instance, ask the already-running instance to restore its own
+/// window. A second process cannot restore the parked window because its
+/// `SAVED_PLACEMENT` is None; the running instance owns that state and must
+/// perform the restore itself (it posts a message to its tray window).
+pub fn request_show_running_instance() {
+    if let Some(hwnd) = find_tray_window() {
+        post_message(hwnd, show_request_message_id(), 0, 0);
     }
 }
 
