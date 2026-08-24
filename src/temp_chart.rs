@@ -10,7 +10,7 @@ pub const HISTORY_SECONDS: i64 = 30;
 /// Selectable history window lengths.
 pub const HISTORY_WINDOW_OPTIONS: [i64; 3] = [15, 30, 60];
 /// Buffer retention; keeps longest window to avoid gaps on switch.
-pub const HISTORY_MAX_MS: i64 = 60_000;
+pub const HISTORY_MAX_MS: i64 = 300_000;
 const Y_LABELS: [&str; 7] = ["0", "20", "40", "60", "80", "100", "110°C"];
 
 #[derive(Clone)]
