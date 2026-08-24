@@ -947,6 +947,12 @@ impl App {
                 self.iconic_check_count = 0;
                 // Clear pending hide; window is visible again.
                 self.pending_minimize_to_tray = false;
+                // Immediately refresh CPU power on restore so display is current
+                // without waiting for the next 5s poll (which was paused while hidden).
+                if self.cpu_power_supported() {
+                    let cpu_power = self.state.cpu_power.clone();
+                    return Some(refresh_cpu_power_task(cpu_power, || {}));
+                }
                 Some(Task::none())
             }
             Message::TrayQuit => {

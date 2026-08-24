@@ -360,6 +360,7 @@ pub fn spawn(state: AppState) {
                 let start_ms = crate::util::monotonic_ms();
                 let mut last_expansion_scan: u64 = start_ms;
                 let mut last_versions_scan: u64 = start_ms;
+                let mut versions_scan_attempts: u32 = 0;
                 let mut last_cpu_power_poll: u64 = 0;
                 let mut last_resume_ts: u64 = 0;
                 'poll_loop: loop {
@@ -510,9 +511,14 @@ pub fn spawn(state: AppState) {
                         }
                     }
 
-                    // Expansion/PD scans on fixed intervals for hotplug detection.
+                    // Expansion/PD scans; lengthen interval when hidden to save power.
                     now_ms = crate::util::monotonic_ms();
-                    if now_ms.saturating_sub(last_expansion_scan) >= EXPANSION_SCAN_MS {
+                    let expansion_interval = if bg_state2.lifecycle.visible.load(Ordering::Acquire) {
+                        EXPANSION_SCAN_MS
+                    } else {
+                        30_000
+                    };
+                    if now_ms.saturating_sub(last_expansion_scan) >= expansion_interval {
                         last_expansion_scan = now_ms;
                         let ec_clone = Arc::clone(&ec);
                         if let Ok(ports) = tokio::task::spawn_blocking(move || ec_clone.pd_ports()).await {
@@ -539,8 +545,13 @@ pub fn spawn(state: AppState) {
                             });
                         }
                     }
-                    if now_ms.saturating_sub(last_versions_scan) >= VERSIONS_REFRESH_MS {
+                    // Versions rarely change; only fetch a few times at startup.
+                    if versions_scan_attempts < 3
+                        && read_lock(&bg_state2.system.versions).is_none()
+                        && now_ms.saturating_sub(last_versions_scan) >= VERSIONS_REFRESH_MS
+                    {
                         last_versions_scan = now_ms;
+                        versions_scan_attempts += 1;
                         let ec_clone = Arc::clone(&ec);
                         if let Ok(Ok(v)) = tokio::task::spawn_blocking(move || ec_clone.versions()).await {
                             with_write_lock(&bg_state2.system.versions, |guard| {
@@ -549,12 +560,18 @@ pub fn spawn(state: AppState) {
                                     mark_view_dirty(&bg_state2);
                                 }
                             });
+                            // Stop after first successful fetch; versions only change after reboot.
+                            if read_lock(&bg_state2.system.versions).is_some() {
+                                versions_scan_attempts = 3;
+                            }
                         }
                     }
 
-                    // Poll CPU power every 5s; slow MSR/MMIO reads only when UI active.
+                    // Poll CPU power every 5s; skip when window hidden to save power.
                     const CPU_POWER_POLL_MS: u64 = 5000;
-                    if bg_state2.system.intel_cpu.load(Ordering::Acquire)
+                    let visible = bg_state2.lifecycle.visible.load(Ordering::Acquire);
+                    if visible
+                        && bg_state2.system.intel_cpu.load(Ordering::Acquire)
                         && !is_idle
                         && now_ms.saturating_sub(last_cpu_power_poll) >= CPU_POWER_POLL_MS
                     {
