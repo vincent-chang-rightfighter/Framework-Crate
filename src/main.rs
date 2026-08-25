@@ -114,6 +114,7 @@ fn main() {
         .subscription(App::subscription)
         .theme(app_theme)
         .executor::<SmallTokioExecutor>()
+        .antialiasing(false)
         .window(iced::window::Settings {
             // NOTE: .window overrides earlier size calls; set size here.
             size: iced::Size::new(900.0, 613.0),

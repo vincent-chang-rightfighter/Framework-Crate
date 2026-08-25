@@ -990,7 +990,7 @@ mod tests {
         temps.insert("CPU".to_string(), 60);
         let sample = |rpm: u32| ThermalData {
             temps: Arc::new(temps.clone()),
-            fans: vec![FanReading { name: "Fan 1".to_string(), rpm }],
+            fans: smallvec::smallvec![FanReading { name: "Fan 1".to_string(), rpm }],
         };
 
         assert!(record_thermal_sample(&state, sample(2000)));

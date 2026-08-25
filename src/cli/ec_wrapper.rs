@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use smallvec::SmallVec;
 use framework_lib::chromium_ec::CrosEc;
 use framework_lib::chromium_ec::CrosEcDriver;
 use framework_lib::power;
@@ -9,7 +10,7 @@ use framework_lib::smbios::Platform;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThermalData {
     pub temps: Arc<BTreeMap<String, i32>>,
-    pub fans: Vec<FanReading>,
+    pub fans: SmallVec<[FanReading; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -319,7 +320,7 @@ impl EcClient {
 
     pub fn thermal(&self) -> Result<ThermalData, String> {
         let mut temps = BTreeMap::new();
-        let mut fans = Vec::new();
+        let mut fans = SmallVec::new();
 
         let platform = smbios::get_platform();
 
