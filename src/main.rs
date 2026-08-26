@@ -1,27 +1,27 @@
-﻿#![cfg_attr(not(test), windows_subsystem = "windows")]
+#![cfg_attr(not(test), windows_subsystem = "windows")]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-mod cli;
-mod config;
-mod cpu_power;
-mod types;
-mod curve_canvas;
-mod temp_chart;
-mod probe;
-mod system_info;
-mod fan_control;
-mod style;
-mod views;
 mod app;
 mod background_task;
+mod cli;
+mod config;
 mod config_save_task;
+mod cpu_power;
+mod curve_canvas;
+mod fan_control;
+mod probe;
+mod style;
 mod sub_state;
+mod system_info;
+mod temp_chart;
 mod tray;
+mod types;
 mod util;
+mod views;
 
-pub use app::{App, AppState, SystemInfo, Message};
-pub use util::{read_lock, with_write_lock};
+pub use app::{App, AppState, Message, SystemInfo};
 pub use style::*;
+pub use util::{read_lock, with_write_lock};
 
 include!(concat!(env!("OUT_DIR"), "/icon_rgba.rs"));
 
@@ -82,24 +82,21 @@ fn main() {
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
             )
             .with_writer(std::io::stderr)
             .init();
     }
 
-    let window_icon = match iced::window::icon::from_rgba(
-        ICON_RGBA.to_vec(),
-        ICON_WIDTH,
-        ICON_HEIGHT,
-    ) {
-        Ok(icon) => Some(icon),
-        Err(e) => {
-            // Run without icon instead of panicking before UI shows.
-            tracing::error!("Failed to load window icon: {}", e);
-            None
-        }
-    };
+    let window_icon =
+        match iced::window::icon::from_rgba(ICON_RGBA.to_vec(), ICON_WIDTH, ICON_HEIGHT) {
+            Ok(icon) => Some(icon),
+            Err(e) => {
+                // Run without icon instead of panicking before UI shows.
+                tracing::error!("Failed to load window icon: {}", e);
+                None
+            }
+        };
 
     fn app_title(_app: &App) -> String {
         "Framework Crate".to_string()
@@ -133,7 +130,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{sorted_sensor_list, FanControlMode};
+    use crate::types::{FanControlMode, sorted_sensor_list};
     use std::sync::atomic::Ordering;
 
     #[test]
@@ -216,7 +213,10 @@ mod tests {
                 ..Default::default()
             },
             battery: types::BatteryConfig {
-                charge_limit_max_pct: Some(types::SettingU8 { enabled: true, value: 80 }),
+                charge_limit_max_pct: Some(types::SettingU8 {
+                    enabled: true,
+                    value: 80,
+                }),
             },
             telemetry: types::TelemetryConfig {
                 poll_ms: 1000,
@@ -269,7 +269,10 @@ mod tests {
         let _ = app.update(Message::ChartWindowChanged(60));
         assert_eq!(app.chart_window_seconds, 60);
         let _ = app.update(Message::ChartWindowChanged(45));
-        assert_eq!(app.chart_window_seconds, 60, "invalid windows must be rejected");
+        assert_eq!(
+            app.chart_window_seconds, 60,
+            "invalid windows must be rejected"
+        );
     }
 
     #[tokio::test]
@@ -373,7 +376,10 @@ mod tests {
     #[test]
     fn validate_battery_charge_limit_clamps_high() {
         let mut cfg = types::Config::default();
-        cfg.battery.charge_limit_max_pct = Some(types::SettingU8 { enabled: true, value: 150 });
+        cfg.battery.charge_limit_max_pct = Some(types::SettingU8 {
+            enabled: true,
+            value: 150,
+        });
         cfg.validate();
         assert_eq!(cfg.battery.charge_limit_max_pct.unwrap().value, 100);
     }
@@ -381,7 +387,10 @@ mod tests {
     #[test]
     fn validate_battery_charge_limit_clamps_low() {
         let mut cfg = types::Config::default();
-        cfg.battery.charge_limit_max_pct = Some(types::SettingU8 { enabled: true, value: 10 });
+        cfg.battery.charge_limit_max_pct = Some(types::SettingU8 {
+            enabled: true,
+            value: 10,
+        });
         cfg.validate();
         assert_eq!(cfg.battery.charge_limit_max_pct.unwrap().value, 25);
     }

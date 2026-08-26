@@ -2,7 +2,9 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::process::CommandExt;
 use std::sync::OnceLock;
-use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW};
+use windows_sys::Win32::UI::Shell::{
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+};
 
 #[allow(clippy::upper_case_acronyms)]
 type HKEY = *mut core::ffi::c_void;
@@ -25,7 +27,7 @@ pub const PBT_APMRESUMEAUTOMATIC: u32 = 0x0012;
 pub const PBT_APMRESUMESUSPEND: u32 = 0x0007;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
 const TPM_RETURNCMD: u32 = 0x0100;
-use crate::tray::event::{ID_SHOW, ID_QUIT};
+use crate::tray::event::{ID_QUIT, ID_SHOW};
 
 #[repr(C)]
 struct MemoryStatusEx {
@@ -101,7 +103,12 @@ unsafe extern "system" {
 #[link(name = "user32")]
 unsafe extern "system" {
     fn FindWindowW(lpClassName: LPCWSTR, lpWindowName: LPCWSTR) -> *mut core::ffi::c_void;
-    fn FindWindowExW(hWndParent: *mut core::ffi::c_void, hWndChildAfter: *mut core::ffi::c_void, lpszClass: LPCWSTR, lpszWindow: LPCWSTR) -> *mut core::ffi::c_void;
+    fn FindWindowExW(
+        hWndParent: *mut core::ffi::c_void,
+        hWndChildAfter: *mut core::ffi::c_void,
+        lpszClass: LPCWSTR,
+        lpszWindow: LPCWSTR,
+    ) -> *mut core::ffi::c_void;
     fn ShowWindow(hWnd: *mut core::ffi::c_void, nCmdShow: i32) -> i32;
     fn SetForegroundWindow(hWnd: *mut core::ffi::c_void) -> i32;
     fn IsIconic(hWnd: *mut core::ffi::c_void) -> i32;
@@ -110,8 +117,21 @@ unsafe extern "system" {
     fn PostMessageW(hWnd: *mut core::ffi::c_void, msg: u32, wParam: usize, lParam: isize) -> i32;
     fn RegisterWindowMessageW(lpString: LPCWSTR) -> u32;
     fn CreatePopupMenu() -> *mut core::ffi::c_void;
-    fn AppendMenuW(hMenu: *mut core::ffi::c_void, uFlags: u32, uIDNewItem: usize, lpNewItem: LPCWSTR) -> i32;
-    fn TrackPopupMenu(hMenu: *mut core::ffi::c_void, uFlags: u32, x: i32, y: i32, nReserved: i32, hWnd: *mut core::ffi::c_void, prcRect: *const core::ffi::c_void) -> i32;
+    fn AppendMenuW(
+        hMenu: *mut core::ffi::c_void,
+        uFlags: u32,
+        uIDNewItem: usize,
+        lpNewItem: LPCWSTR,
+    ) -> i32;
+    fn TrackPopupMenu(
+        hMenu: *mut core::ffi::c_void,
+        uFlags: u32,
+        x: i32,
+        y: i32,
+        nReserved: i32,
+        hWnd: *mut core::ffi::c_void,
+        prcRect: *const core::ffi::c_void,
+    ) -> i32;
     fn DestroyMenu(hMenu: *mut core::ffi::c_void) -> i32;
     fn GetWindowPlacement(hWnd: *mut core::ffi::c_void, lpwndpl: *mut WINDOWPLACEMENT) -> i32;
     fn SetWindowPlacement(hWnd: *mut core::ffi::c_void, lpwndpl: *const WINDOWPLACEMENT) -> i32;
@@ -188,7 +208,10 @@ static SAVED_PLACEMENT: std::sync::Mutex<Option<WINDOWPLACEMENT>> = std::sync::M
 pub fn hide_window_to_tray(hwnd: isize) {
     if !is_window(hwnd) {
         // Skip if HWND is stale; operating on dead handle could mutate another window.
-        tracing::debug!("hide_window_to_tray: HWND {} no longer valid, skipping", hwnd);
+        tracing::debug!(
+            "hide_window_to_tray: HWND {} no longer valid, skipping",
+            hwnd
+        );
         return;
     }
     let h = hwnd as *mut core::ffi::c_void;
@@ -223,7 +246,15 @@ pub fn hide_window_to_tray(hwnd: isize) {
         // Remove taskbar/alt-tab presence while parked.
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
         SetWindowLongPtrW(h, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW);
-        SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        SetWindowPos(
+            h,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
         // Drop focus so keystrokes do not reach invisible window.
         SetFocus(std::ptr::null_mut());
     }
@@ -233,7 +264,10 @@ pub fn hide_window_to_tray(hwnd: isize) {
 /// and re-adds taskbar / Alt-Tab presence.
 pub fn restore_window_from_tray(hwnd: isize) {
     if !is_window(hwnd) {
-        tracing::debug!("restore_window_from_tray: HWND {} no longer valid, skipping", hwnd);
+        tracing::debug!(
+            "restore_window_from_tray: HWND {} no longer valid, skipping",
+            hwnd
+        );
         return;
     }
     let h = hwnd as *mut core::ffi::c_void;
@@ -244,7 +278,15 @@ pub fn restore_window_from_tray(hwnd: isize) {
         // WS_EX_APPWINDOW, then SWP_FRAMECHANGED to re-evaluate.
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
         SetWindowLongPtrW(h, GWL_EXSTYLE, (ex & !WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW);
-        SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        SetWindowPos(
+            h,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
 
         // Clear iconic state before repositioning. SetWindowPlacement with
         // SW_RESTORE alone is unreliable when the window was parked off-screen
@@ -253,8 +295,10 @@ pub fn restore_window_from_tray(hwnd: isize) {
             ShowWindow(h, SW_RESTORE as i32);
         }
 
-        if let Some(mut placement) =
-            SAVED_PLACEMENT.lock().unwrap_or_else(|p| p.into_inner()).take()
+        if let Some(mut placement) = SAVED_PLACEMENT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
         {
             placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
             // Preserve maximized state if it was maximized before parking;
@@ -368,7 +412,13 @@ pub fn os_version() -> String {
     let key_path = to_wide("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion");
     let mut hkey: HKEY = std::ptr::null_mut();
     let key_opened = unsafe {
-        RegOpenKeyExW(HKEY_LOCAL_MACHINE, key_path.as_ptr(), 0, KEY_READ, &mut hkey) == ERROR_SUCCESS
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            key_path.as_ptr(),
+            0,
+            KEY_READ,
+            &mut hkey,
+        ) == ERROR_SUCCESS
     };
 
     let (edition, display, ubr) = if key_opened {
@@ -395,7 +445,11 @@ pub fn os_version() -> String {
             sz_csd_version: [0; 128],
         };
         if RtlGetVersion(&mut info) == 0 {
-            (info.dw_major_version, info.dw_minor_version, info.dw_build_number)
+            (
+                info.dw_major_version,
+                info.dw_minor_version,
+                info.dw_build_number,
+            )
         } else {
             (0, 0, 0)
         }
@@ -403,21 +457,38 @@ pub fn os_version() -> String {
 
     let os_name = match major {
         10 => {
-            if build >= 22000 { "Windows 11" } else { "Windows 10" }
+            if build >= 22000 {
+                "Windows 11"
+            } else {
+                "Windows 10"
+            }
         }
         6 => {
-            if minor >= 3 { "Windows 8.1" }
-            else if minor >= 2 { "Windows 8" }
-            else if minor >= 1 { "Windows 7" }
-            else { "Windows Vista" }
+            if minor >= 3 {
+                "Windows 8.1"
+            } else if minor >= 2 {
+                "Windows 8"
+            } else if minor >= 1 {
+                "Windows 7"
+            } else {
+                "Windows Vista"
+            }
         }
         _ => "Windows",
     };
 
     let edition_str = match edition {
         Some(e) if !e.is_empty() => {
-            let base = e.replace("Windows 10", "").replace("Windows 11", "").trim().to_string();
-            if base.is_empty() { os_name.to_string() } else { format!("{} {}", os_name, base) }
+            let base = e
+                .replace("Windows 10", "")
+                .replace("Windows 11", "")
+                .trim()
+                .to_string();
+            if base.is_empty() {
+                os_name.to_string()
+            } else {
+                format!("{} {}", os_name, base)
+            }
         }
         _ => os_name.to_string(),
     };
@@ -441,6 +512,31 @@ pub fn display_resolution() -> String {
         format!("{}x{}", w, h)
     } else {
         String::new()
+    }
+}
+
+pub fn work_area_size() -> Option<(i32, i32)> {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SystemParametersInfoW(
+            uiAction: u32,
+            uiParam: u32,
+            pvParam: *mut RECT,
+            fWinIni: u32,
+        ) -> i32;
+    }
+    const SPI_GETWORKAREA: u32 = 0x0030;
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut rect as *mut RECT, 0) };
+    if ok != 0 && rect.right > rect.left && rect.bottom > rect.top {
+        Some((rect.right - rect.left, rect.bottom - rect.top))
+    } else {
+        None
     }
 }
 
@@ -520,7 +616,14 @@ fn registry_query_dword_from(hkey: HKEY, value_name: *const u16) -> Option<u32> 
     let mut buf_size: u32 = 4;
     // SAFETY: Valid handle and 4-byte buffer for REG_DWORD.
     let rc = unsafe {
-        RegQueryValueExW(hkey, value_name, std::ptr::null_mut(), &mut data_type, buf.as_mut_ptr(), &mut buf_size)
+        RegQueryValueExW(
+            hkey,
+            value_name,
+            std::ptr::null_mut(),
+            &mut data_type,
+            buf.as_mut_ptr(),
+            &mut buf_size,
+        )
     };
     if rc != ERROR_SUCCESS || data_type != REG_DWORD || buf_size != 4 {
         return None;
@@ -548,7 +651,9 @@ impl Drop for SingleInstanceGuard {
         unsafe extern "system" {
             fn CloseHandle(h: *mut core::ffi::c_void) -> i32;
         }
-        unsafe { CloseHandle(self._handle); }
+        unsafe {
+            CloseHandle(self._handle);
+        }
     }
 }
 
@@ -578,7 +683,9 @@ impl SingleInstanceGuard {
         let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
         if exists {
             // Close handle to existing mutex; owning instance keeps it alive.
-            unsafe { CloseHandle(handle); }
+            unsafe {
+                CloseHandle(handle);
+            }
             return Err(());
         }
         Ok(Self { _handle: handle })
@@ -598,11 +705,17 @@ pub fn startup_launch_enabled() -> bool {
 /// Registers or removes Windows startup scheduled task (requires elevation for HIGHEST).
 pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     let output = if enabled {
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("cannot resolve exe path: {e}"))?;
+        let exe = std::env::current_exe().map_err(|e| format!("cannot resolve exe path: {e}"))?;
         let exe_str = exe.to_str().ok_or("exe path is not valid UTF-8")?;
         // Reject characters that would break schtasks command line or allow injection.
-        if exe_str.contains('"') || exe_str.contains('\'') || exe_str.contains('&') || exe_str.contains('|') || exe_str.contains(';') || exe_str.contains('%') || exe_str.contains('^') {
+        if exe_str.contains('"')
+            || exe_str.contains('\'')
+            || exe_str.contains('&')
+            || exe_str.contains('|')
+            || exe_str.contains(';')
+            || exe_str.contains('%')
+            || exe_str.contains('^')
+        {
             return Err("exe path contains invalid characters".to_string());
         }
         // Use raw_arg for /TR to avoid double-escaping paths with spaces.
@@ -635,7 +748,10 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
         format!("exit code {}", output.status.code().unwrap_or(-1))
     };
     if detail.is_empty() {
-        Err(format!("schtasks failed (exit code {})", output.status.code().unwrap_or(-1)))
+        Err(format!(
+            "schtasks failed (exit code {})",
+            output.status.code().unwrap_or(-1)
+        ))
     } else {
         Err(detail)
     }
@@ -667,9 +783,18 @@ pub fn show_request_message_id() -> u32 {
 pub fn find_tray_window() -> Option<isize> {
     let wide = to_wide(TRAY_WINDOW_CLASS);
     let hwnd = unsafe {
-        FindWindowExW(std::ptr::null_mut(), std::ptr::null_mut(), wide.as_ptr(), std::ptr::null())
+        FindWindowExW(
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            wide.as_ptr(),
+            std::ptr::null(),
+        )
     };
-    if hwnd.is_null() { None } else { Some(hwnd as isize) }
+    if hwnd.is_null() {
+        None
+    } else {
+        Some(hwnd as isize)
+    }
 }
 
 /// Asks running instance to restore its parked window (only owner has saved placement).
@@ -775,15 +900,7 @@ pub fn load_icon_from_bytes(data: &[u8]) -> Option<isize> {
     }
 
     let hicon = unsafe {
-        CreateIconFromResourceEx(
-            owned.as_mut_ptr(),
-            size as u32,
-            1,
-            0x00030000,
-            0,
-            0,
-            0x0000,
-        )
+        CreateIconFromResourceEx(owned.as_mut_ptr(), size as u32, 1, 0x00030000, 0, 0, 0x0000)
     };
     if hicon.is_null() {
         None
@@ -823,7 +940,9 @@ pub fn shell_notify_delete(hwnd: isize) -> bool {
 /// Posts message to window queue; SAFETY hwnd must be valid.
 pub fn post_message(hwnd: isize, msg: u32, wparam: usize, lparam: isize) {
     // SAFETY: PostMessageW with valid hwnd.
-    unsafe { PostMessageW(hwnd as *mut core::ffi::c_void, msg, wparam, lparam); }
+    unsafe {
+        PostMessageW(hwnd as *mut core::ffi::c_void, msg, wparam, lparam);
+    }
 }
 
 /// Shows tray context menu at coordinates; returns selected command ID.
@@ -857,7 +976,9 @@ pub fn show_tray_menu(hwnd: isize, x: i32, y: i32) -> Option<u32> {
     };
 
     // SAFETY: DestroyMenu with valid handle.
-    unsafe { DestroyMenu(menu); }
+    unsafe {
+        DestroyMenu(menu);
+    }
 
     // Ensure tray callback is processed.
     post_message(hwnd, WM_NULL, 0, 0);
@@ -895,7 +1016,12 @@ mod tests {
         let mut p = unsafe { std::mem::zeroed::<WINDOWPLACEMENT>() };
         p.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
         let rc = unsafe { GetWindowPlacement(hwnd, &mut p) };
-        assert_ne!(rc, 0, "GetWindowPlacement failed: {}", std::io::Error::last_os_error());
+        assert_ne!(
+            rc,
+            0,
+            "GetWindowPlacement failed: {}",
+            std::io::Error::last_os_error()
+        );
         p
     }
 
@@ -922,8 +1048,7 @@ mod tests {
 
             let before = placement_of(hwnd);
             assert_eq!(
-                before.rcNormalPosition.left,
-                100,
+                before.rcNormalPosition.left, 100,
                 "expected window at x=100 before parking"
             );
 
@@ -931,8 +1056,7 @@ mod tests {
 
             let parked = placement_of(hwnd);
             assert_eq!(
-                parked.rcNormalPosition.left,
-                OFFSCREEN,
+                parked.rcNormalPosition.left, OFFSCREEN,
                 "window should have been parked off-screen"
             );
 
@@ -940,8 +1064,7 @@ mod tests {
 
             let restored = placement_of(hwnd);
             assert_eq!(
-                restored.rcNormalPosition.left,
-                100,
+                restored.rcNormalPosition.left, 100,
                 "window should be restored to x=100"
             );
 
@@ -961,9 +1084,15 @@ mod tests {
         // silently when running unelevated (debug tests / CI).
         match super::set_startup_launch(true) {
             Ok(()) => {
-                assert!(super::startup_launch_enabled(), "task should exist after enable");
+                assert!(
+                    super::startup_launch_enabled(),
+                    "task should exist after enable"
+                );
                 super::set_startup_launch(false).expect("disable should succeed");
-                assert!(!super::startup_launch_enabled(), "task should be gone after disable");
+                assert!(
+                    !super::startup_launch_enabled(),
+                    "task should be gone after disable"
+                );
             }
             Err(_) => {
                 eprintln!("skipping startup task round-trip: not elevated");
@@ -971,4 +1100,3 @@ mod tests {
         }
     }
 }
-

@@ -1,5 +1,3 @@
-
-
 pub struct CurveStepper {
     last_duty: Option<u32>,
     active_target: Option<u32>,
@@ -15,10 +13,20 @@ impl Default for CurveStepper {
 
 impl CurveStepper {
     pub fn new() -> Self {
-        Self { last_duty: None, active_target: None, transition_start_temp: 0, anchored: false }
+        Self {
+            last_duty: None,
+            active_target: None,
+            transition_start_temp: 0,
+            anchored: false,
+        }
     }
     pub fn with_last_duty(duty: u32) -> Self {
-        Self { last_duty: Some(duty), active_target: None, transition_start_temp: 0, anchored: false }
+        Self {
+            last_duty: Some(duty),
+            active_target: None,
+            transition_start_temp: 0,
+            anchored: false,
+        }
     }
     pub fn reset(&mut self) {
         self.last_duty = None;
@@ -32,7 +40,14 @@ impl CurveStepper {
     pub fn current_duty(&self) -> Option<u32> {
         self.last_duty
     }
-    pub fn next(&mut self, temp: i32, hysteresis_c: u32, rate_limit_up: u32, rate_limit_down: Option<u32>, full_points: &[[u32; 2]]) -> Option<u32> {
+    pub fn next(
+        &mut self,
+        temp: i32,
+        hysteresis_c: u32,
+        rate_limit_up: u32,
+        rate_limit_down: Option<u32>,
+        full_points: &[[u32; 2]],
+    ) -> Option<u32> {
         if !self.anchored {
             self.transition_start_temp = temp;
             self.active_target = None;
@@ -52,7 +67,9 @@ impl CurveStepper {
                     temp >= self.transition_start_temp
                 } else {
                     // Falling: require drop of hysteresis below start point.
-                    temp <= self.transition_start_temp.saturating_sub(hysteresis_c as i32)
+                    temp <= self
+                        .transition_start_temp
+                        .saturating_sub(hysteresis_c as i32)
                 };
                 if should_apply {
                     self.active_target = Some(curve_target);
@@ -73,24 +90,40 @@ impl CurveStepper {
             }
             None => tgt,
         };
-        if self.last_duty != Some(next) { Some(next) } else { None }
+        if self.last_duty != Some(next) {
+            Some(next)
+        } else {
+            None
+        }
     }
 }
 
 pub fn calculate_duty_from_curve(temp: i32, full_points: &[[u32; 2]]) -> u32 {
+    if temp >= crate::types::CURVE_TEMP_LOCK_START as i32 {
+        return 100;
+    }
     if full_points.len() < 2 {
         // Defensive: full_points always has >=2, but raw slices may not.
         return 100;
     }
-    debug_assert!(full_points.len() >= 2, "full_points must have at least 2 elements (curve_full_points ensures this)");
+    debug_assert!(
+        full_points.len() >= 2,
+        "full_points must have at least 2 elements (curve_full_points ensures this)"
+    );
     let temp = temp as f64;
     for w in full_points.windows(2) {
-        let [p1, p2] = *w else { unreachable!("windows(2) always yields 2-element slices") };
+        let [p1, p2] = *w else {
+            unreachable!("windows(2) always yields 2-element slices")
+        };
         let (x1, y1) = (p1[0] as f64, p1[1] as f64);
         let (x2, y2) = (p2[0] as f64, p2[1] as f64);
-        if temp <= x1 { return y1 as u32; }
+        if temp <= x1 {
+            return y1 as u32;
+        }
         if temp <= x2 {
-            if x2 == x1 { return y2 as u32; }
+            if x2 == x1 {
+                return y2 as u32;
+            }
             let ratio = (temp - x1) / (x2 - x1);
             return (y1 + ratio * (y2 - y1)).round() as u32;
         }
@@ -143,8 +176,18 @@ mod tests {
     #[test]
     fn calculate_duty_from_curve_empty_uses_full() {
         let points = types::curve_full_points(&[]);
-        // Fallback spans 0-110°C, so 50°C is 50/110 of ramp.
-        assert_eq!(calculate_duty_from_curve(50, &points), 45);
+        // Fallback spans 0-100°C locked, so 50°C is 50%.
+        assert_eq!(calculate_duty_from_curve(50, &points), 50);
+        assert_eq!(calculate_duty_from_curve(110, &points), 100);
+        assert_eq!(calculate_duty_from_curve(100, &points), 100);
+    }
+
+    #[test]
+    fn calculate_duty_locked_zone_always_100() {
+        let points = types::curve_full_points(&[[30, 0], [85, 100]]);
+        assert_eq!(calculate_duty_from_curve(99, &points), 100);
+        assert_eq!(calculate_duty_from_curve(100, &points), 100);
+        assert_eq!(calculate_duty_from_curve(105, &points), 100);
         assert_eq!(calculate_duty_from_curve(110, &points), 100);
     }
 

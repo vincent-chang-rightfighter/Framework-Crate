@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use smallvec::SmallVec;
 use framework_lib::chromium_ec::CrosEc;
 use framework_lib::chromium_ec::CrosEcDriver;
 use framework_lib::power;
 use framework_lib::smbios;
 use framework_lib::smbios::Platform;
+use smallvec::SmallVec;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThermalData {
@@ -62,9 +62,24 @@ pub enum PlatformFamily {
 }
 
 impl PlatformFamily {
-    pub fn has_battery(self) -> bool { matches!(self, PlatformFamily::Laptop12 | PlatformFamily::Laptop13 | PlatformFamily::Laptop16) }
-    pub fn has_fingerprint_led(self) -> bool { matches!(self, PlatformFamily::Laptop12 | PlatformFamily::Laptop13 | PlatformFamily::Laptop16) }
-    pub fn has_keyboard_backlight(self) -> bool { matches!(self, PlatformFamily::Laptop12 | PlatformFamily::Laptop13 | PlatformFamily::Laptop16) }
+    pub fn has_battery(self) -> bool {
+        matches!(
+            self,
+            PlatformFamily::Laptop12 | PlatformFamily::Laptop13 | PlatformFamily::Laptop16
+        )
+    }
+    pub fn has_fingerprint_led(self) -> bool {
+        matches!(
+            self,
+            PlatformFamily::Laptop12 | PlatformFamily::Laptop13 | PlatformFamily::Laptop16
+        )
+    }
+    pub fn has_keyboard_backlight(self) -> bool {
+        matches!(
+            self,
+            PlatformFamily::Laptop12 | PlatformFamily::Laptop13 | PlatformFamily::Laptop16
+        )
+    }
 }
 
 pub fn detect_platform() -> PlatformFamily {
@@ -77,8 +92,9 @@ pub fn detect_platform() -> PlatformFamily {
         | Some(Platform::IntelGen13)
         | Some(Platform::Framework13Amd7080)
         | Some(Platform::Framework13AmdAi300) => PlatformFamily::Laptop13,
-        Some(Platform::Framework16Amd7080)
-        | Some(Platform::Framework16AmdAi300) => PlatformFamily::Laptop16,
+        Some(Platform::Framework16Amd7080) | Some(Platform::Framework16AmdAi300) => {
+            PlatformFamily::Laptop16
+        }
         Some(Platform::FrameworkDesktopAmdAiMax300) => PlatformFamily::Desktop,
         _ => PlatformFamily::Unknown,
     }
@@ -134,10 +150,17 @@ fn is_sink_no_pd(port: &UsbCPort) -> bool {
     !port.dp_alt_mode && role_is(port, "Sink") && !port.pd_contract
 }
 
-fn history_has_role(history: &[&[UsbCPort]], port_id: u32, power_role: &str, pd_contract: bool) -> bool {
-    history.iter().any(|h| h.iter().any(|p| p.port == port_id
-        && p.power_role == Some(power_role)
-        && p.pd_contract == pd_contract))
+fn history_has_role(
+    history: &[&[UsbCPort]],
+    port_id: u32,
+    power_role: &str,
+    pd_contract: bool,
+) -> bool {
+    history.iter().any(|h| {
+        h.iter().any(|p| {
+            p.port == port_id && p.power_role == Some(power_role) && p.pd_contract == pd_contract
+        })
+    })
 }
 
 fn same_port_identity(a: &UsbCPort, b: &UsbCPort) -> bool {
@@ -168,48 +191,89 @@ pub fn classify_pd_port<'a>(
 
     tracing::debug!(
         "[classify] Port {}: role={:?}, pd_contract={}, dp_alt={}, watts={:?}, hist_len={}, display_card={}",
-        port.port, port.power_role, port.pd_contract, port.dp_alt_mode, port.negotiated_watts, hist_len, display_card_installed
+        port.port,
+        port.power_role,
+        port.pd_contract,
+        port.dp_alt_mode,
+        port.negotiated_watts,
+        hist_len,
+        display_card_installed
     );
 
     if is_pd_power_input(port) {
-        tracing::debug!("[classify] Port {} → USB-C Expansion Card (Sink+PD)", port.port);
+        tracing::debug!(
+            "[classify] Port {} → USB-C Expansion Card (Sink+PD)",
+            port.port
+        );
         return "USB-C Expansion Card";
     }
     if port.dp_alt_mode {
         let result = classify_display_source(port.negotiated_watts, true);
-        tracing::debug!("[classify] Port {} → {} (dp_alt, watts={:?})", port.port, result, port.negotiated_watts);
+        tracing::debug!(
+            "[classify] Port {} → {} (dp_alt, watts={:?})",
+            port.port,
+            result,
+            port.negotiated_watts
+        );
         return result;
     }
     if port.pd_contract && role_is(port, "Source") {
         // HDMI/DP can omit DP-alt but still draw ~3-5W Source; charging starts at 7.5W.
         if display_card_installed || is_low_power_display_source(port.negotiated_watts) {
             let result = classify_display_source(port.negotiated_watts, display_card_installed);
-            tracing::debug!("[classify] Port {} → {} (Source+PD, no dp_alt, watts={:?})", port.port, result, port.negotiated_watts);
+            tracing::debug!(
+                "[classify] Port {} → {} (Source+PD, no dp_alt, watts={:?})",
+                port.port,
+                result,
+                port.negotiated_watts
+            );
             return result;
         }
-        tracing::debug!("[classify] Port {} → USB-C Expansion Card (Source+PD, no dp_alt, watts={:?})", port.port, port.negotiated_watts);
+        tracing::debug!(
+            "[classify] Port {} → USB-C Expansion Card (Source+PD, no dp_alt, watts={:?})",
+            port.port,
+            port.negotiated_watts
+        );
         return "USB-C Expansion Card";
     }
     if is_source_no_pd(port) {
         let has_seen_sink = history_has_role(history, port.port, "Sink", false)
             || history_has_role(history, port.port, "Sink", true);
         if has_seen_sink || ever_seen_sink {
-            tracing::debug!("[classify] Port {} → USB-C Expansion Card (Source+noPD, seen Sink)", port.port);
+            tracing::debug!(
+                "[classify] Port {} → USB-C Expansion Card (Source+noPD, seen Sink)",
+                port.port
+            );
             return "USB-C Expansion Card";
         }
-        let stable_count = history.iter()
+        let stable_count = history
+            .iter()
             .filter(|h| h.iter().any(|p| same_port_identity(p, port)))
             .count();
-        tracing::debug!("[classify] Port {} Source+noPD: stable_count={}, threshold={}", port.port, stable_count, stable_threshold);
+        tracing::debug!(
+            "[classify] Port {} Source+noPD: stable_count={}, threshold={}",
+            port.port,
+            stable_count,
+            stable_threshold
+        );
         if stable_count >= stable_threshold {
-            tracing::debug!("[classify] Port {} → USB-A Expansion Card (stable Source)", port.port);
+            tracing::debug!(
+                "[classify] Port {} → USB-A Expansion Card (stable Source)",
+                port.port
+            );
             return "USB-A Expansion Card";
         }
-        tracing::debug!("[classify] Port {} → USB-C Expansion Card (Source+noPD, pending USB-A check)", port.port);
+        tracing::debug!(
+            "[classify] Port {} → USB-C Expansion Card (Source+noPD, pending USB-A check)",
+            port.port
+        );
         return "USB-C Expansion Card";
     }
     if is_sink_no_pd(port) {
-        tracing::debug!("[classify] Port {} → USB-C Expansion Card (Sink+noPD)", port.port);
+        tracing::debug!(
+            "[classify] Port {} → USB-C Expansion Card (Sink+noPD)",
+            port.port
+        );
         return "USB-C Expansion Card";
     }
     tracing::debug!("[classify] Port {} → USB-C Port (fallback)", port.port);
@@ -229,38 +293,43 @@ fn sensor_name_for_index(platform: Option<Platform>, index: usize) -> String {
                 2 => "F75303_DDR",
                 3 => "Battery",
                 4 => "PECI",
-                5 if matches!(platform, Some(Platform::IntelGen12) | Some(Platform::IntelGen13)) => "F57397_VCCGT",
+                5 if matches!(
+                    platform,
+                    Some(Platform::IntelGen12) | Some(Platform::IntelGen13)
+                ) =>
+                {
+                    "F57397_VCCGT"
+                }
                 _ => return format!("Sensor {}", index),
             }
         }
-        Some(Platform::IntelCoreUltra1) | Some(Platform::IntelCoreUltra3) => {
-            match index {
-                0 => "F75303_Local",
-                1 => "F75303_CPU",
-                2 => "Battery",
-                3 => "F75303_DDR",
-                4 => "PECI",
-                _ => return format!("Sensor {}", index),
-            }
-        }
-        Some(Platform::Framework12IntelGen13) => {
-            match index {
-                0 => "F75303_CPU",
-                1 => "F75303_Skin",
-                2 => "F75303_Local",
-                3 => "Battery",
-                4 => "PECI",
-                5 => "Charger IC",
-                _ => return format!("Sensor {}", index),
-            }
-        }
+        Some(Platform::IntelCoreUltra1) | Some(Platform::IntelCoreUltra3) => match index {
+            0 => "F75303_Local",
+            1 => "F75303_CPU",
+            2 => "Battery",
+            3 => "F75303_DDR",
+            4 => "PECI",
+            _ => return format!("Sensor {}", index),
+        },
+        Some(Platform::Framework12IntelGen13) => match index {
+            0 => "F75303_CPU",
+            1 => "F75303_Skin",
+            2 => "F75303_Local",
+            3 => "Battery",
+            4 => "PECI",
+            5 => "Charger IC",
+            _ => return format!("Sensor {}", index),
+        },
         Some(
             Platform::Framework13Amd7080
             | Platform::Framework13AmdAi300
             | Platform::Framework16Amd7080
             | Platform::Framework16AmdAi300,
         ) => {
-            let is_16 = matches!(platform, Some(Platform::Framework16Amd7080) | Some(Platform::Framework16AmdAi300));
+            let is_16 = matches!(
+                platform,
+                Some(Platform::Framework16Amd7080) | Some(Platform::Framework16AmdAi300)
+            );
             match index {
                 0 => "F75303_Local",
                 1 => "F75303_CPU",
@@ -273,16 +342,14 @@ fn sensor_name_for_index(platform: Option<Platform>, index: usize) -> String {
                 _ => return format!("Sensor {}", index),
             }
         }
-        Some(Platform::FrameworkDesktopAmdAiMax300) => {
-            match index {
-                0 => "F75303_APU",
-                1 => "F75303_DDR",
-                2 => "F75303_AMB",
-                3 => "APU",
-                4 => "Virtual",
-                _ => return format!("Sensor {}", index),
-            }
-        }
+        Some(Platform::FrameworkDesktopAmdAiMax300) => match index {
+            0 => "F75303_APU",
+            1 => "F75303_DDR",
+            2 => "F75303_AMB",
+            3 => "APU",
+            4 => "Virtual",
+            _ => return format!("Sensor {}", index),
+        },
         _ => return format!("Sensor {}", index),
     };
     name.to_string()
@@ -371,7 +438,10 @@ impl EcClient {
             }
         }
 
-        Ok(ThermalData { temps: Arc::new(temps), fans })
+        Ok(ThermalData {
+            temps: Arc::new(temps),
+            fans,
+        })
     }
 
     pub fn power(&self) -> Result<BatteryData, String> {
@@ -385,9 +455,8 @@ impl EcClient {
             data.present_rate_ma = Some(batt.present_rate);
             data.remaining_capacity_mah = Some(batt.remaining_capacity);
             data.design_capacity_mah = Some(batt.design_capacity);
-            data.design_capacity_wh = Some(
-                batt.design_capacity as f32 * batt.design_voltage as f32 / 1_000_000.0,
-            );
+            data.design_capacity_wh =
+                Some(batt.design_capacity as f32 * batt.design_voltage as f32 / 1_000_000.0);
             data.last_full_charge_capacity_mah = Some(batt.last_full_charge_capacity);
             data.cycle_count = Some(batt.cycle_count);
             data.soc_pct = Some(batt.charge_percentage);
@@ -398,10 +467,8 @@ impl EcClient {
             data.battery_type = Some(batt.battery_type.clone());
 
             if batt.design_voltage > 0 {
-                data.remaining_capacity_wh = Some(
-                    batt.remaining_capacity as f32 * batt.design_voltage as f32
-                        / 1_000_000.0,
-                );
+                data.remaining_capacity_wh =
+                    Some(batt.remaining_capacity as f32 * batt.design_voltage as f32 / 1_000_000.0);
             }
         }
 
@@ -517,8 +584,8 @@ impl EcClient {
     }
 
     pub fn pd_ports(&self) -> SmallVec<[UsbCPort; 4]> {
-        use framework_lib::chromium_ec::commands::EcRequestGetPdPortState;
         use framework_lib::chromium_ec::EcRequestRaw;
+        use framework_lib::chromium_ec::commands::EcRequestGetPdPortState;
 
         let mut ports = SmallVec::new();
         for i in 0u8..4 {
@@ -554,14 +621,27 @@ impl EcClient {
                 None
             };
             let negotiated_text = if voltage > 0 && current > 0 {
-                Some(format!("PD {:.0}W, {:.0}V, {:.2}A", watts_mw as f32 / 1000.0, voltage as f32 / 1000.0, current as f32 / 1000.0))
+                Some(format!(
+                    "PD {:.0}W, {:.0}V, {:.2}A",
+                    watts_mw as f32 / 1000.0,
+                    voltage as f32 / 1000.0,
+                    current as f32 / 1000.0
+                ))
             } else {
                 None
             };
 
             tracing::debug!(
                 "[pd_ports] Port {}: c_state={}, pd_state={}, role={}, data_role={}, v={}mV i={}mA dp_alt=0x{:02X} watts={:?}",
-                i, c_state, pd_state, power_role, data_role, voltage, current, dp_alt_raw, negotiated_watts
+                i,
+                c_state,
+                pd_state,
+                power_role,
+                data_role,
+                voltage,
+                current,
+                dp_alt_raw,
+                negotiated_watts
             );
 
             ports.push(UsbCPort {
@@ -579,7 +659,10 @@ impl EcClient {
 
     pub fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]> {
         let mut cards = SmallVec::new();
-        match self.ec.read_board_id_hc(framework_lib::chromium_ec::commands::BoardIdType::Mainboard) {
+        match self
+            .ec
+            .read_board_id_hc(framework_lib::chromium_ec::commands::BoardIdType::Mainboard)
+        {
             Ok(Some(board_id)) => {
                 if board_id != 0 {
                     cards.push(ExpansionCard {
@@ -614,25 +697,37 @@ mod tests {
     #[test]
     fn hdmi_source_without_dp_alt_is_hdmi() {
         let p = port("Source", true, false, Some(3.4));
-        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false, false), "HDMI Expansion Card");
+        assert_eq!(
+            classify_pd_port(&p, std::iter::empty(), 2, false, false),
+            "HDMI Expansion Card"
+        );
     }
 
     #[test]
     fn displayport_low_watt_source() {
         let p = port("Source", true, true, Some(2.5));
-        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false, false), "DisplayPort Expansion Card");
+        assert_eq!(
+            classify_pd_port(&p, std::iter::empty(), 2, false, false),
+            "DisplayPort Expansion Card"
+        );
     }
 
     #[test]
     fn usbc_default_source_stays_usbc() {
         let p = port("Source", true, false, Some(7.5));
-        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false, false), "USB-C Expansion Card");
+        assert_eq!(
+            classify_pd_port(&p, std::iter::empty(), 2, false, false),
+            "USB-C Expansion Card"
+        );
     }
 
     #[test]
     fn sink_pd_is_usbc() {
         let p = port("Sink", true, false, Some(65.0));
-        assert_eq!(classify_pd_port(&p, std::iter::empty(), 2, false, false), "USB-C Expansion Card");
+        assert_eq!(
+            classify_pd_port(&p, std::iter::empty(), 2, false, false),
+            "USB-C Expansion Card"
+        );
     }
 
     #[test]

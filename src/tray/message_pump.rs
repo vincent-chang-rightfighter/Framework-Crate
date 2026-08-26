@@ -2,10 +2,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
+use super::event::{ID_QUIT, ID_SHOW, TrayCommand, TrayEvent};
 use crate::system_info;
-use super::event::{TrayCommand, TrayEvent, ID_SHOW, ID_QUIT};
 
-use crate::system_info::{WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND};
+use crate::system_info::{PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, WM_POWERBROADCAST};
 
 const WM_APP: u32 = 0x8000;
 const WM_TRAYICON: u32 = WM_APP + 1;
@@ -36,7 +36,10 @@ pub fn notify_tray_thread() -> bool {
     let ok = unsafe { PostThreadMessageW(tid, WM_COMMAND_READY, 0, 0) != 0 };
     if !ok {
         // NOTE: Polled at 2 Hz while queue missing; debug to avoid log spam.
-        tracing::debug!("PostThreadMessageW to tray thread {} failed (queue not ready?)", tid);
+        tracing::debug!(
+            "PostThreadMessageW to tray thread {} failed (queue not ready?)",
+            tid
+        );
     }
     ok
 }
@@ -76,23 +79,41 @@ struct WNDCLASSW {
 
 #[link(name = "user32")]
 unsafe extern "system" {
-    fn GetMessageW(lpMsg: *mut MSG, hWnd: *mut core::ffi::c_void, wMsgFilterMin: u32, wMsgFilterMax: u32) -> i32;
+    fn GetMessageW(
+        lpMsg: *mut MSG,
+        hWnd: *mut core::ffi::c_void,
+        wMsgFilterMin: u32,
+        wMsgFilterMax: u32,
+    ) -> i32;
     fn TranslateMessage(lpMsg: *const MSG) -> i32;
     fn DispatchMessageW(lpMsg: *const MSG) -> i32;
     fn RegisterClassW(lpWndClass: *const WNDCLASSW) -> u16;
     fn UnregisterClassW(lpClassName: *const u16, hInstance: *mut core::ffi::c_void) -> i32;
     fn CreateWindowExW(
-        dwExStyle: u32, lpClassName: *const u16, lpWindowName: *const u16,
-        dwStyle: u32, x: i32, y: i32, nWidth: i32, nHeight: i32,
-        hWndParent: *mut core::ffi::c_void, hMenu: *mut core::ffi::c_void,
-        hInstance: *mut core::ffi::c_void, lpParam: *mut core::ffi::c_void,
+        dwExStyle: u32,
+        lpClassName: *const u16,
+        lpWindowName: *const u16,
+        dwStyle: u32,
+        x: i32,
+        y: i32,
+        nWidth: i32,
+        nHeight: i32,
+        hWndParent: *mut core::ffi::c_void,
+        hMenu: *mut core::ffi::c_void,
+        hInstance: *mut core::ffi::c_void,
+        lpParam: *mut core::ffi::c_void,
     ) -> *mut core::ffi::c_void;
     fn DestroyWindow(hWnd: *mut core::ffi::c_void) -> i32;
     fn DestroyIcon(hIcon: *mut core::ffi::c_void) -> i32;
     fn GetModuleHandleW(lpModuleName: *const u16) -> *mut core::ffi::c_void;
     fn GetCursorPos(lpPoint: *mut POINT) -> i32;
     fn SetForegroundWindow(hWnd: *mut core::ffi::c_void) -> i32;
-    fn DefWindowProcW(hWnd: *mut core::ffi::c_void, msg: u32, wParam: usize, lParam: isize) -> isize;
+    fn DefWindowProcW(
+        hWnd: *mut core::ffi::c_void,
+        msg: u32,
+        wParam: usize,
+        lParam: isize,
+    ) -> isize;
     fn PostThreadMessageW(idThread: u32, msg: u32, wParam: usize, lParam: isize) -> i32;
     fn ShowWindow(hWnd: *mut core::ffi::c_void, nCmdShow: i32) -> i32;
 }
@@ -128,7 +149,12 @@ unsafe extern "system" fn tray_wnd_proc(
             // WM_COMMAND_READY wake. Re-post after the menu so the outer
             // GetMessageW drains the buffered Shutdown/Reinit command.
             let _ = unsafe {
-                PostThreadMessageW(TRAY_THREAD_ID.load(Ordering::Acquire), WM_COMMAND_READY, 0, 0)
+                PostThreadMessageW(
+                    TRAY_THREAD_ID.load(Ordering::Acquire),
+                    WM_COMMAND_READY,
+                    0,
+                    0,
+                )
             };
         }
         return 0;
@@ -145,7 +171,10 @@ unsafe extern "system" fn tray_wnd_proc(
     if msg == WM_POWERBROADCAST {
         let wparam_u32 = wparam as u32;
         if wparam_u32 == PBT_APMRESUMEAUTOMATIC || wparam_u32 == PBT_APMRESUMESUSPEND {
-            tracing::info!("[POWER] System resumed from sleep/hibernate (wParam={:#x})", wparam_u32);
+            tracing::info!(
+                "[POWER] System resumed from sleep/hibernate (wParam={:#x})",
+                wparam_u32
+            );
             EVENT_TX.with(|tx| {
                 if let Some(sender) = tx.borrow().as_ref() {
                     let _ = sender.send(TrayEvent::PowerResumed);
@@ -184,14 +213,24 @@ pub fn spawn_message_pump(
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            message_pump_loop(event_tx, command_rx, icon_ready_tx, thread_ready_tx, app_hwnd);
+            message_pump_loop(
+                event_tx,
+                command_rx,
+                icon_ready_tx,
+                thread_ready_tx,
+                app_hwnd,
+            );
         })) {
             tracing::error!("Tray message pump panicked: {:?}", e);
         }
     })
 }
 
-fn cleanup_and_exit(tray_icon_loaded: bool, tray_hwnd: *mut core::ffi::c_void, hicon: Option<isize>) {
+fn cleanup_and_exit(
+    tray_icon_loaded: bool,
+    tray_hwnd: *mut core::ffi::c_void,
+    hicon: Option<isize>,
+) {
     TRAY_THREAD_ID.store(0, Ordering::Release);
     if tray_icon_loaded {
         system_info::shell_notify_delete(tray_hwnd as isize);
@@ -262,7 +301,10 @@ fn message_pump_loop(
         let mut msg: MSG = unsafe { std::mem::zeroed() };
         let result = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
         if result == 0 || result == -1 {
-            tracing::info!("Tray message pump exiting during priming (result={})", result);
+            tracing::info!(
+                "Tray message pump exiting during priming (result={})",
+                result
+            );
             cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
             return;
         }
@@ -276,9 +318,7 @@ fn message_pump_loop(
 
     loop {
         let mut msg: MSG = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0)
-        };
+        let result = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
 
         if result == 0 || result == -1 {
             tracing::info!("Tray message pump exiting (result={})", result);
@@ -299,7 +339,10 @@ fn message_pump_loop(
                         if !tray_icon_loaded {
                             if let Some(icon) = hicon {
                                 let ok = system_info::shell_notify_add(
-                                    tray_hwnd as isize, icon, "Framework Crate", WM_TRAYICON,
+                                    tray_hwnd as isize,
+                                    icon,
+                                    "Framework Crate",
+                                    WM_TRAYICON,
                                 );
                                 tray_icon_loaded = ok;
                                 // NOTE: try_send avoids blocking GetMessageW on sync(1) channel.
@@ -370,7 +413,10 @@ fn create_hidden_window() -> *mut core::ffi::c_void {
             class_name.as_ptr(),
             std::ptr::null(),
             0,
-            0, 0, 1, 1,
+            0,
+            0,
+            1,
+            1,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             h_instance,
@@ -387,10 +433,14 @@ fn create_hidden_window() -> *mut core::ffi::c_void {
 
 fn handle_tray_right_click(event_tx: &mpsc::Sender<TrayEvent>) {
     let mut point = POINT { x: 0, y: 0 };
-    unsafe { GetCursorPos(&mut point); }
+    unsafe {
+        GetCursorPos(&mut point);
+    }
 
     let tray_hwnd = TRAY_HWND.with(|hwnd| hwnd.get());
-    unsafe { SetForegroundWindow(tray_hwnd as *mut core::ffi::c_void); }
+    unsafe {
+        SetForegroundWindow(tray_hwnd as *mut core::ffi::c_void);
+    }
 
     if let Some(cmd) = system_info::show_tray_menu(tray_hwnd, point.x, point.y) {
         match cmd {
@@ -404,7 +454,9 @@ fn handle_tray_right_click(event_tx: &mpsc::Sender<TrayEvent>) {
                 let _ = event_tx.send(TrayEvent::MenuShow);
                 let _ = event_tx.send(TrayEvent::Restored);
             }
-            ID_QUIT => { let _ = event_tx.send(TrayEvent::MenuQuit); }
+            ID_QUIT => {
+                let _ = event_tx.send(TrayEvent::MenuQuit);
+            }
             _ => {}
         }
     }

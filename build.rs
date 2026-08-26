@@ -20,7 +20,10 @@ fn main() {
         } else if let Some(rest) = line.strip_prefix("version = ")
             && current_name == "framework_lib"
         {
-            println!("cargo:rustc-env=FRAMEWORK_LIB_VERSION={}", rest.trim_matches('"'));
+            println!(
+                "cargo:rustc-env=FRAMEWORK_LIB_VERSION={}",
+                rest.trim_matches('"')
+            );
             found = true;
             break;
         }
@@ -51,7 +54,8 @@ fn main() {
         } else {
             "asInvoker"
         };
-        let manifest = format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        let manifest = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
@@ -66,7 +70,9 @@ fn main() {
     </application>
   </compatibility>
 </assembly>
-"#, exec_level);
+"#,
+            exec_level
+        );
         res.set_manifest(&manifest);
 
         res.compile().expect("Failed to compile Windows resource");
@@ -75,11 +81,18 @@ fn main() {
     // Decode app.png to RGBA bytes for iced window icon (avoids pulling in the
     // full `image` crate with its ~60 transitive dependencies).
     println!("cargo:rerun-if-changed=assets/app.png");
-    let decoder = png::Decoder::new(File::open("assets/app.png").expect("Failed to open assets/app.png"));
+    let decoder =
+        png::Decoder::new(File::open("assets/app.png").expect("Failed to open assets/app.png"));
     let mut reader = decoder.read_info().expect("Failed to read PNG info");
     let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).expect("Failed to decode PNG frame");
-    assert_eq!(info.color_type, png::ColorType::Rgba, "app.png must be RGBA");
+    let info = reader
+        .next_frame(&mut buf)
+        .expect("Failed to decode PNG frame");
+    assert_eq!(
+        info.color_type,
+        png::ColorType::Rgba,
+        "app.png must be RGBA"
+    );
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("icon_rgba.rs");

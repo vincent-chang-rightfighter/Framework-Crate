@@ -1,7 +1,7 @@
+use iced::widget::canvas::Cache;
+use iced::{Color, Element, Length, Point, Size};
 use std::cell::Cell;
 use std::sync::Arc;
-use iced::{Color, Element, Length, Point, Size};
-use iced::widget::canvas::Cache;
 
 // Unit suffix only on last label; "100" is right-aligned to avoid crowding "110°C".
 const AXIS_LABELS_X: [&str; 7] = ["0", "20", "40", "60", "80", "100", "110°C"];
@@ -94,8 +94,13 @@ impl Layout {
     fn new(size: Size) -> Self {
         // Clamp to avoid inf/NaN on degenerate sizes.
         let plot_w = (size.width - Self::LEFT_GUTTER - Self::RIGHT_MARGIN).max(1.0);
-        let plot_h = (size.height - Self::TOP_MARGIN - Self::RIGHT_MARGIN - Self::AXIS_LABEL_SPACE).max(1.0);
-        Self { origin: Point::new(Self::LEFT_GUTTER, Self::TOP_MARGIN), plot_w, plot_h }
+        let plot_h =
+            (size.height - Self::TOP_MARGIN - Self::RIGHT_MARGIN - Self::AXIS_LABEL_SPACE).max(1.0);
+        Self {
+            origin: Point::new(Self::LEFT_GUTTER, Self::TOP_MARGIN),
+            plot_w,
+            plot_h,
+        }
     }
 
     /// Canvas (temp 0-110, duty 0-100) to screen.
@@ -146,8 +151,15 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
                         state.dragging.set(None);
                         return Some(iced::widget::canvas::Action::request_redraw());
                     }
+                    // Locked points (100–110) are not draggable.
+                    if self.points[config_idx][0] >= crate::types::CURVE_TEMP_LOCK_START {
+                        return None;
+                    }
                     let (raw_temp, raw_duty) = layout.screen_to_canvas(cursor_pos);
-                    let temp = (raw_temp.round() as i32).clamp(0, crate::types::CURVE_TEMP_MAX as i32) as u32;
+                    // Editable range is 0..99; 100–110 is locked 100%
+                    let temp = (raw_temp.round() as i32)
+                        .clamp(0, crate::types::CURVE_TEMP_EDIT_MAX as i32)
+                        as u32;
                     let duty = (raw_duty.round() as i32).clamp(0, 100) as u32;
                     // Only publish when rounded value changes to avoid redundant rebuilds.
                     if self.points[config_idx] != [temp, duty] {
@@ -157,7 +169,9 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
                     }
                     return None;
                 }
-                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => {
                     state.dragging.set(None);
                     return Some(iced::widget::canvas::Action::request_redraw().and_capture());
                 }
@@ -174,11 +188,14 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
             }
             return None;
         };
-        // Use pre-sorted indices to avoid per-move allocation.
+        // Use pre-sorted indices to avoid per-move allocation, skip locked points.
         let mut nearest: Option<usize> = None;
         let mut best_dist = f32::INFINITY;
         for &config_idx in &self.sorted_indices {
             let pt = &self.points[config_idx];
+            if pt[0] >= crate::types::CURVE_TEMP_LOCK_START {
+                continue;
+            }
             let dist = cursor_pos.distance(layout.to_screen(pt[0] as f32, pt[1] as f32));
             if dist < best_dist {
                 best_dist = dist;
@@ -216,10 +233,7 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
         _cursor: iced::mouse::Cursor,
     ) -> Vec<iced::widget::canvas::Geometry> {
         let size = bounds.size();
-        let key = (
-            Arc::as_ptr(&self.all_pts) as *const (),
-            self.all_pts.len(),
-        );
+        let key = (Arc::as_ptr(&self.all_pts) as *const (), self.all_pts.len());
         let points_changed = state.last_points.borrow().as_deref() != Some(self.points.as_ref());
         let marks_changed = state.last_marks.borrow().as_deref() != Some(self.marks.as_ref());
         let highlight_changed = state.last_hover.get() != state.hover.get()
@@ -264,6 +278,9 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
             let layout = Layout::new(bounds.size());
             let near = self.sorted_indices.iter().any(|idx| {
                 let pt = &self.points[*idx];
+                if pt[0] >= crate::types::CURVE_TEMP_LOCK_START {
+                    return false;
+                }
                 pos.distance(layout.to_screen(pt[0] as f32, pt[1] as f32)) <= HIT_RADIUS
             });
             if near {
@@ -294,32 +311,74 @@ fn draw_curve_contents(
     // Clip plot contents so thick strokes never bleed past border.
     let plot_rect = iced::Rectangle::new(layout.origin, Size::new(layout.plot_w, layout.plot_h));
     frame.with_clip(plot_rect, |f| {
-        f.fill_rectangle(layout.origin, Size::new(layout.plot_w, layout.plot_h), Color::from_rgb(0.12, 0.12, 0.15));
+        f.fill_rectangle(
+            layout.origin,
+            Size::new(layout.plot_w, layout.plot_h),
+            Color::from_rgb(0.12, 0.12, 0.15),
+        );
+        // Locked zone 100–110°C: subtle highlight to indicate forced 100%
+        let lock_x0 = to_screen(crate::types::CURVE_TEMP_LOCK_START as f32, 0.0).x;
+        let lock_x1 = to_screen(TEMP_RANGE, 0.0).x;
+        let lock_w = (lock_x1 - lock_x0).max(0.0);
+        f.fill_rectangle(
+            Point::new(lock_x0, layout.origin.y),
+            Size::new(lock_w, layout.plot_h),
+            Color::from_rgba(0.9, 0.3, 0.1, 0.08),
+        );
+        f.fill_rectangle(
+            Point::new(lock_x0, layout.origin.y),
+            Size::new(lock_w, layout.plot_h),
+            Color::from_rgba(0.9, 0.3, 0.1, 0.03),
+        );
 
         let grid_stroke = iced::widget::canvas::Stroke::default()
             .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.1))
             .with_width(0.5);
         for v in [20.0, 40.0, 60.0, 80.0, 100.0] {
-            f.stroke(&iced::widget::canvas::Path::line(to_screen(v, 0.0), to_screen(v, 100.0)), grid_stroke);
+            f.stroke(
+                &iced::widget::canvas::Path::line(to_screen(v, 0.0), to_screen(v, 100.0)),
+                grid_stroke,
+            );
         }
         for v in [20.0, 40.0, 60.0, 80.0] {
-            f.stroke(&iced::widget::canvas::Path::line(to_screen(0.0, v), to_screen(TEMP_RANGE, v)), grid_stroke);
+            f.stroke(
+                &iced::widget::canvas::Path::line(to_screen(0.0, v), to_screen(TEMP_RANGE, v)),
+                grid_stroke,
+            );
         }
 
-        f.stroke_rectangle(layout.origin, Size::new(layout.plot_w, layout.plot_h),
-            iced::widget::canvas::Stroke::default().with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.3)).with_width(1.0));
+        f.stroke_rectangle(
+            layout.origin,
+            Size::new(layout.plot_w, layout.plot_h),
+            iced::widget::canvas::Stroke::default()
+                .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.3))
+                .with_width(1.0),
+        );
 
         let curve_path = iced::widget::canvas::Path::new(|b| {
             b.move_to(to_screen(all_pts[0][0] as f32, all_pts[0][1] as f32));
-            for p in all_pts.iter().skip(1) { b.line_to(to_screen(p[0] as f32, p[1] as f32)); }
+            for p in all_pts.iter().skip(1) {
+                b.line_to(to_screen(p[0] as f32, p[1] as f32));
+            }
         });
-        f.stroke(&curve_path, iced::widget::canvas::Stroke::default()
-            .with_color(crate::style::COLOR_CURVE).with_width(2.0));
+        f.stroke(
+            &curve_path,
+            iced::widget::canvas::Stroke::default()
+                .with_color(crate::style::COLOR_CURVE)
+                .with_width(2.0),
+        );
 
         for &config_idx in sorted_indices.iter() {
             let p = &points[config_idx];
             let center = to_screen(p[0] as f32, p[1] as f32);
-            let (fill_color, stroke_color, r) = if drag_idx == Some(config_idx) {
+            let is_locked = p[0] >= crate::types::CURVE_TEMP_LOCK_START;
+            let (fill_color, stroke_color, r) = if is_locked {
+                (
+                    Color::from_rgb(0.6, 0.6, 0.6),
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.5),
+                    POINT_RADIUS,
+                )
+            } else if drag_idx == Some(config_idx) {
                 (crate::style::COLOR_CURVE, Color::WHITE, POINT_RADIUS + 2.0)
             } else if hover_idx == Some(config_idx) {
                 (crate::style::COLOR_CURVE, Color::WHITE, POINT_RADIUS + 1.0)
@@ -328,8 +387,30 @@ fn draw_curve_contents(
             };
             let circle = iced::widget::canvas::Path::circle(center, r);
             f.fill(&circle, fill_color);
-            f.stroke(&circle, iced::widget::canvas::Stroke::default()
-                .with_color(stroke_color).with_width(2.0));
+            f.stroke(
+                &circle,
+                iced::widget::canvas::Stroke::default()
+                    .with_color(stroke_color)
+                    .with_width(2.0),
+            );
+        }
+        // Locked zone label
+        {
+            let lock_x0 = to_screen(crate::types::CURVE_TEMP_LOCK_START as f32, 0.0).x;
+            let lock_x1 = to_screen(TEMP_RANGE, 0.0).x;
+            let cx = (lock_x0 + lock_x1) * 0.5;
+            f.fill_text(iced::widget::canvas::Text {
+                content: "LOCK 100%".to_string(),
+                position: Point::new(cx, layout.origin.y + 2.0),
+                color: Color::from_rgba(0.9, 0.4, 0.2, 0.45),
+                size: iced::Pixels(7.0),
+                font: iced::Font::with_name("Consolas"),
+                align_x: iced::alignment::Horizontal::Center.into(),
+                align_y: iced::alignment::Vertical::Top,
+                line_height: iced::widget::text::LineHeight::default(),
+                shaping: iced::widget::text::Shaping::Basic,
+                max_width: f32::INFINITY,
+            });
         }
 
         // Live sensor markers: dashed crosshair plus colored dot.
@@ -351,18 +432,28 @@ fn draw_curve_contents(
                     offset: 0,
                 },
             };
-            f.stroke(&iced::widget::canvas::Path::line(
-                Point::new(pos.x, plot_top),
-                Point::new(pos.x, plot_bottom),
-            ), dash);
-            f.stroke(&iced::widget::canvas::Path::line(
-                Point::new(plot_left, pos.y),
-                Point::new(plot_right, pos.y),
-            ), dash);
+            f.stroke(
+                &iced::widget::canvas::Path::line(
+                    Point::new(pos.x, plot_top),
+                    Point::new(pos.x, plot_bottom),
+                ),
+                dash,
+            );
+            f.stroke(
+                &iced::widget::canvas::Path::line(
+                    Point::new(plot_left, pos.y),
+                    Point::new(plot_right, pos.y),
+                ),
+                dash,
+            );
             let dot = iced::widget::canvas::Path::circle(pos, 4.0);
             f.fill(&dot, mark.color);
-            f.stroke(&dot, iced::widget::canvas::Stroke::default()
-                .with_color(Color::WHITE).with_width(1.5));
+            f.stroke(
+                &dot,
+                iced::widget::canvas::Stroke::default()
+                    .with_color(Color::WHITE)
+                    .with_width(1.5),
+            );
         }
     });
 
@@ -374,15 +465,22 @@ fn draw_curve_contents(
         let (align_x, x) = if *v == 0 {
             (iced::alignment::Horizontal::Left, 2.0)
         } else if *v >= 100 {
-            (iced::alignment::Horizontal::Right, layout.origin.x + (*v as f32 / TEMP_RANGE) * layout.plot_w)
+            (
+                iced::alignment::Horizontal::Right,
+                layout.origin.x + (*v as f32 / TEMP_RANGE) * layout.plot_w,
+            )
         } else {
-            (iced::alignment::Horizontal::Center, layout.origin.x + (*v as f32 / TEMP_RANGE) * layout.plot_w)
+            (
+                iced::alignment::Horizontal::Center,
+                layout.origin.x + (*v as f32 / TEMP_RANGE) * layout.plot_w,
+            )
         };
         frame.fill_text(iced::widget::canvas::Text {
             content: AXIS_LABELS_X[i].to_owned(),
             position: Point::new(x, layout.origin.y + layout.plot_h + 4.0),
             color: Color::from_rgb(0.6, 0.6, 0.6),
-            size: iced::Pixels(9.0), font,
+            size: iced::Pixels(9.0),
+            font,
             align_x: align_x.into(),
             align_y: iced::alignment::Vertical::Top,
             line_height: iced::widget::text::LineHeight::default(),
@@ -398,7 +496,8 @@ fn draw_curve_contents(
                 content: AXIS_LABELS_Y[i].to_owned(),
                 position: Point::new(2.0, y),
                 color: Color::from_rgb(0.6, 0.6, 0.6),
-                size: iced::Pixels(9.0), font,
+                size: iced::Pixels(9.0),
+                font,
                 align_x: iced::alignment::Horizontal::Left.into(),
                 align_y: iced::alignment::Vertical::Center,
                 line_height: iced::widget::text::LineHeight::default(),

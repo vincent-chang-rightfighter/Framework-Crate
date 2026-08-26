@@ -5,8 +5,8 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 pub use event::{TrayCommand, TrayEvent};
-pub use message_pump::spawn_message_pump;
 use message_pump::notify_tray_thread;
+pub use message_pump::spawn_message_pump;
 
 pub struct TrayManager {
     hwnd: isize,
@@ -118,7 +118,11 @@ impl TrayManager {
             return true;
         }
         if !self.thread_ready {
-            match self.thread_ready_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            match self
+                .thread_ready_rx
+                .as_ref()
+                .and_then(|rx| rx.try_recv().ok())
+            {
                 Some(()) => self.thread_ready = true,
                 None => {
                     let timed_out = self
@@ -200,7 +204,9 @@ impl TrayManager {
     }
 
     pub fn is_alive(&self) -> bool {
-        self.thread_handle.as_ref().is_some_and(|h| !h.is_finished())
+        self.thread_handle
+            .as_ref()
+            .is_some_and(|h| !h.is_finished())
     }
 
     pub fn reset(&mut self) {
@@ -259,10 +265,7 @@ impl TrayManager {
         let Some(hwnd) = self.pending_reinit_hwnd else {
             return false;
         };
-        let finished = self
-            .thread_handle
-            .as_ref()
-            .is_none_or(|h| h.is_finished());
+        let finished = self.thread_handle.as_ref().is_none_or(|h| h.is_finished());
         if !finished {
             return false;
         }

@@ -1,24 +1,31 @@
 use std::ffi::CString;
 use std::os::windows::process::CommandExt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, info, warn};
 use windows_sys::Win32::Foundation::HANDLE;
 
 use crate::util::with_write_lock;
 
 // PawnIOLib.dll function signatures (STDMETHODCALLTYPE / WINAPI — same on x64).
-type PawnioOpen = unsafe extern "system" fn(*mut HANDLE) -> i32;  // HRESULT
-type PawnioLoad = unsafe extern "system" fn(HANDLE, *const u8, usize) -> i32;  // HRESULT
+type PawnioOpen = unsafe extern "system" fn(*mut HANDLE) -> i32; // HRESULT
+type PawnioLoad = unsafe extern "system" fn(HANDLE, *const u8, usize) -> i32; // HRESULT
 type PawnioExecute = unsafe extern "system" fn(
-    HANDLE, *const u8, *const u64, usize, *mut u64, usize, *mut usize,
-) -> i32;  // HRESULT
-type PawnioClose = unsafe extern "system" fn(HANDLE) -> i32;  // HRESULT
+    HANDLE,
+    *const u8,
+    *const u64,
+    usize,
+    *mut u64,
+    usize,
+    *mut usize,
+) -> i32; // HRESULT
+type PawnioClose = unsafe extern "system" fn(HANDLE) -> i32; // HRESULT
 
 const MODULES_DIR_NAME: &str = "modules";
 const PAWNIO_MODULES_VERSION: &str = "0.2.10";
 const INTEL_MSR_SHA256: &str = "d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a21cb48413c9b92e5f";
-const INTEL_MCHBAR_SHA256: &str = "3f82b832d99b4aac37d2a20fdb7c9baa2a3bc0488612c9019c9484eb0e8a6eae";
+const INTEL_MCHBAR_SHA256: &str =
+    "3f82b832d99b4aac37d2a20fdb7c9baa2a3bc0488612c9019c9484eb0e8a6eae";
 
 /// Returns local modules directory (%APPDATA%/framework-crate/modules/).
 fn modules_dir() -> std::path::PathBuf {
@@ -58,9 +65,23 @@ fn verify_cached_modules(dir: &std::path::Path) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Checks if module blobs are cached and hash-verified.
+static MODULES_CACHE: parking_lot::RwLock<Option<bool>> = parking_lot::RwLock::new(None);
+
+/// Checks if module blobs are cached and hash-verified (cached).
 pub fn modules_downloaded() -> bool {
-    verify_cached_modules(&modules_dir()).is_ok()
+    {
+        let guard = MODULES_CACHE.read();
+        if let Some(cached) = *guard {
+            return cached;
+        }
+    }
+    let verified = verify_cached_modules(&modules_dir()).is_ok();
+    *MODULES_CACHE.write() = Some(verified);
+    verified
+}
+
+fn invalidate_modules_cache() {
+    *MODULES_CACHE.write() = None;
 }
 
 /// Downloads PawnIO Modules ZIP and extracts blobs.
@@ -105,11 +126,15 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
     );
     std::fs::write(&script_path, &script).map_err(|_| "failed to write script")?;
 
-    let script_str = script_path
-        .to_str()
-        .ok_or("temp path is not valid UTF-8")?;
+    let script_str = script_path.to_str().ok_or("temp path is not valid UTF-8")?;
     let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_str])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            script_str,
+        ])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .output()
         .map_err(|_| "failed to run powershell")?;
@@ -147,6 +172,7 @@ static MCHBAR_BLOB_CACHE: std::sync::Mutex<Option<Arc<Vec<u8>>>> = std::sync::Mu
 fn invalidate_blob_cache() {
     let _ = MSR_BLOB_CACHE.lock().map(|mut g| *g = None);
     let _ = MCHBAR_BLOB_CACHE.lock().map(|mut g| *g = None);
+    invalidate_modules_cache();
 }
 
 /// Loads IntelMSR blob (cached after first verified load).
@@ -209,14 +235,24 @@ pub struct CpuPowerInfo {
 }
 
 impl CpuPowerInfo {
-    /// Effective PL1 (lower of MSR and MMIO).
+    /// Effective PL1 (lower of enabled MSR and MMIO).
     pub fn effective_pl1(&self) -> f64 {
-        effective_limit(self.pl1_msr, self.pl1_mmio)
+        effective_limit(
+            self.pl1_msr,
+            self.pl1_msr_enabled,
+            self.pl1_mmio,
+            self.pl1_mmio_enabled,
+        )
     }
 
-    /// Effective PL2 (lower of MSR and MMIO).
+    /// Effective PL2 (lower of enabled MSR and MMIO).
     pub fn effective_pl2(&self) -> f64 {
-        effective_limit(self.pl2_msr, self.pl2_mmio)
+        effective_limit(
+            self.pl2_msr,
+            self.pl2_msr_enabled,
+            self.pl2_mmio,
+            self.pl2_mmio_enabled,
+        )
     }
 
     /// Pre-fills edit fields from current MSR values.
@@ -233,14 +269,25 @@ impl CpuPowerInfo {
                 format!("{:.1}", self.pl2_time_s),
             )
         } else {
-            (String::new(), String::new(), true, true, false, false, String::new(), String::new())
+            (
+                String::new(),
+                String::new(),
+                true,
+                true,
+                false,
+                false,
+                String::new(),
+                String::new(),
+            )
         }
     }
 }
 
-/// Lower of two limits, ignoring 0 (unavailable).
-fn effective_limit(msr: f64, mmio: f64) -> f64 {
-    match (msr > 0.0, mmio > 0.0) {
+/// Lower of enabled limits, ignoring 0/invalid and disabled registers.
+fn effective_limit(msr: f64, msr_en: bool, mmio: f64, mmio_en: bool) -> f64 {
+    let msr_valid = msr_en && msr > 0.0 && msr.is_finite();
+    let mmio_valid = mmio_en && mmio > 0.0 && mmio.is_finite();
+    match (msr_valid, mmio_valid) {
         (true, true) => msr.min(mmio),
         (true, false) => msr,
         (false, true) => mmio,
@@ -279,30 +326,41 @@ fn encode_time_window(time_s: f64, time_unit: f64) -> (u32, u32) {
 }
 
 /// Encodes power limit into 32-bit register half.
-fn encode_power_limit(watts: f64, enabled: bool, clamped: bool, unit: f64, time_y: u32, time_z: u32) -> u32 {
+fn encode_power_limit(
+    watts: f64,
+    enabled: bool,
+    clamped: bool,
+    unit: f64,
+    time_y: u32,
+    time_z: u32,
+) -> u32 {
     let max_raw = ((1u32 << 15) - 1) as f64; // 15-bit field: max 32767
     let raw = (watts / unit).round().clamp(0.0, max_raw) as u32;
     let mut val = raw & 0x7FFF;
-    if enabled { val |= 1 << 15; }
-    if clamped { val |= 1 << 16; }
+    if enabled {
+        val |= 1 << 15;
+    }
+    if clamped {
+        val |= 1 << 16;
+    }
     val |= (time_y & 0x1F) << 17;
     val |= (time_z & 0x3) << 22;
     val
 }
 
 /// Power limit parameters.
-#[derive(Clone, Copy)]
-struct PowerLimitParams {
-    pl1_watts: f64,
-    pl1_enabled: bool,
-    pl1_clamped: bool,
-    pl1_time_s: f64,
-    pl2_watts: f64,
-    pl2_enabled: bool,
-    pl2_clamped: bool,
-    pl2_time_s: f64,
-    power_unit: f64,
-    time_unit: f64,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PowerLimitParams {
+    pub(crate) pl1_watts: f64,
+    pub(crate) pl1_enabled: bool,
+    pub(crate) pl1_clamped: bool,
+    pub(crate) pl1_time_s: f64,
+    pub(crate) pl2_watts: f64,
+    pub(crate) pl2_enabled: bool,
+    pub(crate) pl2_clamped: bool,
+    pub(crate) pl2_time_s: f64,
+    pub(crate) power_unit: f64,
+    pub(crate) time_unit: f64,
 }
 
 /// Writes MSR_PKG_POWER_LIMIT (0x610) via IntelMSR.
@@ -316,8 +374,22 @@ fn write_msr_pl1_pl2(
     let (pl1_y, pl1_z) = encode_time_window(params.pl1_time_s, params.time_unit);
     let (pl2_y, pl2_z) = encode_time_window(params.pl2_time_s, params.time_unit);
 
-    let pl1_enc = encode_power_limit(params.pl1_watts, params.pl1_enabled, params.pl1_clamped, params.power_unit, pl1_y, pl1_z);
-    let pl2_enc = encode_power_limit(params.pl2_watts, params.pl2_enabled, params.pl2_clamped, params.power_unit, pl2_y, pl2_z);
+    let pl1_enc = encode_power_limit(
+        params.pl1_watts,
+        params.pl1_enabled,
+        params.pl1_clamped,
+        params.power_unit,
+        pl1_y,
+        pl1_z,
+    );
+    let pl2_enc = encode_power_limit(
+        params.pl2_watts,
+        params.pl2_enabled,
+        params.pl2_clamped,
+        params.power_unit,
+        pl2_y,
+        pl2_z,
+    );
 
     let new_val = ((pl2_enc as u64) << 32) | (pl1_enc as u64);
 
@@ -346,14 +418,24 @@ fn write_msr_pl1_pl2(
         || rb_pl1_en != params.pl1_enabled
         || rb_pl2_en != params.pl2_enabled
     {
-        debug!("MSR read-back mismatch: wrote PL1={:.2}W(en={}) PL2={:.2}W(en={}), read PL1={:.2}W(en={}) PL2={:.2}W(en={})",
-            expected_pl1, params.pl1_enabled, expected_pl2, params.pl2_enabled,
-            rb_pl1, rb_pl1_en, rb_pl2, rb_pl2_en);
+        debug!(
+            "MSR read-back mismatch: wrote PL1={:.2}W(en={}) PL2={:.2}W(en={}), read PL1={:.2}W(en={}) PL2={:.2}W(en={})",
+            expected_pl1,
+            params.pl1_enabled,
+            expected_pl2,
+            params.pl2_enabled,
+            rb_pl1,
+            rb_pl1_en,
+            rb_pl2,
+            rb_pl2_en
+        );
         return Err("MSR write not reflected in read-back — register may be locked");
     }
 
-    debug!("MSR PL1/PL2 written: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) raw=0x{:016X}",
-        params.pl1_watts, params.pl1_time_s, params.pl2_watts, params.pl2_time_s, new_val);
+    debug!(
+        "MSR PL1/PL2 written: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) raw=0x{:016X}",
+        params.pl1_watts, params.pl1_time_s, params.pl2_watts, params.pl2_time_s, new_val
+    );
     Ok(())
 }
 
@@ -368,8 +450,22 @@ fn write_mmio_pl1_pl2(
     let (pl1_y, pl1_z) = encode_time_window(params.pl1_time_s, params.time_unit);
     let (pl2_y, pl2_z) = encode_time_window(params.pl2_time_s, params.time_unit);
 
-    let pl1_enc = encode_power_limit(params.pl1_watts, params.pl1_enabled, params.pl1_clamped, params.power_unit, pl1_y, pl1_z);
-    let pl2_enc = encode_power_limit(params.pl2_watts, params.pl2_enabled, params.pl2_clamped, params.power_unit, pl2_y, pl2_z);
+    let pl1_enc = encode_power_limit(
+        params.pl1_watts,
+        params.pl1_enabled,
+        params.pl1_clamped,
+        params.power_unit,
+        pl1_y,
+        pl1_z,
+    );
+    let pl2_enc = encode_power_limit(
+        params.pl2_watts,
+        params.pl2_enabled,
+        params.pl2_clamped,
+        params.power_unit,
+        pl2_y,
+        pl2_z,
+    );
 
     let new_val = ((pl2_enc as u64) << 32) | (pl1_enc as u64);
 
@@ -384,7 +480,14 @@ fn write_mmio_pl1_pl2(
     // Verify write by re-reading MMIO, mirroring MSR verification.
     let tolerance = params.power_unit.max(0.25);
     let mut rb_out = [0u64; 1];
-    if exec_ioctl(mchbar_handle, "ioctl_read_qword", &[mmio_offset], &mut rb_out).is_err() {
+    if exec_ioctl(
+        mchbar_handle,
+        "ioctl_read_qword",
+        &[mmio_offset],
+        &mut rb_out,
+    )
+    .is_err()
+    {
         return Err("MMIO write succeeded but read-back failed");
     }
     let rb_raw = rb_out[0];
@@ -397,14 +500,24 @@ fn write_mmio_pl1_pl2(
         || rb_pl1_en != params.pl1_enabled
         || rb_pl2_en != params.pl2_enabled
     {
-        debug!("MMIO read-back mismatch: wrote PL1={:.2}W(en={}) PL2={:.2}W(en={}), read PL1={:.2}W(en={}) PL2={:.2}W(en={})",
-            expected_pl1, params.pl1_enabled, expected_pl2, params.pl2_enabled,
-            rb_pl1, rb_pl1_en, rb_pl2, rb_pl2_en);
+        debug!(
+            "MMIO read-back mismatch: wrote PL1={:.2}W(en={}) PL2={:.2}W(en={}), read PL1={:.2}W(en={}) PL2={:.2}W(en={})",
+            expected_pl1,
+            params.pl1_enabled,
+            expected_pl2,
+            params.pl2_enabled,
+            rb_pl1,
+            rb_pl1_en,
+            rb_pl2,
+            rb_pl2_en
+        );
         return Err("MMIO write not reflected in read-back — register may be locked");
     }
 
-    debug!("MMIO PL1/PL2 written: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) raw=0x{:016X}",
-        params.pl1_watts, params.pl1_time_s, params.pl2_watts, params.pl2_time_s, new_val);
+    debug!(
+        "MMIO PL1/PL2 written: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) raw=0x{:016X}",
+        params.pl1_watts, params.pl1_time_s, params.pl2_watts, params.pl2_time_s, new_val
+    );
     Ok(())
 }
 
@@ -472,16 +585,30 @@ pub fn write_mmio_pl1_pl2_public(
 /// Writes both MSR and MMIO from `BiosDefaults` to restore factory state.
 pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<(), &'static str> {
     write_msr_pl1_pl2_public(
-        bios.pl1_watts, bios.pl1_enabled, bios.pl1_clamped, bios.pl1_time_s,
-        bios.pl2_watts, bios.pl2_enabled, bios.pl2_clamped, bios.pl2_time_s,
-        bios.power_unit, bios.time_unit,
+        bios.pl1_watts,
+        bios.pl1_enabled,
+        bios.pl1_clamped,
+        bios.pl1_time_s,
+        bios.pl2_watts,
+        bios.pl2_enabled,
+        bios.pl2_clamped,
+        bios.pl2_time_s,
+        bios.power_unit,
+        bios.time_unit,
     )?;
     // MMIO may be absent on older files; best-effort only.
     if bios.pl1_mmio_watts > 0.0 || bios.pl2_mmio_watts > 0.0 {
         let _ = write_mmio_pl1_pl2_public(
-            bios.pl1_mmio_watts, bios.pl1_mmio_enabled, bios.pl1_mmio_clamped, bios.pl1_mmio_time_s,
-            bios.pl2_mmio_watts, bios.pl2_mmio_enabled, bios.pl2_mmio_clamped, bios.pl2_mmio_time_s,
-            bios.power_unit, bios.time_unit,
+            bios.pl1_mmio_watts,
+            bios.pl1_mmio_enabled,
+            bios.pl1_mmio_clamped,
+            bios.pl1_mmio_time_s,
+            bios.pl2_mmio_watts,
+            bios.pl2_mmio_enabled,
+            bios.pl2_mmio_clamped,
+            bios.pl2_mmio_time_s,
+            bios.power_unit,
+            bios.time_unit,
         );
     }
     Ok(())
@@ -515,7 +642,14 @@ pub fn install_pawnio() -> Result<(), &'static str> {
     use std::process::Command;
     tracing::info!("Installing PawnIO via winget...");
     let status = Command::new("winget")
-        .args(["install", "-e", "--id", "namazso.PawnIO", "--accept-package-agreements", "--accept-source-agreements"])
+        .args([
+            "install",
+            "-e",
+            "--id",
+            "namazso.PawnIO",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .status()
         .map_err(|_| "failed to run winget")?;
@@ -534,7 +668,7 @@ pub fn is_pawnio_installed() -> bool {
 
 /// Initializes DLL function pointers (once).
 fn init_dll_fns() -> Result<(), &'static str> {
-    use windows_sys::Win32::System::LibraryLoader::{LoadLibraryA, GetProcAddress};
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
     if DLL_OPEN.get().is_some() {
         return Ok(()); // already initialized
@@ -666,8 +800,10 @@ pub fn read_cpu_power() -> CpuPowerInfo {
             info.power_unit = 1.0 / (1u32 << unit_bits) as f64;
             let time_bits = ((raw >> 16) & 0xF) as u32;
             info.time_unit = 1.0 / (1u32 << time_bits) as f64;
-            debug!("Power unit: {} W/unit (bits={}), time unit: {} s/unit (bits={})",
-                info.power_unit, unit_bits, info.time_unit, time_bits);
+            debug!(
+                "Power unit: {} W/unit (bits={}), time unit: {} s/unit (bits={})",
+                info.power_unit, unit_bits, info.time_unit, time_bits
+            );
             units_ok = true;
         }
     }
@@ -688,7 +824,8 @@ pub fn read_cpu_power() -> CpuPowerInfo {
             let raw = out[0];
             debug!("MSR 0x610 raw: 0x{:016X}", raw);
             let (pl1, pl1_en, pl1_cl, pl1_y, pl1_z) = decode_power_limit(raw, info.power_unit);
-            let (pl2, pl2_en, pl2_cl, pl2_y, pl2_z) = decode_power_limit(raw >> 32, info.power_unit);
+            let (pl2, pl2_en, pl2_cl, pl2_y, pl2_z) =
+                decode_power_limit(raw >> 32, info.power_unit);
             info.pl1_msr = pl1;
             info.pl1_msr_enabled = pl1_en;
             info.pl1_msr_clamped = pl1_cl;
@@ -697,8 +834,14 @@ pub fn read_cpu_power() -> CpuPowerInfo {
             info.pl2_msr_enabled = pl2_en;
             info.pl2_msr_clamped = pl2_cl;
             info.pl2_time_s = decode_time_window(pl2_y, pl2_z, info.time_unit);
-            debug!("MSR PL1: {:.1}W (en={} clamp={}) Y={} Z={} time={:.1}s", pl1, pl1_en, pl1_cl, pl1_y, pl1_z, info.pl1_time_s);
-            debug!("MSR PL2: {:.1}W (en={} clamp={}) Y={} Z={} time={:.1}s", pl2, pl2_en, pl2_cl, pl2_y, pl2_z, info.pl2_time_s);
+            debug!(
+                "MSR PL1: {:.1}W (en={} clamp={}) Y={} Z={} time={:.1}s",
+                pl1, pl1_en, pl1_cl, pl1_y, pl1_z, info.pl1_time_s
+            );
+            debug!(
+                "MSR PL2: {:.1}W (en={} clamp={}) Y={} Z={} time={:.1}s",
+                pl2, pl2_en, pl2_cl, pl2_y, pl2_z, info.pl2_time_s
+            );
         }
     }
 
@@ -711,7 +854,8 @@ pub fn read_cpu_power() -> CpuPowerInfo {
             mmio_ok = true;
             let raw = out[0];
             let (pl1, pl1_en, pl1_cl, pl1_y, pl1_z) = decode_power_limit(raw, info.power_unit);
-            let (pl2, pl2_en, pl2_cl, pl2_y, pl2_z) = decode_power_limit(raw >> 32, info.power_unit);
+            let (pl2, pl2_en, pl2_cl, pl2_y, pl2_z) =
+                decode_power_limit(raw >> 32, info.power_unit);
             info.pl1_mmio = pl1;
             info.pl1_mmio_enabled = pl1_en;
             info.pl1_mmio_clamped = pl1_cl;
@@ -720,8 +864,14 @@ pub fn read_cpu_power() -> CpuPowerInfo {
             info.pl2_mmio_enabled = pl2_en;
             info.pl2_mmio_clamped = pl2_cl;
             info.pl2_mmio_time_s = decode_time_window(pl2_y, pl2_z, info.time_unit);
-            debug!("MMIO PL1: {:.1}W (en={} clamp={}) time={:.1}s", pl1, pl1_en, pl1_cl, info.pl1_mmio_time_s);
-            debug!("MMIO PL2: {:.1}W (en={} clamp={}) time={:.1}s", pl2, pl2_en, pl2_cl, info.pl2_mmio_time_s);
+            debug!(
+                "MMIO PL1: {:.1}W (en={} clamp={}) time={:.1}s",
+                pl1, pl1_en, pl1_cl, info.pl1_mmio_time_s
+            );
+            debug!(
+                "MMIO PL2: {:.1}W (en={} clamp={}) time={:.1}s",
+                pl2, pl2_en, pl2_cl, info.pl2_mmio_time_s
+            );
         }
     }
 
@@ -754,20 +904,26 @@ impl SyncThread {
     }
 
     /// Starts sync thread; `external_alive` tracks liveness without locking.
-    fn start(&mut self, params: PowerLimitParams, external_alive: Arc<AtomicBool>) -> Result<(), &'static str> {
+    fn start(
+        &mut self,
+        params: PowerLimitParams,
+        external_alive: Arc<AtomicBool>,
+    ) -> Result<(), &'static str> {
         self.stop();
 
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
-        let alive = Arc::new(AtomicBool::new(true));
+        let alive = Arc::new(AtomicBool::new(false));
         let alive_clone = alive.clone();
-        let external_clone = external_alive;
+        let alive_for_thread = alive.clone();
+        let external_clone = external_alive.clone();
+        let external_for_thread = external_alive.clone();
 
         let handle = std::thread::Builder::new()
             .name("cpu-power-sync".to_string())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    sync_thread_main(running_clone, params);
+                    sync_thread_main(running_clone, alive_for_thread, external_for_thread, params);
                 }));
                 if result.is_err() {
                     warn!("Sync thread panicked");
@@ -782,6 +938,7 @@ impl SyncThread {
         self.running = running;
         self.alive = alive;
         self.handle = Some(handle);
+        // Liveness will be set to true by the thread after successful handle init.
         Ok(())
     }
 
@@ -795,8 +952,22 @@ impl SyncThread {
     }
 }
 
+impl Drop for SyncThread {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Sync thread main loop; writes MSR and MMIO every 250ms.
-fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
+fn sync_thread_main(
+    running: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
+    external_alive: Arc<AtomicBool>,
+    params: PowerLimitParams,
+) {
     // Load IntelMSR module and open a persistent handle.
     let msr_blob = match load_intel_msr_blob() {
         Ok(b) => b,
@@ -818,14 +989,24 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
     let mchbar_handle = match load_intel_mchbar_blob().and_then(|b| open_handle(&b)) {
         Ok(h) => Some(h),
         Err(e) => {
-            warn!("Sync thread: MMIO write unavailable ({}), will write MSR only", e);
+            warn!(
+                "Sync thread: MMIO write unavailable ({}), will write MSR only",
+                e
+            );
             None
         }
     };
+    alive.store(true, Ordering::Release);
+    external_alive.store(true, Ordering::Release);
 
-    debug!("Sync thread started: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) mmio={}",
-        params.pl1_watts, params.pl1_time_s, params.pl2_watts, params.pl2_time_s,
-        mchbar_handle.is_some());
+    debug!(
+        "Sync thread started: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) mmio={}",
+        params.pl1_watts,
+        params.pl1_time_s,
+        params.pl2_watts,
+        params.pl2_time_s,
+        mchbar_handle.is_some()
+    );
 
     // Track consecutive failures; keep retrying despite overrides.
     let mut write_failures: u32 = 0;
@@ -842,7 +1023,10 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
                 if write_failures <= 5 {
                     warn!("Sync thread MSR write failed: {}", e);
                 } else if write_failures == 6 {
-                    warn!("Sync thread MSR write keeps failing ({}), suppressing further warnings", e);
+                    warn!(
+                        "Sync thread MSR write keeps failing ({}), suppressing further warnings",
+                        e
+                    );
                 }
             }
         }
@@ -856,7 +1040,10 @@ fn sync_thread_main(running: Arc<AtomicBool>, params: PowerLimitParams) {
                     if mmio_write_failures <= 5 {
                         warn!("Sync thread MMIO write failed: {}", e);
                     } else if mmio_write_failures == 6 {
-                        warn!("Sync thread MMIO write keeps failing ({}), suppressing further warnings", e);
+                        warn!(
+                            "Sync thread MMIO write keeps failing ({}), suppressing further warnings",
+                            e
+                        );
                     }
                 }
             }
@@ -945,7 +1132,8 @@ pub fn publish_ac_snapshot(ac_present: bool) {
     }
 }
 
-fn load_persisted_bios_defaults() -> Option<BiosDefaults> {    let path = bios_defaults_path().ok()?;
+fn load_persisted_bios_defaults() -> Option<BiosDefaults> {
+    let path = bios_defaults_path().ok()?;
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         // Missing file: first run.
@@ -955,10 +1143,8 @@ fn load_persisted_bios_defaults() -> Option<BiosDefaults> {    let path = bios_d
         Ok(parsed) => Some(parsed),
         Err(e) => {
             // Corrupt file: back up and refuse to overwrite.
-            let backup = path.with_extension(format!(
-                "toml.corrupt-{}",
-                crate::util::current_time_ms()
-            ));
+            let backup =
+                path.with_extension(format!("toml.corrupt-{}", crate::util::current_time_ms()));
             match std::fs::copy(&path, &backup) {
                 Ok(_) => warn!(
                     "bios_defaults.toml is corrupt ({}); backed up to {} — NOT overwriting with live values. Delete the file to re-capture.",
@@ -994,9 +1180,21 @@ fn persist_bios_defaults(defaults: &BiosDefaults) -> Result<(), String> {
         use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
         const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
         const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-        let tmp_w: Vec<u16> = OsStr::new(&tmp).encode_wide().chain(std::iter::once(0)).collect();
-        let dst_w: Vec<u16> = OsStr::new(&path).encode_wide().chain(std::iter::once(0)).collect();
-        let ok = unsafe { MoveFileExW(tmp_w.as_ptr(), dst_w.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
+        let tmp_w: Vec<u16> = OsStr::new(&tmp)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let dst_w: Vec<u16> = OsStr::new(&path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let ok = unsafe {
+            MoveFileExW(
+                tmp_w.as_ptr(),
+                dst_w.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
         if ok != 0 {
             Ok(())
         } else {
@@ -1027,7 +1225,9 @@ pub struct CpuPowerState {
     sync_thread: Arc<parking_lot::Mutex<SyncThread>>,
     /// Outside mutex so liveness check never blocks on join.
     sync_alive: Arc<AtomicBool>,
+    sync_start_ms: Arc<std::sync::atomic::AtomicU64>,
     bios: Arc<parking_lot::RwLock<Arc<Option<BiosDefaults>>>>,
+    desired_sync: Arc<parking_lot::RwLock<Option<PowerLimitParams>>>,
 }
 
 impl Default for CpuPowerState {
@@ -1038,7 +1238,9 @@ impl Default for CpuPowerState {
             sync_enabled: Arc::new(AtomicBool::new(false)),
             sync_thread: Arc::new(parking_lot::Mutex::new(SyncThread::new())),
             sync_alive: Arc::new(AtomicBool::new(false)),
+            sync_start_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             bios: Arc::new(parking_lot::RwLock::new(Arc::new(None))),
+            desired_sync: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 }
@@ -1070,17 +1272,26 @@ impl CpuPowerState {
             with_write_lock(&self.bios, |guard| {
                 *guard = Arc::new(Some(persisted));
             });
-            info!("Loaded persisted BIOS defaults: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s)",
-                persisted.pl1_watts, persisted.pl1_time_s, persisted.pl2_watts, persisted.pl2_time_s);
+            info!(
+                "Loaded persisted BIOS defaults: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s)",
+                persisted.pl1_watts,
+                persisted.pl1_time_s,
+                persisted.pl2_watts,
+                persisted.pl2_time_s
+            );
             return;
         }
         // If file exists but corrupt, do not overwrite; already backed up.
         if bios_defaults_file_exists() {
-            warn!("bios_defaults.toml exists but could not be loaded; refusing to overwrite with live values");
+            warn!(
+                "bios_defaults.toml exists but could not be loaded; refusing to overwrite with live values"
+            );
             return;
         }
         let info = self.snapshot();
-        if !info.available { return; }
+        if !info.available {
+            return;
+        }
         // Record power source to prevent cross-source restore on resume.
         let captured_on_ac = read_ac_present();
         let defaults = BiosDefaults {
@@ -1107,14 +1318,18 @@ impl CpuPowerState {
         if let Err(e) = persist_bios_defaults(&defaults) {
             warn!("Failed to persist BIOS defaults: {}", e);
         } else {
-            info!("Persisted original BIOS defaults: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s)",
-                defaults.pl1_watts, defaults.pl1_time_s, defaults.pl2_watts, defaults.pl2_time_s);
+            info!(
+                "Persisted original BIOS defaults: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s)",
+                defaults.pl1_watts, defaults.pl1_time_s, defaults.pl2_watts, defaults.pl2_time_s
+            );
         }
         with_write_lock(&self.bios, |guard| {
             *guard = Arc::new(Some(defaults));
         });
-        info!("BIOS defaults captured: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s)",
-            defaults.pl1_watts, defaults.pl1_time_s, defaults.pl2_watts, defaults.pl2_time_s);
+        info!(
+            "BIOS defaults captured: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s)",
+            defaults.pl1_watts, defaults.pl1_time_s, defaults.pl2_watts, defaults.pl2_time_s
+        );
     }
 
     /// Returns BIOS defaults captured at startup.
@@ -1164,14 +1379,33 @@ impl CpuPowerState {
         }
         let mut thread = self.sync_thread.lock();
         thread.start(params, Arc::clone(&self.sync_alive))?;
-        self.sync_alive.store(true, Ordering::Release);
         self.sync_enabled.store(true, Ordering::Release);
+        self.sync_start_ms
+            .store(crate::util::monotonic_ms(), Ordering::Release);
+        *self.desired_sync.write() = Some(params);
+        // liveness will be set by the thread after successful handle init (startup handshake)
         Ok(())
     }
 
     /// Checks if sync thread is still alive (lock-free).
     pub fn is_sync_alive(&self) -> bool {
         self.sync_alive.load(Ordering::Acquire)
+    }
+
+    /// Whether sync is considered dead, with startup grace period.
+    pub fn is_sync_dead(&self) -> bool {
+        if !self.sync_enabled.load(Ordering::Acquire) {
+            return false;
+        }
+        if self.sync_alive.load(Ordering::Acquire) {
+            return false;
+        }
+        let start = self.sync_start_ms.load(Ordering::Acquire);
+        // Grace period after start_sync before declaring dead (thread startup/handshake)
+        if start != 0 && crate::util::monotonic_ms().saturating_sub(start) < 1500 {
+            return false;
+        }
+        true
     }
 
     /// Stops sync thread.
@@ -1190,6 +1424,16 @@ impl CpuPowerState {
         }
         self.sync_alive.store(false, Ordering::Release);
         self.sync_enabled.store(false, Ordering::Release);
+        // Keep desired_sync for resume restore; only clear on explicit stop? keep until next start.
+    }
+
+    pub(crate) fn desired_sync_params(&self) -> Option<PowerLimitParams> {
+        *self.desired_sync.read()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn clear_desired_sync(&self) {
+        *self.desired_sync.write() = None;
     }
 }
 
@@ -1200,7 +1444,9 @@ static PAWNIO_VERSION: parking_lot::RwLock<Option<String>> = parking_lot::RwLock
 fn fetch_pawnio_version_from_dll() -> Option<String> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
-    use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
 
     let path: Vec<u16> = std::ffi::OsStr::new(DLL_PATH)
         .encode_wide()
@@ -1231,7 +1477,8 @@ fn fetch_pawnio_version_from_dll() -> Option<String> {
             root.as_ptr(),
             &mut ffi_ptr,
             &mut ffi_len,
-        ) == 0 || ffi_ptr.is_null()
+        ) == 0
+            || ffi_ptr.is_null()
         {
             return None;
         }
@@ -1361,7 +1608,10 @@ mod tests {
         let loaded = load_persisted_bios_defaults().expect("should load persisted");
         assert_eq!(defaults, loaded);
         // Second persist should overwrite (but init_bios_defaults would not call it if already loaded)
-        let defaults2 = BiosDefaults { pl1_watts: 99.0, ..defaults };
+        let defaults2 = BiosDefaults {
+            pl1_watts: 99.0,
+            ..defaults
+        };
         persist_bios_defaults(&defaults2).unwrap();
         let loaded2 = load_persisted_bios_defaults().unwrap();
         assert_eq!(loaded2.pl1_watts, 99.0);
@@ -1372,5 +1622,38 @@ mod tests {
                 std::env::remove_var("FRAMEWORK_CONTROL_CONFIG_DIR");
             }
         }
+    }
+
+    #[test]
+    fn effective_limit_ignores_disabled() {
+        // MSR disabled, MMIO enabled -> effective is MMIO
+        assert_eq!(effective_limit(15.0, false, 20.0, true), 20.0);
+        // MSR enabled 15, MMIO disabled 10 -> effective is MSR
+        assert_eq!(effective_limit(15.0, true, 10.0, false), 15.0);
+        // Both enabled, lower wins
+        assert_eq!(effective_limit(20.0, true, 15.0, true), 15.0);
+        // Both disabled -> 0
+        assert_eq!(effective_limit(10.0, false, 20.0, false), 0.0);
+        // Zero value with enabled is invalid
+        assert_eq!(effective_limit(0.0, true, 20.0, true), 20.0);
+    }
+
+    #[test]
+    fn cpu_power_info_effective_uses_enabled() {
+        let mut info = CpuPowerInfo {
+            pl1_msr: 15.0,
+            pl1_msr_enabled: false,
+            pl1_mmio: 20.0,
+            pl1_mmio_enabled: true,
+            pl2_msr: 30.0,
+            pl2_msr_enabled: true,
+            pl2_mmio: 25.0,
+            pl2_mmio_enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(info.effective_pl1(), 20.0);
+        assert_eq!(info.effective_pl2(), 25.0);
+        info.pl1_msr_enabled = true;
+        assert_eq!(info.effective_pl1(), 15.0);
     }
 }

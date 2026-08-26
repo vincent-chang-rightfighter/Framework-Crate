@@ -1,7 +1,7 @@
 use crate::types::Config;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Serializes config writes so only one writer persists at a time.
 static CONFIG_SAVE_LOCK: Mutex<()> = Mutex::new(());
@@ -29,8 +29,13 @@ pub fn config_path() -> Result<PathBuf, String> {
     {
         let mut guard = CONFIG_DIR_CREATED.lock().unwrap_or_else(|e| e.into_inner());
         if guard.as_ref() != Some(&config_dir) {
-            std::fs::create_dir_all(&config_dir)
-                .map_err(|e| format!("Failed to create config directory {}: {}", config_dir.display(), e))?;
+            std::fs::create_dir_all(&config_dir).map_err(|e| {
+                format!(
+                    "Failed to create config directory {}: {}",
+                    config_dir.display(),
+                    e
+                )
+            })?;
             *guard = Some(config_dir.clone());
         }
     }
@@ -101,10 +106,16 @@ pub fn load() -> Result<Config, String> {
 
 /// Skips write if newer version already persisted; check is under lock to avoid shutdown race.
 pub fn save_versioned(config: &Config, ver: u64, sync: bool) -> Result<(), String> {
-    let _guard = CONFIG_SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = CONFIG_SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let newest = LAST_SAVED_VERSION.load(Ordering::SeqCst);
     if ver < newest {
-        tracing::debug!("Skipping config save v{} (v{} already on disk)", ver, newest);
+        tracing::debug!(
+            "Skipping config save v{} (v{} already on disk)",
+            ver,
+            newest
+        );
         return Ok(());
     }
     let result = save_impl(config, sync);
@@ -155,10 +166,13 @@ fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
     );
     use std::io::Write;
     let result = (|| {
-        let mut f = std::fs::File::create(&tmp_path).map_err(|e| format!("create tmp failed: {}", e))?;
-        f.write_all(content.as_bytes()).map_err(|e| format!("write tmp failed: {}", e))?;
+        let mut f =
+            std::fs::File::create(&tmp_path).map_err(|e| format!("create tmp failed: {}", e))?;
+        f.write_all(content.as_bytes())
+            .map_err(|e| format!("write tmp failed: {}", e))?;
         if sync {
-            f.sync_all().map_err(|e| format!("sync tmp failed: {}", e))?;
+            f.sync_all()
+                .map_err(|e| format!("sync tmp failed: {}", e))?;
         }
         drop(f);
         atomic_replace(&tmp_path, &path, sync)
@@ -173,15 +187,21 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path, sync: bool) -> 
     // Windows rename fails if dest exists; use MoveFileExW for atomic replace.
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
         use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
 
         const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
         const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
 
-        let tmp_wide: Vec<u16> = OsStr::new(tmp).encode_wide().chain(std::iter::once(0)).collect();
-        let dest_wide: Vec<u16> = OsStr::new(dest).encode_wide().chain(std::iter::once(0)).collect();
+        let tmp_wide: Vec<u16> = OsStr::new(tmp)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let dest_wide: Vec<u16> = OsStr::new(dest)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
         // SAFETY: Paths are null-terminated UTF-16; tmp and dest share directory so replace is atomic. Use WRITE_THROUGH only when sync is required.
         let flags = if sync {
@@ -209,7 +229,12 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path, sync: bool) -> 
                 if bak.exists()
                     && let Err(restore_err) = std::fs::copy(&bak, dest)
                 {
-                    tracing::warn!("Failed to restore config backup {:?} → {:?}: {}", bak, dest, restore_err);
+                    tracing::warn!(
+                        "Failed to restore config backup {:?} → {:?}: {}",
+                        bak,
+                        dest,
+                        restore_err
+                    );
                 }
                 Err(format!("rename failed: {}", e))
             }
@@ -297,7 +322,10 @@ mod tests {
         cfg.fan.mode = FanControlMode::Manual;
         cfg.fan.manual = Some(ManualConfig { duty_pct: 75 });
         cfg.telemetry.poll_ms = 1000;
-        cfg.battery.charge_limit_max_pct = Some(SettingU8 { enabled: true, value: 80 });
+        cfg.battery.charge_limit_max_pct = Some(SettingU8 {
+            enabled: true,
+            value: 80,
+        });
 
         // Serialize with header as save does.
         let body = toml::to_string_pretty(&cfg).unwrap();

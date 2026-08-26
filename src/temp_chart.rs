@@ -53,8 +53,9 @@ impl ThermalHistory {
     /// Update retention window and prune old samples.
     pub fn set_window(&mut self, window_seconds: i64) {
         self.window_ms = (window_seconds * 1_000).clamp(5_000, HISTORY_MAX_MS);
+        // Retain up to max window so switching from 30s to 60s shows history.
         let now = crate::util::monotonic_ms() as i64;
-        let cutoff = now - self.window_ms;
+        let cutoff = now - HISTORY_MAX_MS;
         while let Some(front) = self.draft.front() {
             if front.ts_ms < cutoff {
                 self.draft.pop_front();
@@ -64,12 +65,12 @@ impl ThermalHistory {
         }
     }
 
-    /// Push sample and prune entries outside window.
+    /// Push sample and prune entries outside retention (max window) to allow window switches.
     pub fn push_sample(&mut self, sample: TempSample, now_ms: i64) {
         self.draft.push_back(sample);
-        let cutoff = now_ms - self.window_ms;
+        let cutoff = now_ms - HISTORY_MAX_MS;
         while let Some(front) = self.draft.front() {
-            if front.ts_ms <= cutoff {
+            if front.ts_ms < cutoff {
                 self.draft.pop_front();
             } else {
                 break;
@@ -131,7 +132,13 @@ impl Default for TempChartState {
     fn default() -> Self {
         Self {
             cache: OnceCell::new(),
-            cached_key: Cell::new((std::ptr::null::<()>(), 0, std::ptr::null::<()>(), std::ptr::null::<()>(), 0)),
+            cached_key: Cell::new((
+                std::ptr::null::<()>(),
+                0,
+                std::ptr::null::<()>(),
+                std::ptr::null::<()>(),
+                0,
+            )),
             points_buf: std::cell::RefCell::new(Vec::new()),
         }
     }
@@ -315,14 +322,17 @@ fn draw_temp_chart_contents(
         };
 
         points_buf.clear();
-        points_buf.extend(samples.iter()
-            .filter(|s| s.ts_ms >= start_ms)
-            .filter_map(|s| {
-                let temp = *s.temps.get(sensor_name)? as f32;
-                let t_ratio = (s.ts_ms - start_ms) as f32 / (now_ms - start_ms).max(1) as f32;
-                let clamped = temp.clamp(TEMP_MIN, TEMP_MAX);
-                Some((t_ratio, clamped))
-            }));
+        points_buf.extend(
+            samples
+                .iter()
+                .filter(|s| s.ts_ms >= start_ms)
+                .filter_map(|s| {
+                    let temp = *s.temps.get(sensor_name)? as f32;
+                    let t_ratio = (s.ts_ms - start_ms) as f32 / (now_ms - start_ms).max(1) as f32;
+                    let clamped = temp.clamp(TEMP_MIN, TEMP_MAX);
+                    Some((t_ratio, clamped))
+                }),
+        );
 
         if points_buf.len() >= 2 {
             let path = iced::widget::canvas::Path::new(|b| {
@@ -378,12 +388,16 @@ mod tests {
     #[test]
     fn push_sample_prunes_expired_entries() {
         let mut h = ThermalHistory::new();
-        let now = 100_000i64;
-        h.push_sample(sample(now - 100_000), now);
+        let now = 500_000i64;
+        h.push_sample(sample(now - 400_000), now);
         h.push_sample(sample(now - 20_000), now);
         h.push_sample(sample(now - 10_000), now);
         h.push_sample(sample(now), now);
-        assert_eq!(h.draft.len(), 3, "expired entry should be pruned");
+        assert_eq!(
+            h.draft.len(),
+            3,
+            "expired entry beyond 300s retention should be pruned"
+        );
         assert_eq!(h.draft.front().unwrap().ts_ms, now - 20_000);
     }
 
@@ -417,7 +431,41 @@ mod tests {
         let snap1 = h.snapshot(now);
         h.push_sample(sample(now + 1_500), now + 1_500);
         let snap2 = h.snapshot(now + 1_500);
-        assert!(!Arc::ptr_eq(&snap1, &snap2), "should republish after interval");
+        assert!(
+            !Arc::ptr_eq(&snap1, &snap2),
+            "should republish after interval"
+        );
         assert_eq!(snap2.len(), 2);
+    }
+
+    #[test]
+    fn set_window_retains_up_to_300s() {
+        let mut h = ThermalHistory::new();
+        let now = 500_000i64;
+        // Fill with samples spanning 200s (<300s retention)
+        h.push_sample(sample(now - 200_000), now - 200_000);
+        h.push_sample(sample(now - 100_000), now - 100_000);
+        h.push_sample(sample(now), now);
+        // Switch window from 30s to 60s should not prune 200s-old entry (within 300s)
+        h.set_window(60);
+        assert_eq!(h.draft.len(), 3);
+        // Push with far future prunes beyond 300s
+        h.push_sample(sample(now + 150_000), now + 150_000);
+        // Oldest (now-200k) is now 350k old relative to new now, should be pruned
+        assert_eq!(h.draft.len(), 3);
+    }
+
+    #[test]
+    fn set_window_clamps_and_prunes() {
+        let mut h = ThermalHistory::new();
+        let now = 500_000i64;
+        h.push_sample(sample(now), now);
+        h.set_window(15);
+        assert_eq!(h.window_ms, 15_000);
+        h.set_window(60);
+        assert_eq!(h.window_ms, 60_000);
+        // Very large window clamps to 300s
+        h.set_window(1000);
+        assert_eq!(h.window_ms, HISTORY_MAX_MS);
     }
 }

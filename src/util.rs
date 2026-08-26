@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::sync::Arc;
 
 /// Clones inner Arc under read lock.
 pub fn read_lock<T>(lock: &Arc<RwLock<Arc<T>>>) -> Arc<T> {
@@ -7,10 +7,7 @@ pub fn read_lock<T>(lock: &Arc<RwLock<Arc<T>>>) -> Arc<T> {
 }
 
 /// Executes closure under write lock on Arc<RwLock<Arc<T>>>.
-pub fn with_write_lock<T, R>(
-    lock: &Arc<RwLock<Arc<T>>>,
-    f: impl FnOnce(&mut Arc<T>) -> R,
-) -> R {
+pub fn with_write_lock<T, R>(lock: &Arc<RwLock<Arc<T>>>, f: impl FnOnce(&mut Arc<T>) -> R) -> R {
     f(&mut lock.write())
 }
 
@@ -27,6 +24,25 @@ pub fn monotonic_ms() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     let start = *START.get_or_init(std::time::Instant::now);
     start.elapsed().as_millis() as u64
+}
+
+/// Global serialized EC write mutex to prevent out-of-order hardware writes.
+pub fn ec_write_mutex() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Serialized CPU power operation mutex to prevent concurrent Apply/Reset/Sync races.
+pub fn cpu_power_mutex() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Generation counter for coalescing rapid EC slider writes (e.g. kblight).
+#[allow(dead_code)]
+pub fn next_ec_generation() -> u64 {
+    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
 #[cfg(test)]

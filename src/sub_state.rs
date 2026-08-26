@@ -2,12 +2,12 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
-use smallvec::SmallVec;
 use parking_lot::RwLock;
+use smallvec::SmallVec;
 
 use crate::cli;
 use crate::temp_chart;
-use crate::types::{Config, BatteryInfo};
+use crate::types::{BatteryInfo, Config};
 use crate::util::{read_lock, with_write_lock};
 
 pub type PdPortsHistory = VecDeque<Arc<SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>>;
@@ -44,6 +44,7 @@ pub struct ThermalState {
     pub data: Arc<RwLock<Arc<Option<cli::ec_wrapper::ThermalData>>>>,
     pub history: Arc<RwLock<Arc<temp_chart::ThermalHistory>>>,
     pub sensor_cache: Arc<RwLock<Arc<crate::app::SensorCache>>>,
+    pub last_success_ms: Arc<AtomicU64>,
 }
 
 impl Default for ThermalState {
@@ -52,6 +53,7 @@ impl Default for ThermalState {
             data: Arc::new(RwLock::new(Arc::new(None))),
             history: Arc::new(RwLock::new(Arc::new(temp_chart::ThermalHistory::new()))),
             sensor_cache: Arc::new(RwLock::new(Arc::new(crate::app::SensorCache::default()))),
+            last_success_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -67,9 +69,7 @@ impl ThermalState {
         ThermalSnapshot {
             data: Arc::clone(&read_lock(&self.data)),
             sensor_cache: Arc::clone(&read_lock(&self.sensor_cache)),
-            temp_history: with_write_lock(&self.history, |h| {
-                Arc::make_mut(h).snapshot(now_ms)
-            }),
+            temp_history: with_write_lock(&self.history, |h| Arc::make_mut(h).snapshot(now_ms)),
         }
     }
 }
@@ -121,6 +121,7 @@ pub struct BatteryState {
     pub info: Arc<RwLock<Arc<Option<BatteryInfo>>>>,
     /// NOTE: Tracks AC→battery transitions.
     pub prev_ac_present: Arc<AtomicBool>,
+    pub last_success_ms: Arc<AtomicU64>,
 }
 
 impl Default for BatteryState {
@@ -128,6 +129,7 @@ impl Default for BatteryState {
         Self {
             info: Arc::new(RwLock::new(Arc::new(None))),
             prev_ac_present: Arc::new(AtomicBool::new(true)),
+            last_success_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -150,7 +152,9 @@ impl Default for SystemState {
             ec_client: Arc::new(RwLock::new(Arc::new(None))),
             ec_init_done: Arc::new(AtomicBool::new(false)),
             versions: Arc::new(RwLock::new(Arc::new(None))),
-            platform: Arc::new(RwLock::new(Arc::new(cli::ec_wrapper::PlatformFamily::Unknown))),
+            platform: Arc::new(RwLock::new(Arc::new(
+                cli::ec_wrapper::PlatformFamily::Unknown,
+            ))),
             intel_cpu: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -165,9 +169,11 @@ pub struct LifecycleState {
     pub last_interaction_ts: Arc<AtomicU64>,
     pub bg_config_save_failed: Arc<AtomicBool>,
     pub view_dirty: Arc<AtomicBool>,
+    pub view_generation: Arc<AtomicU64>,
     /// NOTE: Set on WM_POWERBROADCAST resume; triggers EC client reset.
     pub last_resume_ts: Arc<AtomicU64>,
     pub pl_reset_pending: Arc<AtomicBool>,
+    pub fan_reset_pending: Arc<AtomicBool>,
 }
 
 impl Default for LifecycleState {
@@ -180,8 +186,10 @@ impl Default for LifecycleState {
             last_interaction_ts: Arc::new(AtomicU64::new(0)),
             bg_config_save_failed: Arc::new(AtomicBool::new(false)),
             view_dirty: Arc::new(AtomicBool::new(true)),
+            view_generation: Arc::new(AtomicU64::new(1)),
             last_resume_ts: Arc::new(AtomicU64::new(0)),
             pl_reset_pending: Arc::new(AtomicBool::new(false)),
+            fan_reset_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
 use iced::advanced::widget::{Operation, Tree};
-use iced::advanced::{mouse, overlay, Clipboard, Shell, Widget};
+use iced::advanced::{Clipboard, Shell, Widget, mouse, overlay};
 use iced::{Element, Event, Length, Rectangle, Size, Vector};
 use parking_lot::Mutex;
 
@@ -30,9 +30,7 @@ impl<'a, Message: Clone + 'a> HeightProbe<'a, Message> {
     }
 }
 
-impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer>
-    for HeightProbe<'a, Message>
-{
+impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for HeightProbe<'a, Message> {
     fn children(&self) -> Vec<Tree> {
         vec![Tree::new(self.content.as_widget())]
     }
@@ -70,7 +68,9 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer>
         viewport: &Rectangle,
     ) {
         if let Some(child) = tree.children.first() {
-            self.content.as_widget().draw(child, renderer, theme, style, layout, cursor, viewport);
+            self.content
+                .as_widget()
+                .draw(child, renderer, theme, style, layout, cursor, viewport);
         }
     }
 
@@ -101,7 +101,10 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer>
         renderer: &iced::Renderer,
     ) -> mouse::Interaction {
         if let Some(child) = tree.children.first() {
-            return self.content.as_widget().mouse_interaction(child, layout, cursor, viewport, renderer);
+            return self
+                .content
+                .as_widget()
+                .mouse_interaction(child, layout, cursor, viewport, renderer);
         }
         mouse::Interaction::default()
     }
@@ -114,7 +117,9 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer>
         operation: &mut dyn Operation,
     ) {
         if let Some(child) = tree.children.first_mut() {
-            self.content.as_widget_mut().operate(child, layout, renderer, operation);
+            self.content
+                .as_widget_mut()
+                .operate(child, layout, renderer, operation);
         }
     }
 
@@ -127,6 +132,8 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer>
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, iced::Theme, iced::Renderer>> {
         let child = tree.children.first_mut()?;
-        self.content.as_widget_mut().overlay(child, layout, renderer, viewport, translation)
+        self.content
+            .as_widget_mut()
+            .overlay(child, layout, renderer, viewport, translation)
     }
 }

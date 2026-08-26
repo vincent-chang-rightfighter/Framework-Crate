@@ -5,9 +5,9 @@ use tokio::sync::watch;
 use tracing::warn;
 
 use crate::app::AppState;
-use crate::util::read_lock;
 use crate::background_task::pin_to_slowest_core;
 use crate::types::{Config, SettingU8};
+use crate::util::read_lock;
 
 /// Debounce window to coalesce rapid slider changes.
 const DEBOUNCE_MS: u64 = 100;
@@ -44,8 +44,12 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
     if let Some(ref limit) = cfg.battery.charge_limit_max_pct {
         let pct = if limit.enabled { limit.value } else { 100 };
         let ec_clone = ec.clone();
+        let _guard = crate::util::ec_write_mutex().lock().await;
         // min_pct=0: EC ignores software minimum; hardware enforces ~25%.
-        if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.charge_limit_set(0, pct)).await.unwrap_or_else(|e| Err(format!("spawn error: {}", e))) {
+        if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.charge_limit_set(0, pct))
+            .await
+            .unwrap_or_else(|e| Err(format!("spawn error: {}", e)))
+        {
             warn!("Failed to set charge limit: {}", e);
             return false;
         }
@@ -87,15 +91,16 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
             } else {
                 config_rx.changed().await
             };
-            if changed.is_err() { break; }
+            if changed.is_err() {
+                break;
+            }
 
             // Drain rapid changes within debounce window.
             let mut latest = config_rx.borrow().clone();
             loop {
-                match tokio::time::timeout(
-                    Duration::from_millis(DEBOUNCE_MS),
-                    config_rx.changed(),
-                ).await {
+                match tokio::time::timeout(Duration::from_millis(DEBOUNCE_MS), config_rx.changed())
+                    .await
+                {
                     Ok(Ok(())) => {
                         latest = config_rx.borrow().clone();
                     }
@@ -108,7 +113,9 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
                                 warn!("Failed to save config on channel close: {}", e);
                                 save_failed.store(true, Ordering::Relaxed);
                             }
-                        }).await.unwrap_or_else(|e| warn!("config save task panicked: {}", e));
+                        })
+                        .await
+                        .unwrap_or_else(|e| warn!("config save task panicked: {}", e));
                         return;
                     }
                     Err(_) => {
@@ -129,7 +136,9 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
                 } else {
                     save_failed.store(false, Ordering::Relaxed);
                 }
-            }).await.unwrap_or_else(|e| warn!("config save task panicked: {}", e));
+            })
+            .await
+            .unwrap_or_else(|e| warn!("config save task panicked: {}", e));
 
             let key = battery_key(&cfg_for_battery);
             if last_battery.as_ref() != Some(&key) {
@@ -161,18 +170,33 @@ mod tests {
     #[test]
     fn battery_key_with_limit() {
         let mut cfg = default_config();
-        cfg.battery.charge_limit_max_pct = Some(SettingU8 { enabled: true, value: 80 });
+        cfg.battery.charge_limit_max_pct = Some(SettingU8 {
+            enabled: true,
+            value: 80,
+        });
         let key = battery_key(&cfg);
-        assert_eq!(key, Some(SettingU8 { enabled: true, value: 80 }));
+        assert_eq!(
+            key,
+            Some(SettingU8 {
+                enabled: true,
+                value: 80
+            })
+        );
     }
 
     #[test]
     fn battery_key_equal_for_same_config() {
         let mut cfg1 = default_config();
-        cfg1.battery.charge_limit_max_pct = Some(SettingU8 { enabled: true, value: 75 });
+        cfg1.battery.charge_limit_max_pct = Some(SettingU8 {
+            enabled: true,
+            value: 75,
+        });
 
         let mut cfg2 = default_config();
-        cfg2.battery.charge_limit_max_pct = Some(SettingU8 { enabled: true, value: 75 });
+        cfg2.battery.charge_limit_max_pct = Some(SettingU8 {
+            enabled: true,
+            value: 75,
+        });
 
         assert_eq!(battery_key(&cfg1), battery_key(&cfg2));
     }
@@ -180,10 +204,16 @@ mod tests {
     #[test]
     fn battery_key_different_when_limit_differs() {
         let mut cfg1 = default_config();
-        cfg1.battery.charge_limit_max_pct = Some(SettingU8 { enabled: true, value: 75 });
+        cfg1.battery.charge_limit_max_pct = Some(SettingU8 {
+            enabled: true,
+            value: 75,
+        });
 
         let mut cfg2 = default_config();
-        cfg2.battery.charge_limit_max_pct = Some(SettingU8 { enabled: true, value: 80 });
+        cfg2.battery.charge_limit_max_pct = Some(SettingU8 {
+            enabled: true,
+            value: 80,
+        });
 
         assert_ne!(battery_key(&cfg1), battery_key(&cfg2));
     }

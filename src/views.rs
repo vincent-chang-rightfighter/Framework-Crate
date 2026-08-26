@@ -1,12 +1,12 @@
 use crate::App;
 use crate::Message;
 use crate::cli;
-use crate::util::read_lock;
 use crate::style::*;
 use crate::types::FanControlMode;
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use crate::util::read_lock;
 use iced::widget::rule;
 use iced::widget::space;
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length};
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -68,52 +68,55 @@ impl ViewSnapshot {
             .as_ref()
             .map(|c| Arc::from(c.curve.points.as_slice()))
             .unwrap_or_else(|| Arc::from(Vec::<[u32; 2]>::new() as Vec<[u32; 2]>));
-        let curve_marks: Arc<Vec<crate::curve_canvas::SensorMark>> = if let Some(thermal) = thermal_snap.data.as_ref().as_ref() {
-            if let Some(curve) = config.fan.curve.as_ref() {
-            let keys = &thermal_snap.sensor_cache.keys;
-            let sensors: Vec<&str> = {
-                let configured: Vec<&str> = curve.curve.sensors.iter().map(|s| s.as_str()).collect();
-                let has_reading = configured.iter().any(|s| thermal.temps.contains_key(*s));
-                if has_reading {
-                    configured
+        let curve_marks: Arc<Vec<crate::curve_canvas::SensorMark>> =
+            if let Some(thermal) = thermal_snap.data.as_ref().as_ref() {
+                if let Some(curve) = config.fan.curve.as_ref() {
+                    let keys = &thermal_snap.sensor_cache.keys;
+                    let sensors: Vec<&str> = {
+                        let configured: Vec<&str> =
+                            curve.curve.sensors.iter().map(|s| s.as_str()).collect();
+                        let has_reading = configured.iter().any(|s| thermal.temps.contains_key(*s));
+                        if has_reading {
+                            configured
+                        } else {
+                            let mut best: Option<(&str, i32)> = None;
+                            for (name, t) in thermal.temps.iter() {
+                                let name: &str = name;
+                                if crate::types::is_battery_sensor(name) {
+                                    continue;
+                                }
+                                if best.is_none_or(|(_, bt)| *t > bt) {
+                                    best = Some((name, *t));
+                                }
+                            }
+                            if best.is_none() {
+                                best = thermal
+                                    .temps
+                                    .iter()
+                                    .max_by_key(|(_, t)| **t)
+                                    .map(|(name, t)| (name.as_str(), *t));
+                            }
+                            best.into_iter().map(|(n, _)| n).collect()
+                        }
+                    };
+                    let mut marks = Vec::new();
+                    for name in sensors {
+                        if let Some(t) = thermal.temps.get(name) {
+                            let idx = keys.iter().position(|k| k == name).unwrap_or(0);
+                            marks.push(crate::curve_canvas::SensorMark {
+                                temp: *t,
+                                color: crate::style::SENSOR_COLORS
+                                    [idx % crate::style::SENSOR_COLORS.len()],
+                            });
+                        }
+                    }
+                    Arc::new(marks)
                 } else {
-                    let mut best: Option<(&str, i32)> = None;
-                    for (name, t) in thermal.temps.iter() {
-                        let name: &str = name;
-                        if crate::types::is_battery_sensor(name) {
-                            continue;
-                        }
-                        if best.is_none_or(|(_, bt)| *t > bt) {
-                            best = Some((name, *t));
-                        }
-                    }
-                    if best.is_none() {
-                        best = thermal
-                            .temps
-                            .iter()
-                            .max_by_key(|(_, t)| **t)
-                            .map(|(name, t)| (name.as_str(), *t));
-                    }
-                    best.into_iter().map(|(n, _)| n).collect()
+                    Arc::new(Vec::new())
                 }
-            };
-            let mut marks = Vec::new();
-            for name in sensors {
-                if let Some(t) = thermal.temps.get(name) {
-                    let idx = keys.iter().position(|k| k == name).unwrap_or(0);
-                    marks.push(crate::curve_canvas::SensorMark {
-                        temp: *t,
-                        color: crate::style::SENSOR_COLORS[idx % crate::style::SENSOR_COLORS.len()],
-                    });
-                }
-            }
-            Arc::new(marks)
             } else {
                 Arc::new(Vec::new())
-            }
-        } else {
-            Arc::new(Vec::new())
-        };
+            };
         Self {
             thermal: thermal_snap.data,
             config,
@@ -159,14 +162,21 @@ fn warning_banner(msg: String) -> Element<'static, Message> {
             colored_dot(iced::Color::from_rgb(0.9, 0.6, 0.0), 8.0),
             text(msg).size(FONT_BODY),
             space::horizontal(),
-            button(text("Dismiss").size(FONT_SMALL)).on_press(Message::DismissConfigWarning).style(btn_style),
-        ].align_y(iced::Alignment::Center).spacing(8)
+            button(text("Dismiss").size(FONT_SMALL))
+                .on_press(Message::DismissConfigWarning)
+                .style(btn_style),
+        ]
+        .align_y(iced::Alignment::Center)
+        .spacing(8),
     )
     .padding(iced::Padding::from([6, 12]))
     .width(Length::Fill)
     .style(|_theme| iced::widget::container::Style {
         background: Some(iced::Color::from_rgba(0.9, 0.6, 0.0, 0.15).into()),
-        border: iced::Border::default().rounded(4).width(1).color(iced::Color::from_rgb(0.9, 0.6, 0.0)),
+        border: iced::Border::default()
+            .rounded(4)
+            .width(1)
+            .color(iced::Color::from_rgb(0.9, 0.6, 0.0)),
         ..Default::default()
     })
     .into()
@@ -175,9 +185,18 @@ fn warning_banner(msg: String) -> Element<'static, Message> {
 fn not_supported_section(title: &str) -> Element<'_, Message> {
     container(
         column![
-            text(title).size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_NOT_SUPPORTED_TEXT) }),
-            text("Not Supported").size(FONT_BODY).style(|_theme| iced::widget::text::Style { color: Some(COLOR_NOT_SUPPORTED_TEXT) }),
-        ].spacing(4)
+            text(title)
+                .size(FONT_SECTION)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_NOT_SUPPORTED_TEXT)
+                }),
+            text("Not Supported")
+                .size(FONT_BODY)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_NOT_SUPPORTED_TEXT)
+                }),
+        ]
+        .spacing(4),
     )
     .padding(iced::Padding::from([8, 12]))
     .width(Length::Fill)
@@ -196,7 +215,8 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
         content = content.push(rule::horizontal(1));
         content = content.push(text(err.as_str()).size(FONT_BODY));
         content = content.push(rule::horizontal(1));
-        content = content.push(text("Close this window and run the app as administrator.").size(FONT_BODY));
+        content = content
+            .push(text("Close this window and run the app as administrator.").size(FONT_BODY));
         return container(content)
             .center_x(Length::Fill)
             .center_y(Length::Fill)
@@ -208,7 +228,9 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
             text("Framework Crate").size(20),
             rule::horizontal(1),
             text("Connecting to hardware...").size(FONT_BODY),
-        ].spacing(8).padding(20);
+        ]
+        .spacing(8)
+        .padding(20);
         return container(content)
             .center_x(Length::Fill)
             .center_y(Length::Fill)
@@ -235,24 +257,32 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
 
     let header = view_header(app);
     let config_warning = if app.config_save_failed {
-        Some(warning_banner("Config save failed - changes may not persist after restart".to_string()))
+        Some(warning_banner(
+            "Config save failed - changes may not persist after restart".to_string(),
+        ))
     } else {
-        app.config_load_warning.as_ref().map(|msg| warning_banner(format!("Config load failed (using defaults): {}", msg)))
+        app.config_load_warning
+            .as_ref()
+            .map(|msg| warning_banner(format!("Config load failed (using defaults): {}", msg)))
     };
     let cli_warning = if app.init_complete && !app.cli_present {
-        Some(container(
-            row![
-                colored_dot(iced::Color::from_rgb(0.9, 0.3, 0.3), 8.0),
-                text("EC unavailable — hardware control disabled").size(FONT_BODY),
-            ].align_y(iced::Alignment::Center).spacing(8)
+        Some(
+            container(
+                row![
+                    colored_dot(iced::Color::from_rgb(0.9, 0.3, 0.3), 8.0),
+                    text("EC unavailable — hardware control disabled").size(FONT_BODY),
+                ]
+                .align_y(iced::Alignment::Center)
+                .spacing(8),
+            )
+            .padding(iced::Padding::from([6, 12]))
+            .width(Length::Fill)
+            .style(|_theme| iced::widget::container::Style {
+                background: Some(iced::Color::from_rgba(0.9, 0.2, 0.2, 0.1).into()),
+                border: iced::Border::default().rounded(4),
+                ..Default::default()
+            }),
         )
-        .padding(iced::Padding::from([6, 12]))
-        .width(Length::Fill)
-        .style(|_theme| iced::widget::container::Style {
-            background: Some(iced::Color::from_rgba(0.9, 0.2, 0.2, 0.1).into()),
-            border: iced::Border::default().rounded(4),
-            ..Default::default()
-        }))
     } else {
         None
     };
@@ -262,34 +292,51 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
                 card(view_fan_control(snap)),
                 card(cpu_power_section(snap)),
                 card(view_misc(snap)),
-            ].spacing(8)
-        ).padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 8.0 })
+            ]
+            .spacing(8),
+        )
+        .padding(iced::Padding {
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 8.0,
+        }),
     )
     // Reserve scrollbar strip to match left inset and avoid overlapping cards.
     .direction(scrollable::Direction::Vertical(
-        scrollable::Scrollbar::new().width(6.0).scroller_width(6.0).spacing(4.0)
+        scrollable::Scrollbar::new()
+            .width(6.0)
+            .scroller_width(6.0)
+            .spacing(4.0),
     ))
     .height(Length::Fill);
 
     let content = container(
         row![
             container(
-                column![
-                    card(view_sensors(app, snap)),
-                    card(view_battery(app, snap)),
-                ].width(Length::FillPortion(1)).spacing(8)
+                column![card(view_sensors(app, snap)), card(view_battery(app, snap)),]
+                    .width(Length::FillPortion(1))
+                    .spacing(8)
             )
             // Match right column inset for symmetric card alignment.
-            .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 })
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 10.0
+            })
             .width(Length::FillPortion(1)),
             right_column.width(Length::FillPortion(1)),
-        ].spacing(12)
-    ).padding(iced::Padding {
+        ]
+        .spacing(12),
+    )
+    .padding(iced::Padding {
         top: 4.0,
         right: 12.0,
         bottom: 12.0,
         left: 12.0,
-    }).width(Length::Fill);
+    })
+    .width(Length::Fill);
 
     let mut root = column![header].spacing(5);
     // Keep banner slot always present to preserve Tree state when warnings appear.
@@ -314,7 +361,8 @@ fn view_settings(app: &App) -> Element<'_, Message> {
     let title_row = row![
         text("About").size(20),
         space::horizontal(),
-        button(text("Close").size(FONT_BODY)).on_press(Message::SettingsToggled)
+        button(text("Close").size(FONT_BODY))
+            .on_press(Message::SettingsToggled)
             .style(btn_style),
     ];
 
@@ -361,7 +409,10 @@ fn view_settings(app: &App) -> Element<'_, Message> {
     if let Some(ref ver) = crate::cpu_power::pawnio_version() {
         sw_content = sw_content.push(info_row("PawnIO", ver));
     }
-    sw_content = sw_content.push(info_row("PawnIO Modules", crate::cpu_power::pawnio_modules_version()));
+    sw_content = sw_content.push(info_row(
+        "PawnIO Modules",
+        crate::cpu_power::pawnio_modules_version(),
+    ));
     if !app.system_info.os.is_empty() {
         sw_content = sw_content.push(info_row("OS", &app.system_info.os));
     }
@@ -371,24 +422,43 @@ fn view_settings(app: &App) -> Element<'_, Message> {
     let poll_ms = config.telemetry.poll_ms as u32;
     sw_content = sw_content.push(
         row![
-            iced::widget::slider(POLL_RATE_MIN_MS..=crate::types::POLL_MS_MAX as u32, poll_ms, |v| Message::PollRateChanged(v as u64)).step(10u32).style(slider_style),
+            iced::widget::slider(
+                POLL_RATE_MIN_MS..=crate::types::POLL_MS_MAX as u32,
+                poll_ms,
+                |v| Message::PollRateChanged(v as u64)
+            )
+            .step(10u32)
+            .style(slider_style),
             text(format!("{} ms", poll_ms)).size(FONT_BODY),
-        ].spacing(4)
+        ]
+        .spacing(4),
     );
 
     sw_content = sw_content.push(text("Refresh Interval:").size(FONT_BODY));
     let refresh_ms = config.telemetry.ui_refresh_ms as u32;
     sw_content = sw_content.push(
         row![
-            iced::widget::slider(crate::types::UI_REFRESH_MS_MIN as u32..=crate::types::UI_REFRESH_MS_MAX as u32, refresh_ms, |v| Message::UiRefreshRateChanged(v as u64)).step(50u32).style(slider_style),
+            iced::widget::slider(
+                crate::types::UI_REFRESH_MS_MIN as u32..=crate::types::UI_REFRESH_MS_MAX as u32,
+                refresh_ms,
+                |v| Message::UiRefreshRateChanged(v as u64)
+            )
+            .step(50u32)
+            .style(slider_style),
             text(format!("{} ms", refresh_ms)).size(FONT_BODY),
-        ].spacing(4)
+        ]
+        .spacing(4),
     );
 
     let startup_enabled = app.startup_launch_enabled;
     let startup_error = app.startup_launch_error.clone();
     let startup_err_el: Element<'_, Message> = if let Some(err) = startup_error {
-        text(err).size(FONT_SMALL).style(|_theme: &iced::Theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }).into()
+        text(err)
+            .size(FONT_SMALL)
+            .style(|_theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(COLOR_GRAY),
+            })
+            .into()
     } else {
         iced::widget::Space::new().into()
     };
@@ -399,7 +469,9 @@ fn view_settings(app: &App) -> Element<'_, Message> {
                 .on_press(Message::StartupLaunchToggled(!startup_enabled))
                 .style(move |_theme, _status| mode_style(startup_enabled)),
             startup_err_el,
-        ].spacing(8).align_y(iced::Alignment::Center)
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
     );
 
     let mut content = column![].spacing(12).padding(20);
@@ -414,7 +486,9 @@ fn view_settings(app: &App) -> Element<'_, Message> {
             button(text(if ec_debug { "ON" } else { "OFF" }).size(FONT_BODY))
                 .on_press(Message::ToggleExpansionCardDebug)
                 .style(move |_theme, _status| mode_style(ec_debug)),
-        ].spacing(8).align_y(iced::Alignment::Center)
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
     );
     content = content.push(
         row![
@@ -424,19 +498,45 @@ fn view_settings(app: &App) -> Element<'_, Message> {
             button(text("Project on GitHub").size(FONT_BODY))
                 .on_press(Message::OpenProjectUrl)
                 .style(btn_style),
-        ].spacing(8)
+        ]
+        .spacing(8),
     );
 
     content = content.push(space::vertical().height(8));
     content = content.push(
         column![
-            text("Framework Crate — MIT License").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
-            text("framework_lib — BSD-3-Clause").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
-            text("PawnIO (optional) — GPL-2.0").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
-            text("PawnIO Modules (optional) — LGPL-2.1").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
-            text("iced / tokio / tracing — MIT License").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
-            text("serde / windows-sys — MIT OR Apache-2.0").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
-        ].spacing(2)
+            text("Framework Crate — MIT License")
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_GRAY)
+                }),
+            text("framework_lib — BSD-3-Clause")
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_GRAY)
+                }),
+            text("PawnIO (optional) — GPL-2.0")
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_GRAY)
+                }),
+            text("PawnIO Modules (optional) — LGPL-2.1")
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_GRAY)
+                }),
+            text("iced / tokio / tracing — MIT License")
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_GRAY)
+                }),
+            text("serde / windows-sys — MIT OR Apache-2.0")
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_GRAY)
+                }),
+        ]
+        .spacing(2),
     );
 
     container(content)
@@ -453,33 +553,55 @@ fn view_quit_warning(app: &App) -> Element<'_, Message> {
     let mut content = column![].spacing(12).padding(20);
     content = content.push(text("Framework Crate").size(20));
     content = content.push(rule::horizontal(1));
-    let mode_label = match config.fan.mode {
-        FanControlMode::Curve => "Fan is in curve mode",
-        _ => "Fan is in manual mode",
+    let is_curve = config.fan.mode == FanControlMode::Curve;
+    let mode_label = if is_curve {
+        "Fan is in curve mode (temperature-controlled)"
+    } else {
+        "Fan is in manual mode"
     };
     content = content.push(text(mode_label).size(FONT_BODY));
     content = content.push(text(format!("Current duty: {}%", current_duty)).size(FONT_BODY));
     content = content.push(space::horizontal().height(4));
-    content = content.push(text("The fan will remain at its current speed after exiting.").size(FONT_BODY));
+    content = content.push(
+        text(if is_curve {
+            "Curve control will stop. Fan will be fixed to current duty."
+        } else {
+            "Manual control will stop. Fan will be fixed to current duty."
+        })
+        .size(FONT_BODY),
+    );
     content = content.push(text("Choose how to handle the fan before closing:").size(FONT_BODY));
     content = content.push(rule::horizontal(1));
 
-    content = content.push(iced::widget::row![
-        text("Set duty to:").size(FONT_BODY),
-        iced::widget::slider(0..=100, set_duty, Message::QuitDutyChanged).style(slider_style),
-        text(format!("{}%", set_duty)).size(FONT_BODY),
-    ].spacing(4).align_y(iced::Alignment::Center));
+    content = content.push(
+        iced::widget::row![
+            text("Set duty to:").size(FONT_BODY),
+            iced::widget::slider(0..=100, set_duty, Message::QuitDutyChanged).style(slider_style),
+            text(format!("{}%", set_duty)).size(FONT_BODY),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center),
+    );
 
-    content = content.push(iced::widget::row![
-        iced::widget::button(text("Restore Auto & Exit").size(14)).on_press(Message::QuitWithRestore)
-            .style(super::btn_style),
-        iced::widget::button(text(format!("Set {}% & Exit", set_duty)).size(14)).on_press(Message::QuitWithDuty)
-            .style(super::btn_style),
-        iced::widget::button(text("Exit").size(14)).on_press(Message::QuitWithoutRestore)
-            .style(super::btn_style),
-        iced::widget::button(text("Cancel").size(14)).on_press(Message::QuitCanceled)
-            .style(super::btn_style),
-    ].spacing(8));
+    let set_label = format!("Fixed {}% & Exit", set_duty);
+    let exit_label = "Keep Current Duty & Exit";
+    content = content.push(
+        iced::widget::row![
+            iced::widget::button(text("Restore Auto & Exit").size(14))
+                .on_press(Message::QuitWithRestore)
+                .style(super::btn_style),
+            iced::widget::button(text(set_label).size(14))
+                .on_press(Message::QuitWithDuty)
+                .style(super::btn_style),
+            iced::widget::button(text(exit_label).size(14))
+                .on_press(Message::QuitWithoutRestore)
+                .style(super::btn_style),
+            iced::widget::button(text("Cancel").size(14))
+                .on_press(Message::QuitCanceled)
+                .style(super::btn_style),
+        ]
+        .spacing(8),
+    );
 
     container(content)
         .center_x(Length::Fill)
@@ -492,11 +614,18 @@ fn view_header(app: &App) -> Element<'_, Message> {
         row![
             text(&app.system_info.header_device_name).size(18),
             space::horizontal(),
-            button(text("About").size(FONT_BODY)).on_press(Message::SettingsToggled)
+            button(text("About").size(FONT_BODY))
+                .on_press(Message::SettingsToggled)
                 .style(btn_style),
-        ].align_y(iced::Alignment::Center),
-        text(&app.system_info.header_info_text).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
-    ].spacing(4);
+        ]
+        .align_y(iced::Alignment::Center),
+        text(&app.system_info.header_info_text)
+            .size(FONT_SMALL)
+            .style(|_theme| iced::widget::text::Style {
+                color: Some(COLOR_GRAY)
+            }),
+    ]
+    .spacing(4);
 
     container(header_content)
         .padding(iced::Padding::from([8, 12]))
@@ -514,9 +643,17 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
             let config = &snap.config;
             let all_empty = config.telemetry.selected_sensors.is_empty();
 
-            let settings_label = if app.show_sensor_settings { "[-] Settings" } else { "[+] Settings" };
+            let settings_label = if app.show_sensor_settings {
+                "[-] Settings"
+            } else {
+                "[+] Settings"
+            };
             let header = row![
-                text("Sensors").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+                text("Sensors")
+                    .size(FONT_SECTION)
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(COLOR_HEADER)
+                    }),
                 space::horizontal(),
                 button(text(settings_label).size(FONT_SMALL))
                     .on_press(Message::ToggleSensorSettings)
@@ -529,9 +666,9 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
                 settings_content = settings_content.push(text("Sensors").size(FONT_BODY));
 
                 // Same segmented style as fan mode buttons; highlights active window.
-                let mut window_row = row![
-                    text("Chart Window:").size(FONT_BODY),
-                ].spacing(8).align_y(iced::Alignment::Center);
+                let mut window_row = row![text("Chart Window:").size(FONT_BODY),]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center);
                 for opt in crate::temp_chart::HISTORY_WINDOW_OPTIONS {
                     let selected = app.chart_window_seconds == opt;
                     window_row = window_row.push(
@@ -553,33 +690,50 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
                         row![
                             button(
                                 container(text(" ").size(FONT_SMALL))
-                                    .width(14).height(14).center_x(14).center_y(14)
+                                    .width(14)
+                                    .height(14)
+                                    .center_x(14)
+                                    .center_y(14)
                                     .style(move |_theme| iced::widget::container::Style {
                                         background: Some(bg_color.into()),
                                         // White ring matches slider thumbs and curve points.
-                                        border: iced::Border::default().rounded(7).color(iced::Color::WHITE).width(1),
+                                        border: iced::Border::default()
+                                            .rounded(7)
+                                            .color(iced::Color::WHITE)
+                                            .width(1),
                                         ..Default::default()
                                     })
-                             ).on_press(Message::SensorToggled(idx, !is_on))
-                              .style(btn_style).padding(0),
+                            )
+                            .on_press(Message::SensorToggled(idx, !is_on))
+                            .style(btn_style)
+                            .padding(0),
                             text(name.as_str()).size(FONT_BODY),
                             space::horizontal(),
-                            text(on_off).size(FONT_SMALL).style(move |_theme| iced::widget::text::Style { color: Some(on_color) }),
-                        ].align_y(iced::Alignment::Center).spacing(6)
+                            text(on_off).size(FONT_SMALL).style(move |_theme| {
+                                iced::widget::text::Style {
+                                    color: Some(on_color),
+                                }
+                            }),
+                        ]
+                        .align_y(iced::Alignment::Center)
+                        .spacing(6),
                     );
                 }
-                    container(settings_content)
-                        .width(Length::Fill)
-                        .padding(8)
-                        .style(|_theme| iced::widget::container::Style {
-                            background: Some(COLOR_SETTINGS_BG.into()),
-                            border: iced::Border::default().rounded(4).color(COLOR_DARK).width(1),
-                            ..Default::default()
-                        })
-                        .into()
-                } else {
-                    iced::widget::Space::new().into()
-                };
+                container(settings_content)
+                    .width(Length::Fill)
+                    .padding(8)
+                    .style(|_theme| iced::widget::container::Style {
+                        background: Some(COLOR_SETTINGS_BG.into()),
+                        border: iced::Border::default()
+                            .rounded(4)
+                            .color(COLOR_DARK)
+                            .width(1),
+                        ..Default::default()
+                    })
+                    .into()
+            } else {
+                iced::widget::Space::new().into()
+            };
             content = content.push(settings_panel);
 
             let history = Arc::clone(&snap.temp_history);
@@ -595,29 +749,36 @@ fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
                         colored_dot(color, 10.0),
                         text(name.as_str()).size(FONT_BODY).width(Length::Fill),
                         text(format!("{}°C", temp)).size(FONT_BODY),
-                    ].align_y(iced::Alignment::Center).spacing(6);
+                    ]
+                    .align_y(iced::Alignment::Center)
+                    .spacing(6);
                     list_content = list_content.push(row);
                 }
             }
 
             content = content.push(
-                container(crate::temp_chart::view_temp_chart(crate::temp_chart::TempHistory {
-                    samples: history,
-                    colors: chart_colors,
-                    sensor_names: Arc::clone(&cache.sorted),
-                    window_seconds: app.chart_window_seconds,
-                }))
-                    .width(Length::Fill)
-                    .height(150)
+                container(crate::temp_chart::view_temp_chart(
+                    crate::temp_chart::TempHistory {
+                        samples: history,
+                        colors: chart_colors,
+                        sensor_names: Arc::clone(&cache.sorted),
+                        window_seconds: app.chart_window_seconds,
+                    },
+                ))
+                .width(Length::Fill)
+                .height(150),
             );
 
             content = content.push(scrollable(list_content).height(Length::Shrink));
 
             content.into()
         }
-        None => {
-            text(if app.cli_present { "Waiting for sensor data..." } else { "EC not available" }).into()
-        }
+        None => text(if app.cli_present {
+            "Waiting for sensor data..."
+        } else {
+            "EC not available"
+        })
+        .into(),
     }
 }
 
@@ -627,12 +788,15 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
     let current_mode = config.fan.mode;
 
     let fan_rpm_text = thermal.as_ref().as_ref().and_then(|t| {
-        if t.fans.is_empty() { None }
-        else {
+        if t.fans.is_empty() {
+            None
+        } else {
             use std::fmt::Write;
             let mut s = String::with_capacity(32);
             for (i, f) in t.fans.iter().enumerate() {
-                if i > 0 { s.push_str("  "); }
+                if i > 0 {
+                    s.push_str("  ");
+                }
                 let _ = write!(s, "{} RPM", f.rpm);
             }
             Some(s)
@@ -661,10 +825,15 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
     };
 
     let title_row = row![
-        text("Fan Control").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+        text("Fan Control")
+            .size(FONT_SECTION)
+            .style(|_theme| iced::widget::text::Style {
+                color: Some(COLOR_HEADER)
+            }),
         space::horizontal(),
         text(right_text).size(FONT_BODY),
-    ].align_y(iced::Alignment::Center);
+    ]
+    .align_y(iced::Alignment::Center);
 
     let mut content = column![title_row].spacing(6);
 
@@ -673,13 +842,17 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
         let is_manual = current_mode == FanControlMode::Manual;
         let is_curve = current_mode == FanControlMode::Curve;
         row![
-            button(text("Auto").size(FONT_BODY)).on_press(Message::FanModeChanged(FanControlMode::Disabled))
+            button(text("Auto").size(FONT_BODY))
+                .on_press(Message::FanModeChanged(FanControlMode::Disabled))
                 .style(move |_theme, _status| mode_style(is_disabled)),
-            button(text("Manual").size(FONT_BODY)).on_press(Message::FanModeChanged(FanControlMode::Manual))
+            button(text("Manual").size(FONT_BODY))
+                .on_press(Message::FanModeChanged(FanControlMode::Manual))
                 .style(move |_theme, _status| mode_style(is_manual)),
-            button(text("Curve").size(FONT_BODY)).on_press(Message::FanModeChanged(FanControlMode::Curve))
+            button(text("Curve").size(FONT_BODY))
+                .on_press(Message::FanModeChanged(FanControlMode::Curve))
                 .style(move |_theme, _status| mode_style(is_curve)),
-        ].spacing(8)
+        ]
+        .spacing(8)
     };
 
     content = content.push(mode_row);
@@ -698,26 +871,35 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                         button(text(if unified { "ON" } else { "OFF" }).size(FONT_BODY))
                             .on_press(Message::FanUnifiedDutyToggled(!unified))
                             .style(btn_style),
-                    ].spacing(8).align_y(iced::Alignment::Center)
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
                 );
                 if unified {
                     content = content.push(
-                        iced::widget::slider(0..=100, duty, Message::FanDutyChanged).style(slider_style)
+                        iced::widget::slider(0..=100, duty, Message::FanDutyChanged)
+                            .style(slider_style),
                     );
                 } else {
                     for (idx, &per_duty) in snap.per_fan_duty.iter().enumerate() {
                         content = content.push(
                             row![
                                 text(format!("Fan {}:", idx + 1)).size(FONT_BODY),
-                                iced::widget::slider(0..=100, per_duty, move |d| Message::FanPerDutyChanged(idx, d)).style(slider_style),
+                                iced::widget::slider(0..=100, per_duty, move |d| {
+                                    Message::FanPerDutyChanged(idx, d)
+                                })
+                                .style(slider_style),
                                 text(format!("{}%", per_duty)).size(FONT_BODY),
-                            ].spacing(8).align_y(iced::Alignment::Center)
+                            ]
+                            .spacing(8)
+                            .align_y(iced::Alignment::Center),
                         );
                     }
                 }
             } else {
                 content = content.push(
-                    iced::widget::slider(0..=100, duty, Message::FanDutyChanged).style(slider_style)
+                    iced::widget::slider(0..=100, duty, Message::FanDutyChanged)
+                        .style(slider_style),
                 );
             }
         }
@@ -726,15 +908,24 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                 let hyst = curve.curve.hysteresis_c;
                 let rate = curve.curve.rate_limit_pct_per_step;
 
-                let settings_label = if snap.show_curve_settings { "[-] Settings" } else { "[+] Settings" };
+                let settings_label = if snap.show_curve_settings {
+                    "[-] Settings"
+                } else {
+                    "[+] Settings"
+                };
                 content = content.push(
                     row![
-                        text("Curve").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+                        text("Curve").size(FONT_SECTION).style(|_theme| {
+                            iced::widget::text::Style {
+                                color: Some(COLOR_HEADER),
+                            }
+                        }),
                         space::horizontal(),
                         button(text(settings_label).size(FONT_SMALL))
                             .on_press(Message::ToggleCurveSettings)
                             .style(btn_style),
-                    ].align_y(iced::Alignment::Center)
+                    ]
+                    .align_y(iced::Alignment::Center),
                 );
 
                 let settings_panel: Element<'_, Message> = if snap.show_curve_settings {
@@ -743,35 +934,55 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                     settings_content = settings_content.push(text("Hysteresis").size(FONT_BODY));
                     settings_content = settings_content.push(
                         row![
-                            iced::widget::slider(0..=10, hyst, Message::FanCurveHysteresisChanged).style(slider_style),
+                            iced::widget::slider(0..=10, hyst, Message::FanCurveHysteresisChanged)
+                                .style(slider_style),
                             text(format!("{}°C", hyst)).size(FONT_BODY),
-                        ].spacing(8).align_y(iced::Alignment::Center)
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
                     );
 
                     settings_content = settings_content.push(text("Rate Limit").size(FONT_BODY));
                     settings_content = settings_content.push(
                         row![
-                            iced::widget::slider(1..=100, rate, Message::FanCurveRateLimitChanged).style(slider_style),
+                            iced::widget::slider(1..=100, rate, Message::FanCurveRateLimitChanged)
+                                .style(slider_style),
                             text(format!("{} %/step", rate)).size(FONT_BODY),
-                        ].spacing(8).align_y(iced::Alignment::Center)
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
                     );
 
                     let curve_poll_ms = curve.poll_ms as u32;
                     settings_content = settings_content.push(text("Curve Poll").size(FONT_BODY));
                     settings_content = settings_content.push(
                         row![
-                            iced::widget::slider(crate::types::CURVE_POLL_MS_MIN as u32..=crate::types::CURVE_POLL_MS_MAX as u32, curve_poll_ms, |v| Message::CurvePollMsChanged(v as u64)).step(100u32).style(slider_style),
+                            iced::widget::slider(
+                                crate::types::CURVE_POLL_MS_MIN as u32
+                                    ..=crate::types::CURVE_POLL_MS_MAX as u32,
+                                curve_poll_ms,
+                                |v| Message::CurvePollMsChanged(v as u64)
+                            )
+                            .step(100u32)
+                            .style(slider_style),
                             text(format!("{} ms", curve_poll_ms)).size(FONT_BODY),
-                        ].spacing(8).align_y(iced::Alignment::Center)
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
                     );
 
-                    settings_content = settings_content.push(text("Temperature sensor").size(FONT_BODY));
+                    settings_content =
+                        settings_content.push(text("Temperature sensor").size(FONT_BODY));
                     let cache = &snap.sensor_cache;
                     let curve_sensor: Option<&str> =
                         curve.curve.sensors.first().map(|s| s.as_str());
                     if cache.keys.is_empty() {
                         settings_content = settings_content.push(
-                            text("No sensors detected yet").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+                            text("No sensors detected yet")
+                                .size(FONT_SMALL)
+                                .style(|_theme| iced::widget::text::Style {
+                                    color: Some(COLOR_GRAY),
+                                }),
                         );
                     } else {
                         for (idx, name) in cache.keys.iter().enumerate() {
@@ -784,19 +995,33 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                                 row![
                                     button(
                                         container(text(" ").size(FONT_SMALL))
-                                            .width(14).height(14).center_x(14).center_y(14)
+                                            .width(14)
+                                            .height(14)
+                                            .center_x(14)
+                                            .center_y(14)
                                             .style(move |_theme| iced::widget::container::Style {
                                                 background: Some(bg_color.into()),
                                                 // White ring matches sensor toggles.
-                                                border: iced::Border::default().rounded(7).color(iced::Color::WHITE).width(1),
+                                                border: iced::Border::default()
+                                                    .rounded(7)
+                                                    .color(iced::Color::WHITE)
+                                                    .width(1),
                                                 ..Default::default()
                                             })
-                                     ).on_press(Message::CurveSensorSelected(idx))
-                                      .style(btn_style).padding(0),
+                                    )
+                                    .on_press(Message::CurveSensorSelected(idx))
+                                    .style(btn_style)
+                                    .padding(0),
                                     text(name.as_str()).size(FONT_BODY),
                                     space::horizontal(),
-                                    text(on_off).size(FONT_SMALL).style(move |_theme| iced::widget::text::Style { color: Some(on_color) }),
-                                ].align_y(iced::Alignment::Center).spacing(6)
+                                    text(on_off).size(FONT_SMALL).style(move |_theme| {
+                                        iced::widget::text::Style {
+                                            color: Some(on_color),
+                                        }
+                                    }),
+                                ]
+                                .align_y(iced::Alignment::Center)
+                                .spacing(6),
                             );
                         }
                     }
@@ -806,7 +1031,10 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                         .padding(8)
                         .style(|_theme| iced::widget::container::Style {
                             background: Some(COLOR_SETTINGS_BG.into()),
-                            border: iced::Border::default().rounded(4).color(COLOR_DARK).width(1),
+                            border: iced::Border::default()
+                                .rounded(4)
+                                .color(COLOR_DARK)
+                                .width(1),
                             ..Default::default()
                         })
                         .into()
@@ -822,7 +1050,17 @@ fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                     let mut r = iced::widget::Row::new().spacing(12);
                     for (offset, point) in chunk.iter().enumerate() {
                         let idx = chunk_idx * 3 + offset;
-                        r = r.push(text(format!("P{}: {}°C -> {}%", idx + 1, point[0], point[1])).size(FONT_BODY));
+                        let label = format!("P{}: {}°C -> {}%", idx + 1, point[0], point[1]);
+                        let txt = if point[0] >= crate::types::CURVE_TEMP_LOCK_START {
+                            text(label)
+                                .size(FONT_BODY)
+                                .style(|_theme| iced::widget::text::Style {
+                                    color: Some(COLOR_GRAY),
+                                })
+                        } else {
+                            text(label).size(FONT_BODY)
+                        };
+                        r = r.push(txt);
                     }
                     content = content.push(r);
                 }
@@ -853,9 +1091,17 @@ fn view_charge_limit_section(enabled: bool, value: u32) -> Element<'static, Mess
             text("Max Charge Limit (%):").size(FONT_BODY),
             space::horizontal(),
             text(format!("{}%", value)).size(FONT_BODY),
-        ].spacing(4),
-        iced::widget::slider(CHARGE_LIMIT_MIN..=CHARGE_LIMIT_MAX, value, Message::ChargeLimitChanged).style(slider_style),
-    ].spacing(4).into()
+        ]
+        .spacing(4),
+        iced::widget::slider(
+            CHARGE_LIMIT_MIN..=CHARGE_LIMIT_MAX,
+            value,
+            Message::ChargeLimitChanged
+        )
+        .style(slider_style),
+    ]
+    .spacing(4)
+    .into()
 }
 
 /// Unset limit means no cap; show as disabled at 100%.
@@ -866,10 +1112,16 @@ fn charge_limit_display(limit: Option<crate::types::SettingU8>) -> (bool, u32) {
     }
 }
 
-fn view_battery_info(battery: &crate::cli::ec_wrapper::BatteryData, charging: bool) -> Element<'_, Message> {
+fn view_battery_info(
+    battery: &crate::cli::ec_wrapper::BatteryData,
+    charging: bool,
+) -> Element<'_, Message> {
     let mut rows = column![].spacing(4);
 
-    if let (Some(full), Some(design)) = (battery.last_full_charge_capacity_mah, battery.design_capacity_mah) {
+    if let (Some(full), Some(design)) = (
+        battery.last_full_charge_capacity_mah,
+        battery.design_capacity_mah,
+    ) {
         if let Some(health) = crate::types::battery_health_pct(full, design) {
             rows = rows.push(row![
                 text("Battery Health:").size(FONT_BODY),
@@ -917,7 +1169,10 @@ fn view_battery_info(battery: &crate::cli::ec_wrapper::BatteryData, charging: bo
     rows.into()
 }
 
-fn view_battery_verbose(battery: &crate::cli::ec_wrapper::BatteryData, show_details: bool) -> Option<Element<'_, Message>> {
+fn view_battery_verbose(
+    battery: &crate::cli::ec_wrapper::BatteryData,
+    show_details: bool,
+) -> Option<Element<'_, Message>> {
     let has_verbose = battery.manufacturer.is_some()
         || battery.model_number.is_some()
         || battery.serial_number.is_some()
@@ -926,23 +1181,25 @@ fn view_battery_verbose(battery: &crate::cli::ec_wrapper::BatteryData, show_deta
         || battery.design_capacity_wh.is_some()
         || battery.charger_temp_c.is_some();
 
-    if !has_verbose { return None; }
+    if !has_verbose {
+        return None;
+    }
 
-    let details_label = if show_details { "[-] Details" } else { "[+] Details" };
+    let details_label = if show_details {
+        "[-] Details"
+    } else {
+        "[+] Details"
+    };
     let mut content = column![].spacing(4);
 
-    content = content.push(
-        row![
-            space::horizontal(),
-            button(text(details_label).size(FONT_SMALL))
-                .on_press(Message::ToggleBatteryDetails)
-                .style(btn_style),
-        ]
-    );
+    content = content.push(row![
+        space::horizontal(),
+        button(text(details_label).size(FONT_SMALL))
+            .on_press(Message::ToggleBatteryDetails)
+            .style(btn_style),
+    ]);
 
-    if show_details
-        && let Some(details) = battery_detail_rows(battery)
-    {
+    if show_details && let Some(details) = battery_detail_rows(battery) {
         content = content.push(details);
     }
 
@@ -966,7 +1223,9 @@ fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
             && battery.power_info.discharging != Some(true);
         let status_color = if charging { COLOR_GREEN } else { COLOR_HEADER };
 
-        let power_text = battery.power_info.present_rate_ma
+        let power_text = battery
+            .power_info
+            .present_rate_ma
             .and_then(|rate_ma| {
                 battery.power_info.present_voltage_mv.map(|voltage| {
                     let power_w = (rate_ma as f32 * voltage as f32) / 1_000_000.0;
@@ -981,21 +1240,35 @@ fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
             })
             .unwrap_or_default();
 
-        let soc_text = battery.power_info.soc_pct
+        let soc_text = battery
+            .power_info
+            .soc_pct
             .map(|s| format!("{}%", s))
             .unwrap_or_default();
 
         let title_row = row![
-            text("Battery & Power").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
+            text("Battery & Power")
+                .size(FONT_SECTION)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_HEADER)
+                }),
             space::horizontal(),
-            text(format!("{}  {}", power_text, soc_text)).size(FONT_BODY).style(move |_theme| iced::widget::text::Style { color: Some(status_color) }),
-        ].align_y(iced::Alignment::Center);
+            text(format!("{}  {}", power_text, soc_text))
+                .size(FONT_BODY)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(status_color)
+                }),
+        ]
+        .align_y(iced::Alignment::Center);
 
         let (charge_limit_enabled, charge_limit_value) =
             charge_limit_display(config.battery.charge_limit_max_pct);
 
         let mut content = column![title_row].spacing(6);
-        content = content.push(view_charge_limit_section(charge_limit_enabled, charge_limit_value));
+        content = content.push(view_charge_limit_section(
+            charge_limit_enabled,
+            charge_limit_value,
+        ));
         content = content.push(view_battery_info(&battery.power_info, charging));
 
         if let Some(verbose) = view_battery_verbose(&battery.power_info, app.show_battery_details) {
@@ -1004,56 +1277,124 @@ fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message
 
         let right_pad = iced::Padding::ZERO.right(14.0);
         // Height cap keeps card compact; scrollable when details expand.
-        container(
-            scrollable(container(content).padding(right_pad)).height(Length::Shrink)
-        )
-        .width(Length::Fill)
-        .max_height(BATTERY_SECTION_MAX_HEIGHT)
-        .into()
+        container(scrollable(container(content).padding(right_pad)).height(Length::Shrink))
+            .width(Length::Fill)
+            .max_height(BATTERY_SECTION_MAX_HEIGHT)
+            .into()
     } else {
-        text(if app.cli_present { "Waiting for battery data..." } else { "EC not available" }).into()
+        text(if app.cli_present {
+            "Waiting for battery data..."
+        } else {
+            "EC not available"
+        })
+        .into()
     }
 }
 
-fn battery_detail_rows(battery_info: &crate::cli::ec_wrapper::BatteryData) -> Option<Element<'_, Message>> {
+fn battery_detail_rows(
+    battery_info: &crate::cli::ec_wrapper::BatteryData,
+) -> Option<Element<'_, Message>> {
     let mut rows = column![].spacing(2).padding(4);
     let mut has_content = false;
 
     if let Some(ref v) = battery_info.manufacturer {
         has_content = true;
-        rows = rows.push(row![text("Manufacturer:").size(FONT_SMALL), space::horizontal(), text(v.as_str()).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(
+            row![
+                text("Manufacturer:").size(FONT_SMALL),
+                space::horizontal(),
+                text(v.as_str()).size(FONT_SMALL)
+            ]
+            .spacing(4),
+        );
     }
     if let Some(ref v) = battery_info.model_number {
         has_content = true;
-        rows = rows.push(row![text("Model:").size(FONT_SMALL), space::horizontal(), text(v.as_str()).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(
+            row![
+                text("Model:").size(FONT_SMALL),
+                space::horizontal(),
+                text(v.as_str()).size(FONT_SMALL)
+            ]
+            .spacing(4),
+        );
     }
     if let Some(ref v) = battery_info.serial_number {
         has_content = true;
-        rows = rows.push(row![text("Serial:").size(FONT_SMALL), space::horizontal(), text(v.as_str()).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(
+            row![
+                text("Serial:").size(FONT_SMALL),
+                space::horizontal(),
+                text(v.as_str()).size(FONT_SMALL)
+            ]
+            .spacing(4),
+        );
     }
     if let Some(ref v) = battery_info.battery_type {
         has_content = true;
-        rows = rows.push(row![text("Type:").size(FONT_SMALL), space::horizontal(), text(v.as_str()).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(
+            row![
+                text("Type:").size(FONT_SMALL),
+                space::horizontal(),
+                text(v.as_str()).size(FONT_SMALL)
+            ]
+            .spacing(4),
+        );
     }
     if let Some(v) = battery_info.remaining_capacity_wh {
         has_content = true;
-        rows = rows.push(row![text("Capacity (Wh):").size(FONT_SMALL), space::horizontal(), text(format!("{:.2} Wh", v)).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(
+            row![
+                text("Capacity (Wh):").size(FONT_SMALL),
+                space::horizontal(),
+                text(format!("{:.2} Wh", v)).size(FONT_SMALL)
+            ]
+            .spacing(4),
+        );
     }
     if let Some(v) = battery_info.design_capacity_wh {
         has_content = true;
-        rows = rows.push(row![text("Design (Wh):").size(FONT_SMALL), space::horizontal(), text(format!("{:.2} Wh", v)).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(
+            row![
+                text("Design (Wh):").size(FONT_SMALL),
+                space::horizontal(),
+                text(format!("{:.2} Wh", v)).size(FONT_SMALL)
+            ]
+            .spacing(4),
+        );
     }
     if let Some(v) = battery_info.charger_temp_c {
         has_content = true;
-        rows = rows.push(row![text("Charger Temp:").size(FONT_SMALL), space::horizontal(), text(format!("{:.2}°C", v)).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(
+            row![
+                text("Charger Temp:").size(FONT_SMALL),
+                space::horizontal(),
+                text(format!("{:.2}°C", v)).size(FONT_SMALL)
+            ]
+            .spacing(4),
+        );
     }
     if let Some(v) = battery_info.charger_voltage_mv {
         has_content = true;
-        rows = rows.push(row![text("Charger Voltage:").size(FONT_SMALL), space::horizontal(), text(format!("{:.0} mV", v)).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(
+            row![
+                text("Charger Voltage:").size(FONT_SMALL),
+                space::horizontal(),
+                text(format!("{:.0} mV", v)).size(FONT_SMALL)
+            ]
+            .spacing(4),
+        );
     }
     if let Some(v) = battery_info.charger_current_ma {
         has_content = true;
-        rows = rows.push(row![text("Charger Current:").size(FONT_SMALL), space::horizontal(), text(format!("{} mA", v)).size(FONT_SMALL)].spacing(4));
+        rows = rows.push(
+            row![
+                text("Charger Current:").size(FONT_SMALL),
+                space::horizontal(),
+                text(format!("{} mA", v)).size(FONT_SMALL)
+            ]
+            .spacing(4),
+        );
     }
 
     if has_content {
@@ -1063,10 +1404,13 @@ fn battery_detail_rows(battery_info: &crate::cli::ec_wrapper::BatteryData) -> Op
                 .width(Length::Fill)
                 .style(|_theme| iced::widget::container::Style {
                     background: Some(COLOR_SETTINGS_BG.into()),
-                    border: iced::Border::default().rounded(4).color(COLOR_DARK).width(1),
+                    border: iced::Border::default()
+                        .rounded(4)
+                        .color(COLOR_DARK)
+                        .width(1),
                     ..Default::default()
                 })
-                .into()
+                .into(),
         )
     } else {
         None
@@ -1074,14 +1418,22 @@ fn battery_detail_rows(battery_info: &crate::cli::ec_wrapper::BatteryData) -> Op
 }
 
 fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
-    let mut content = column![text("Misc").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) })].spacing(6);
+    let mut content =
+        column![
+            text("Misc")
+                .size(FONT_SECTION)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_HEADER)
+                })
+        ]
+        .spacing(6);
 
     if let Some(ref err) = snap.ec_op_error {
-        content = content.push(
-            text(err.as_str())
-                .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style { color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)) }),
-        );
+        content = content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+            iced::widget::text::Style {
+                color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+            }
+        }));
     }
 
     if snap.platform.has_keyboard_backlight() {
@@ -1095,10 +1447,17 @@ fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
     if snap.platform.has_fingerprint_led() {
         content = content.push(text("Fingerprint LED").size(FONT_SECTION));
         let button_row = row![
-            button(text("Low").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("low")).style(btn_style),
-            button(text("Medium").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("medium")).style(btn_style),
-            button(text("High").size(FONT_BODY)).on_press(Message::FpLedLevelChanged("high")).style(btn_style),
-        ].spacing(6);
+            button(text("Low").size(FONT_BODY))
+                .on_press(Message::FpLedLevelChanged("low"))
+                .style(btn_style),
+            button(text("Medium").size(FONT_BODY))
+                .on_press(Message::FpLedLevelChanged("medium"))
+                .style(btn_style),
+            button(text("High").size(FONT_BODY))
+                .on_press(Message::FpLedLevelChanged("high"))
+                .style(btn_style),
+        ]
+        .spacing(6);
         content = content.push(button_row);
     } else {
         content = content.push(not_supported_section("Fingerprint LED"));
@@ -1109,30 +1468,51 @@ fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
     content = content.push(ports_section(snap));
 
     let right_pad = iced::Padding::ZERO.right(14.0);
-    let max_h = if snap.expansion_card_debug { 500.0 } else { MISC_SECTION_MAX_HEIGHT };
-    container(
-        scrollable(container(content).padding(right_pad)).height(Length::Shrink)
-    )
-    .width(Length::Fill)
-    .max_height(max_h)
-    .into()
+    let max_h = if snap.expansion_card_debug {
+        500.0
+    } else {
+        MISC_SECTION_MAX_HEIGHT
+    };
+    container(scrollable(container(content).padding(right_pad)).height(Length::Shrink))
+        .width(Length::Fill)
+        .max_height(max_h)
+        .into()
 }
 
 fn kblight_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     let kblight = &snap.kblight;
     let mut content = column![].spacing(2);
     if let Some(kb) = kblight.as_ref().as_ref().copied() {
-        content = content.push(row![
-            text("Keyboard Backlight").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
-            space::horizontal(),
-            text(format!("{}%", kb)).size(FONT_BODY),
-        ].align_y(iced::Alignment::Center));
         content = content.push(
-            iced::widget::slider(0..=100, kb, Message::KblightChanged).step(10u32).style(slider_style)
+            row![
+                text("Keyboard Backlight")
+                    .size(FONT_SECTION)
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(COLOR_HEADER)
+                    }),
+                space::horizontal(),
+                text(format!("{}%", kb)).size(FONT_BODY),
+            ]
+            .align_y(iced::Alignment::Center),
+        );
+        content = content.push(
+            iced::widget::slider(0..=100, kb, Message::KblightChanged)
+                .step(10u32)
+                .style(slider_style),
         );
     } else {
-        content = content.push(text("Keyboard Backlight").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }));
-        content = content.push(text("Unavailable").size(FONT_BODY).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
+        content = content.push(
+            text("Keyboard Backlight")
+                .size(FONT_SECTION)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_HEADER),
+                }),
+        );
+        content = content.push(text("Unavailable").size(FONT_BODY).style(|_theme| {
+            iced::widget::text::Style {
+                color: Some(COLOR_GRAY),
+            }
+        }));
     }
     content.into()
 }
@@ -1144,21 +1524,37 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     let mut content = column![text("Ports & Expansion Cards").size(FONT_SECTION)].spacing(2);
 
     if ports.is_empty() && cards.is_empty() {
-        content = content.push(text("None detected").size(FONT_BODY).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
+        content = content.push(text("None detected").size(FONT_BODY).style(|_theme| {
+            iced::widget::text::Style {
+                color: Some(COLOR_GRAY),
+            }
+        }));
         if snap.expansion_card_debug {
             content = content.push(
-                text("[Debug] No ports or expansion cards detected").size(FONT_SMALL)
-                    .style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+                text("[Debug] No ports or expansion cards detected")
+                    .size(FONT_SMALL)
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(COLOR_GRAY),
+                    }),
             );
         }
     } else {
-        let dp_card = cards.iter().find(|c| c.name.contains("DisplayPort") || c.name.contains("HDMI"));
+        let dp_card = cards
+            .iter()
+            .find(|c| c.name.contains("DisplayPort") || c.name.contains("HDMI"));
         for port in ports.iter() {
-            let ever_seen_sink = snap.pd_usb_c_seen
+            let ever_seen_sink = snap
+                .pd_usb_c_seen
                 .get(port.port as usize)
                 .copied()
                 .unwrap_or(false);
-            let card_type = crate::cli::ec_wrapper::classify_pd_port(port, history.iter().map(|a| a.as_ref().as_slice()), STABLE_THRESHOLD, dp_card.is_some(), ever_seen_sink);
+            let card_type = crate::cli::ec_wrapper::classify_pd_port(
+                port,
+                history.iter().map(|a| a.as_ref().as_slice()),
+                STABLE_THRESHOLD,
+                dp_card.is_some(),
+                ever_seen_sink,
+            );
             let is_display_card = card_type == "DisplayPort Expansion Card"
                 || card_type == "HDMI Expansion Card"
                 || card_type == "DP/HDMI Expansion Card";
@@ -1168,36 +1564,61 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 card_type
             };
 
-            let mut row_content = row![
-                text(format!("Port {} ({})", port.port, display_type)).size(FONT_BODY),
-            ].align_y(iced::Alignment::Center).spacing(6);
+            let mut row_content =
+                row![text(format!("Port {} ({})", port.port, display_type)).size(FONT_BODY),]
+                    .align_y(iced::Alignment::Center)
+                    .spacing(6);
             if port.dp_alt_mode || is_display_card {
                 if let Some(card) = dp_card {
                     if let Some(ref fw) = card.active_firmware {
-                        row_content = row_content.push(text(format!("v{}", fw)).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
+                        row_content =
+                            row_content.push(text(format!("v{}", fw)).size(FONT_SMALL).style(
+                                |_theme| iced::widget::text::Style {
+                                    color: Some(COLOR_GRAY),
+                                },
+                            ));
                     }
                 } else if port.dp_alt_mode {
-                    row_content = row_content.push(text("DP").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(SENSOR_COLORS[0]) }));
+                    row_content = row_content.push(text("DP").size(FONT_SMALL).style(|_theme| {
+                        iced::widget::text::Style {
+                            color: Some(SENSOR_COLORS[0]),
+                        }
+                    }));
                 }
             }
             content = content.push(row_content);
-            if port.pd_contract && !is_display_card
+            if port.pd_contract
+                && !is_display_card
                 && let Some(ref level) = port.negotiated_text
             {
-                let color = if port.power_role == Some("Source") { COLOR_GRAY } else { COLOR_GREEN };
+                let color = if port.power_role == Some("Source") {
+                    COLOR_GRAY
+                } else {
+                    COLOR_GREEN
+                };
                 content = content.push(
-                    text(format!("  {}", level)).size(FONT_SMALL).style(move |_theme| iced::widget::text::Style { color: Some(color) })
+                    text(format!("  {}", level))
+                        .size(FONT_SMALL)
+                        .style(move |_theme| iced::widget::text::Style { color: Some(color) }),
                 );
             }
             if snap.expansion_card_debug {
                 let dp_alt_str = if port.dp_alt_mode { "DP_ALT" } else { "" };
                 let role_str = port.power_role.unwrap_or("?");
                 let data_str = port.data_role.unwrap_or("?");
-                let watts_str = port.negotiated_watts.map(|w| format!("{:.1}W", w)).unwrap_or_else(|| "-".to_string());
-                let debug_line = format!("  [{}] role={} data={} {} watts={}", port.port, role_str, data_str, dp_alt_str, watts_str);
-                content = content.push(
-                    text(debug_line).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+                let watts_str = port
+                    .negotiated_watts
+                    .map(|w| format!("{:.1}W", w))
+                    .unwrap_or_else(|| "-".to_string());
+                let debug_line = format!(
+                    "  [{}] role={} data={} {} watts={}",
+                    port.port, role_str, data_str, dp_alt_str, watts_str
                 );
+                content = content.push(text(debug_line).size(FONT_SMALL).style(|_theme| {
+                    iced::widget::text::Style {
+                        color: Some(COLOR_GRAY),
+                    }
+                }));
             }
         }
 
@@ -1205,16 +1626,26 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             let mut row_content = row![
                 colored_dot(COLOR_GREEN, 8.0),
                 text(card.name.as_str()).size(FONT_BODY),
-            ].align_y(iced::Alignment::Center).spacing(6);
+            ]
+            .align_y(iced::Alignment::Center)
+            .spacing(6);
             if let Some(ref fw) = card.active_firmware {
-                row_content = row_content.push(text(format!("v{}", fw)).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
+                row_content =
+                    row_content.push(text(format!("v{}", fw)).size(FONT_SMALL).style(|_theme| {
+                        iced::widget::text::Style {
+                            color: Some(COLOR_GRAY),
+                        }
+                    }));
             }
             content = content.push(row_content);
             if snap.expansion_card_debug {
                 let fw_str = card.active_firmware.as_deref().unwrap_or("N/A");
                 content = content.push(
-                    text(format!("  [Debug] name={} fw={}", card.name, fw_str)).size(FONT_SMALL)
-                        .style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+                    text(format!("  [Debug] name={} fw={}", card.name, fw_str))
+                        .size(FONT_SMALL)
+                        .style(|_theme| iced::widget::text::Style {
+                            color: Some(COLOR_GRAY),
+                        }),
                 );
             }
         }
@@ -1222,8 +1653,11 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             if snap.expansion_card_debug {
                 let fw_str = card.active_firmware.as_deref().unwrap_or("N/A");
                 content = content.push(
-                    text(format!("  [Debug] {} fw={}", card.name, fw_str)).size(FONT_SMALL)
-                        .style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+                    text(format!("  [Debug] {} fw={}", card.name, fw_str))
+                        .size(FONT_SMALL)
+                        .style(|_theme| iced::widget::text::Style {
+                            color: Some(COLOR_GRAY),
+                        }),
                 );
             }
         }
@@ -1235,27 +1669,39 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
 fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     let mut content = column![].spacing(2);
 
-    let settings_label = if snap.show_cpu_power_settings { "[-] Settings" } else { "[+] Settings" };
-    content = content.push(
-        row![
-            text("CPU Power").size(FONT_SECTION).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
-            space::horizontal(),
-            if snap.intel_cpu {
-                button(text(settings_label).size(FONT_SMALL))
-                    .on_press(Message::ToggleCpuPowerSettings)
-                    .style(btn_style)
-            } else {
-                button(text(settings_label).size(FONT_SMALL)).style(btn_style)
-            },
-        ]
-    );
+    let settings_label = if snap.show_cpu_power_settings {
+        "[-] Settings"
+    } else {
+        "[+] Settings"
+    };
+    content = content.push(row![
+        text("CPU Power")
+            .size(FONT_SECTION)
+            .style(|_theme| iced::widget::text::Style {
+                color: Some(COLOR_HEADER)
+            }),
+        space::horizontal(),
+        if snap.intel_cpu {
+            button(text(settings_label).size(FONT_SMALL))
+                .on_press(Message::ToggleCpuPowerSettings)
+                .style(btn_style)
+        } else {
+            button(text(settings_label).size(FONT_SMALL)).style(btn_style)
+        },
+    ]);
 
     if !snap.intel_cpu {
+        content = content.push(text("Not Supported").size(FONT_BODY).style(|_theme| {
+            iced::widget::text::Style {
+                color: Some(COLOR_NOT_SUPPORTED_TEXT),
+            }
+        }));
         content = content.push(
-            text("Not Supported").size(FONT_BODY).style(|_theme| iced::widget::text::Style { color: Some(COLOR_NOT_SUPPORTED_TEXT) })
-        );
-        content = content.push(
-            text("CPU Power is available on Intel CPUs only.").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) })
+            text("CPU Power is available on Intel CPUs only.")
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_GRAY),
+                }),
         );
         return content.into();
     }
@@ -1264,119 +1710,282 @@ fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
 
     if !info.available {
         let msg = info.error_msg.unwrap_or("PawnIO driver not available");
-        content = content.push(text(msg).size(FONT_BODY).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
+        content =
+            content.push(
+                text(msg)
+                    .size(FONT_BODY)
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(COLOR_GRAY),
+                    }),
+            );
         if !crate::cpu_power::is_pawnio_installed() {
             content = content.push(
                 button(text("Install PawnIO").size(FONT_BODY))
                     .on_press(Message::InstallPawnIO)
-                    .style(btn_style)
+                    .style(btn_style),
             );
         } else if !crate::cpu_power::modules_downloaded() {
-            content = content.push(text("PawnIO Modules required").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }));
+            content = content.push(text("PawnIO Modules required").size(FONT_SMALL).style(
+                |_theme| iced::widget::text::Style {
+                    color: Some(COLOR_GRAY),
+                },
+            ));
             if let Some(ref err) = snap.modules_download_error {
-                content = content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)) }));
+                content = content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+                    iced::widget::text::Style {
+                        color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+                    }
+                }));
             }
             content = content.push(
                 button(text("Download PawnIO Modules").size(FONT_BODY))
                     .on_press(Message::DownloadPawnIOModules)
-                    .style(btn_style)
+                    .style(btn_style),
             );
         }
         return content.into();
     }
 
     // Show effective (min) limit; CPU enforces lower of MSR and MMIO.
-    let pl1_color = if snap.pl_custom_applied { COLOR_GREEN } else { COLOR_HEADER };
-    let pl2_color = if snap.pl_custom_applied { COLOR_GREEN } else { COLOR_HEADER };
-    content = content.push(row![
-        text("  PL1:".to_string()).size(FONT_BODY),
-        text(format!("{:.1}W", info.effective_pl1())).size(FONT_BODY).style(move |_theme| iced::widget::text::Style { color: Some(pl1_color) }),
-        text("  PL2:".to_string()).size(FONT_BODY),
-        text(format!("{:.1}W", info.effective_pl2())).size(FONT_BODY).style(move |_theme| iced::widget::text::Style { color: Some(pl2_color) }),
-        if snap.sync_enabled {
-            text("  [Syncing]").size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GREEN) })
-        } else {
-            text("").size(FONT_SMALL)
-        },
-    ].spacing(4));
+    let pl1_color = if snap.pl_custom_applied {
+        COLOR_GREEN
+    } else {
+        COLOR_HEADER
+    };
+    let pl2_color = if snap.pl_custom_applied {
+        COLOR_GREEN
+    } else {
+        COLOR_HEADER
+    };
+    content = content.push(
+        row![
+            text("  PL1:".to_string()).size(FONT_BODY),
+            text(format!("{:.1}W", info.effective_pl1()))
+                .size(FONT_BODY)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pl1_color)
+                }),
+            text("  PL2:".to_string()).size(FONT_BODY),
+            text(format!("{:.1}W", info.effective_pl2()))
+                .size(FONT_BODY)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pl2_color)
+                }),
+            if snap.sync_enabled {
+                text("  [Syncing]")
+                    .size(FONT_SMALL)
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(COLOR_GREEN),
+                    })
+            } else {
+                text("").size(FONT_SMALL)
+            },
+        ]
+        .spacing(4),
+    );
 
     if snap.show_cpu_power_settings {
         let mut settings_content = column![].spacing(4).padding(4);
 
         settings_content = settings_content.push(text("MSR (Read-only)").size(FONT_BODY));
-        settings_content = settings_content.push(row![
-            text(format!("  PL1: {:.1}W ({:.2}s)", info.pl1_msr, info.pl1_time_s)).size(FONT_BODY),
-            text(if info.pl1_msr_enabled { " [En]" } else { " [Dis]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl1_msr_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
-            text(if info.pl1_msr_clamped { " [Cl]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
-        ].spacing(4));
-        settings_content = settings_content.push(row![
-            text(format!("  PL2: {:.1}W ({:.2}s)", info.pl2_msr, info.pl2_time_s)).size(FONT_BODY),
-            text(if info.pl2_msr_enabled { " [En]" } else { " [Dis]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl2_msr_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
-            text(if info.pl2_msr_clamped { " [Cl]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
-        ].spacing(4));
+        settings_content = settings_content.push(
+            row![
+                text(format!(
+                    "  PL1: {:.1}W ({:.2}s)",
+                    info.pl1_msr, info.pl1_time_s
+                ))
+                .size(FONT_BODY),
+                text(if info.pl1_msr_enabled {
+                    " [En]"
+                } else {
+                    " [Dis]"
+                })
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(if info.pl1_msr_enabled {
+                        COLOR_GREEN
+                    } else {
+                        COLOR_GRAY
+                    })
+                }),
+                text(if info.pl1_msr_clamped { " [Cl]" } else { "" })
+                    .size(FONT_SMALL)
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(COLOR_HEADER)
+                    }),
+            ]
+            .spacing(4),
+        );
+        settings_content = settings_content.push(
+            row![
+                text(format!(
+                    "  PL2: {:.1}W ({:.2}s)",
+                    info.pl2_msr, info.pl2_time_s
+                ))
+                .size(FONT_BODY),
+                text(if info.pl2_msr_enabled {
+                    " [En]"
+                } else {
+                    " [Dis]"
+                })
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(if info.pl2_msr_enabled {
+                        COLOR_GREEN
+                    } else {
+                        COLOR_GRAY
+                    })
+                }),
+                text(if info.pl2_msr_clamped { " [Cl]" } else { "" })
+                    .size(FONT_SMALL)
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(COLOR_HEADER)
+                    }),
+            ]
+            .spacing(4),
+        );
 
         settings_content = settings_content.push(text("MMIO (Read-only)").size(FONT_BODY));
-        settings_content = settings_content.push(row![
-            text(format!("  PL1: {:.1}W ({:.2}s)", info.pl1_mmio, info.pl1_mmio_time_s)).size(FONT_BODY),
-            text(if info.pl1_mmio_enabled { " [En]" } else { " [Dis]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl1_mmio_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
-            text(if info.pl1_mmio_clamped { " [Cl]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
-        ].spacing(4));
-        settings_content = settings_content.push(row![
-            text(format!("  PL2: {:.1}W ({:.2}s)", info.pl2_mmio, info.pl2_mmio_time_s)).size(FONT_BODY),
-            text(if info.pl2_mmio_enabled { " [En]" } else { " [Dis]" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(if info.pl2_mmio_enabled { COLOR_GREEN } else { COLOR_GRAY }) }),
-            text(if info.pl2_mmio_clamped { " [Cl]" } else { "" }).size(FONT_SMALL).style(|_theme| iced::widget::text::Style { color: Some(COLOR_HEADER) }),
-        ].spacing(4));
+        settings_content = settings_content.push(
+            row![
+                text(format!(
+                    "  PL1: {:.1}W ({:.2}s)",
+                    info.pl1_mmio, info.pl1_mmio_time_s
+                ))
+                .size(FONT_BODY),
+                text(if info.pl1_mmio_enabled {
+                    " [En]"
+                } else {
+                    " [Dis]"
+                })
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(if info.pl1_mmio_enabled {
+                        COLOR_GREEN
+                    } else {
+                        COLOR_GRAY
+                    })
+                }),
+                text(if info.pl1_mmio_clamped { " [Cl]" } else { "" })
+                    .size(FONT_SMALL)
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(COLOR_HEADER)
+                    }),
+            ]
+            .spacing(4),
+        );
+        settings_content = settings_content.push(
+            row![
+                text(format!(
+                    "  PL2: {:.1}W ({:.2}s)",
+                    info.pl2_mmio, info.pl2_mmio_time_s
+                ))
+                .size(FONT_BODY),
+                text(if info.pl2_mmio_enabled {
+                    " [En]"
+                } else {
+                    " [Dis]"
+                })
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(if info.pl2_mmio_enabled {
+                        COLOR_GREEN
+                    } else {
+                        COLOR_GRAY
+                    })
+                }),
+                text(if info.pl2_mmio_clamped { " [Cl]" } else { "" })
+                    .size(FONT_SMALL)
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(COLOR_HEADER)
+                    }),
+            ]
+            .spacing(4),
+        );
 
         // Editable PL1/PL2 writes to MSR 0x610.
         settings_content = settings_content.push(text("PL1/PL2 Control").size(FONT_BODY));
-        settings_content = settings_content.push(row![
-            text("  PL1:").size(FONT_BODY),
-            text_input("W", &snap.pl1_edit)
-                .width(Length::Fixed(60.0))
-                .on_input(Message::CpuPowerPl1Changed),
-            iced::widget::checkbox(snap.pl1_enabled).on_toggle(Message::CpuPowerPl1EnabledToggled),
-            text("En").size(FONT_SMALL),
-            iced::widget::checkbox(snap.pl1_clamped).on_toggle(Message::CpuPowerPl1ClampedToggled),
-            text("Cl").size(FONT_SMALL),
-            text("T:").size(FONT_SMALL),
-            text_input("s", &snap.pl1_time_edit)
-                .width(Length::Fixed(50.0))
-                .on_input(Message::CpuPowerPl1TimeChanged),
-        ].spacing(4).align_y(iced::Alignment::Center));
-        settings_content = settings_content.push(row![
-            text("  PL2:").size(FONT_BODY),
-            text_input("W", &snap.pl2_edit)
-                .width(Length::Fixed(60.0))
-                .on_input(Message::CpuPowerPl2Changed),
-            iced::widget::checkbox(snap.pl2_enabled).on_toggle(Message::CpuPowerPl2EnabledToggled),
-            text("En").size(FONT_SMALL),
-            iced::widget::checkbox(snap.pl2_clamped).on_toggle(Message::CpuPowerPl2ClampedToggled),
-            text("Cl").size(FONT_SMALL),
-        ].spacing(4).align_y(iced::Alignment::Center));
+        settings_content = settings_content.push(
+            row![
+                text("  PL1:").size(FONT_BODY),
+                text_input("W", &snap.pl1_edit)
+                    .width(Length::Fixed(60.0))
+                    .on_input(Message::CpuPowerPl1Changed),
+                iced::widget::checkbox(snap.pl1_enabled)
+                    .on_toggle(Message::CpuPowerPl1EnabledToggled),
+                text("En").size(FONT_SMALL),
+                iced::widget::checkbox(snap.pl1_clamped)
+                    .on_toggle(Message::CpuPowerPl1ClampedToggled),
+                text("Cl").size(FONT_SMALL),
+                text("T:").size(FONT_SMALL),
+                text_input("s", &snap.pl1_time_edit)
+                    .width(Length::Fixed(50.0))
+                    .on_input(Message::CpuPowerPl1TimeChanged),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center),
+        );
+        settings_content = settings_content.push(
+            row![
+                text("  PL2:").size(FONT_BODY),
+                text_input("W", &snap.pl2_edit)
+                    .width(Length::Fixed(60.0))
+                    .on_input(Message::CpuPowerPl2Changed),
+                iced::widget::checkbox(snap.pl2_enabled)
+                    .on_toggle(Message::CpuPowerPl2EnabledToggled),
+                text("En").size(FONT_SMALL),
+                iced::widget::checkbox(snap.pl2_clamped)
+                    .on_toggle(Message::CpuPowerPl2ClampedToggled),
+                text("Cl").size(FONT_SMALL),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center),
+        );
 
         if let Some(ref err) = snap.cpu_power_error {
-            settings_content = settings_content.push(text(err.as_str())
-                .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style { color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)) }));
+            settings_content =
+                settings_content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+                    iced::widget::text::Style {
+                        color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+                    }
+                }));
         }
 
         if snap.sync_enabled {
-            settings_content = settings_content.push(text("Syncing MSR 0x610 every 250ms")
-                .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style { color: Some(COLOR_GREEN) }));
+            settings_content = settings_content.push(
+                text("Syncing MSR 0x610 every 250ms")
+                    .size(FONT_SMALL)
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(COLOR_GREEN),
+                    }),
+            );
         }
 
-        settings_content = settings_content.push(row![
-            button(text("Apply").size(FONT_BODY))
-                .on_press(Message::CpuPowerApply)
+        settings_content = settings_content.push(
+            row![
+                button(text("Apply").size(FONT_BODY))
+                    .on_press(Message::CpuPowerApply)
+                    .style(btn_style),
+                button(
+                    text(if snap.sync_enabled {
+                        "Stop Sync"
+                    } else {
+                        "Start Sync"
+                    })
+                    .size(FONT_BODY)
+                )
+                .on_press(if snap.sync_enabled {
+                    Message::CpuPowerSyncStop
+                } else {
+                    Message::CpuPowerSyncStart
+                })
                 .style(btn_style),
-            button(text(if snap.sync_enabled { "Stop Sync" } else { "Start Sync" }).size(FONT_BODY))
-                .on_press(if snap.sync_enabled { Message::CpuPowerSyncStop } else { Message::CpuPowerSyncStart })
-                .style(btn_style),
-            button(text("Reset").size(FONT_BODY))
-                .on_press(Message::CpuPowerSyncReset)
-                .style(btn_style),
-        ].spacing(8));
+                button(text("Reset").size(FONT_BODY))
+                    .on_press(Message::CpuPowerSyncReset)
+                    .style(btn_style),
+            ]
+            .spacing(8),
+        );
 
         content = content.push(
             container(settings_content)
@@ -1384,9 +1993,12 @@ fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 .padding(8)
                 .style(|_theme| iced::widget::container::Style {
                     background: Some(COLOR_SETTINGS_BG.into()),
-                    border: iced::Border::default().rounded(4).color(COLOR_DARK).width(1),
+                    border: iced::Border::default()
+                        .rounded(4)
+                        .color(COLOR_DARK)
+                        .width(1),
                     ..Default::default()
-                })
+                }),
         );
     }
 
@@ -1415,7 +2027,10 @@ mod tests {
     #[test]
     fn charge_limit_display_configured_uses_values() {
         assert_eq!(
-            charge_limit_display(Some(crate::types::SettingU8 { enabled: true, value: 80 })),
+            charge_limit_display(Some(crate::types::SettingU8 {
+                enabled: true,
+                value: 80
+            })),
             (true, 80)
         );
     }

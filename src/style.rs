@@ -1,14 +1,64 @@
-pub const COLOR_GREEN: iced::Color = iced::Color { r: 0.13, g: 0.77, b: 0.37, a: 1.0 };
-pub const COLOR_GRAY: iced::Color = iced::Color { r: 0.6, g: 0.6, b: 0.6, a: 1.0 };
-pub const COLOR_DARK: iced::Color = iced::Color { r: 0.3, g: 0.3, b: 0.3, a: 1.0 };
-pub const COLOR_HEADER: iced::Color = iced::Color { r: 0.9, g: 0.9, b: 0.9, a: 1.0 };
-pub const COLOR_SETTINGS_BG: iced::Color = iced::Color { r: 0.15, g: 0.15, b: 0.18, a: 1.0 };
-pub const COLOR_CARD_BG: iced::Color = iced::Color { r: 0.14, g: 0.14, b: 0.17, a: 1.0 };
-pub const COLOR_CARD_BORDER: iced::Color = iced::Color { r: 0.25, g: 0.25, b: 0.28, a: 1.0 };
-pub const COLOR_NOT_SUPPORTED_BG: iced::Color = iced::Color { r: 0.25, g: 0.12, b: 0.12, a: 0.4 };
-pub const COLOR_NOT_SUPPORTED_TEXT: iced::Color = iced::Color { r: 0.7, g: 0.4, b: 0.4, a: 1.0 };
+pub const COLOR_GREEN: iced::Color = iced::Color {
+    r: 0.13,
+    g: 0.77,
+    b: 0.37,
+    a: 1.0,
+};
+pub const COLOR_GRAY: iced::Color = iced::Color {
+    r: 0.6,
+    g: 0.6,
+    b: 0.6,
+    a: 1.0,
+};
+pub const COLOR_DARK: iced::Color = iced::Color {
+    r: 0.3,
+    g: 0.3,
+    b: 0.3,
+    a: 1.0,
+};
+pub const COLOR_HEADER: iced::Color = iced::Color {
+    r: 0.9,
+    g: 0.9,
+    b: 0.9,
+    a: 1.0,
+};
+pub const COLOR_SETTINGS_BG: iced::Color = iced::Color {
+    r: 0.15,
+    g: 0.15,
+    b: 0.18,
+    a: 1.0,
+};
+pub const COLOR_CARD_BG: iced::Color = iced::Color {
+    r: 0.14,
+    g: 0.14,
+    b: 0.17,
+    a: 1.0,
+};
+pub const COLOR_CARD_BORDER: iced::Color = iced::Color {
+    r: 0.25,
+    g: 0.25,
+    b: 0.28,
+    a: 1.0,
+};
+pub const COLOR_NOT_SUPPORTED_BG: iced::Color = iced::Color {
+    r: 0.25,
+    g: 0.12,
+    b: 0.12,
+    a: 0.4,
+};
+pub const COLOR_NOT_SUPPORTED_TEXT: iced::Color = iced::Color {
+    r: 0.7,
+    g: 0.4,
+    b: 0.4,
+    a: 1.0,
+};
 /// Curve color (#6b75ff) shared by canvas and matching slider thumbs.
-pub const COLOR_CURVE: iced::Color = iced::Color { r: 107.0 / 255.0, g: 117.0 / 255.0, b: 1.0, a: 1.0 };
+pub const COLOR_CURVE: iced::Color = iced::Color {
+    r: 107.0 / 255.0,
+    g: 117.0 / 255.0,
+    b: 1.0,
+    a: 1.0,
+};
 
 /// Minimum poll interval: 200ms avoids overlapping framework_tool calls.
 pub const POLL_RATE_MIN_MS: u32 = 200;
@@ -39,16 +89,66 @@ pub const VERSIONS_REFRESH_MS: u64 = 60_000;
 pub const STABLE_THRESHOLD: usize = 2;
 
 pub const SENSOR_COLORS: [iced::Color; 10] = [
-    iced::Color { r: 0.23, g: 0.51, b: 0.96, a: 1.0 },
-    iced::Color { r: 0.94, g: 0.27, b: 0.27, a: 1.0 },
-    iced::Color { r: 0.06, g: 0.73, b: 0.51, a: 1.0 },
-    iced::Color { r: 0.96, g: 0.62, b: 0.04, a: 1.0 },
-    iced::Color { r: 0.55, g: 0.36, b: 0.96, a: 1.0 },
-    iced::Color { r: 0.96, g: 0.35, b: 0.70, a: 1.0 },
-    iced::Color { r: 0.20, g: 0.80, b: 0.80, a: 1.0 },
-    iced::Color { r: 0.80, g: 0.80, b: 0.20, a: 1.0 },
-    iced::Color { r: 1.00, g: 0.60, b: 0.20, a: 1.0 },
-    iced::Color { r: 0.40, g: 0.70, b: 0.30, a: 1.0 },
+    iced::Color {
+        r: 0.23,
+        g: 0.51,
+        b: 0.96,
+        a: 1.0,
+    },
+    iced::Color {
+        r: 0.94,
+        g: 0.27,
+        b: 0.27,
+        a: 1.0,
+    },
+    iced::Color {
+        r: 0.06,
+        g: 0.73,
+        b: 0.51,
+        a: 1.0,
+    },
+    iced::Color {
+        r: 0.96,
+        g: 0.62,
+        b: 0.04,
+        a: 1.0,
+    },
+    iced::Color {
+        r: 0.55,
+        g: 0.36,
+        b: 0.96,
+        a: 1.0,
+    },
+    iced::Color {
+        r: 0.96,
+        g: 0.35,
+        b: 0.70,
+        a: 1.0,
+    },
+    iced::Color {
+        r: 0.20,
+        g: 0.80,
+        b: 0.80,
+        a: 1.0,
+    },
+    iced::Color {
+        r: 0.80,
+        g: 0.80,
+        b: 0.20,
+        a: 1.0,
+    },
+    iced::Color {
+        r: 1.00,
+        g: 0.60,
+        b: 0.20,
+        a: 1.0,
+    },
+    iced::Color {
+        r: 0.40,
+        g: 0.70,
+        b: 0.30,
+        a: 1.0,
+    },
 ];
 
 pub fn card<'a>(content: iced::Element<'a, crate::Message>) -> iced::Element<'a, crate::Message> {
@@ -57,7 +157,10 @@ pub fn card<'a>(content: iced::Element<'a, crate::Message>) -> iced::Element<'a,
         .width(iced::Length::Fill)
         .style(|_theme| iced::widget::container::Style {
             background: Some(COLOR_CARD_BG.into()),
-            border: iced::Border::default().rounded(8).color(COLOR_CARD_BORDER).width(1),
+            border: iced::Border::default()
+                .rounded(8)
+                .color(COLOR_CARD_BORDER)
+                .width(1),
             ..Default::default()
         })
         .into()
@@ -65,7 +168,10 @@ pub fn card<'a>(content: iced::Element<'a, crate::Message>) -> iced::Element<'a,
 
 pub fn colored_dot<'a>(color: iced::Color, size: f32) -> iced::Element<'a, crate::Message> {
     iced::widget::container(iced::widget::text("").size(FONT_SMALL))
-        .width(size).height(size).center_x(size).center_y(size)
+        .width(size)
+        .height(size)
+        .center_x(size)
+        .center_y(size)
         .style(move |_theme| iced::widget::container::Style {
             background: Some(color.into()),
             border: iced::Border::default().rounded(size / 2.0),
@@ -81,7 +187,11 @@ pub fn sensor_color(name: &str, sensor_keys: &[String]) -> iced::Color {
 
 pub fn info_row(label: &str, value: &str) -> iced::Element<'static, crate::Message> {
     iced::widget::row![
-        iced::widget::text(format!("{}:", label)).size(FONT_BODY).style(|_theme| iced::widget::text::Style { color: Some(COLOR_GRAY) }),
+        iced::widget::text(format!("{}:", label))
+            .size(FONT_BODY)
+            .style(|_theme| iced::widget::text::Style {
+                color: Some(COLOR_GRAY)
+            }),
         iced::widget::text(value.to_owned()).size(FONT_BODY),
     ]
     .spacing(8)
@@ -93,20 +203,29 @@ pub fn mode_style(selected: bool) -> iced::widget::button::Style {
         iced::widget::button::Style {
             background: Some(iced::Color::from_rgb(0.23, 0.51, 0.96).into()),
             text_color: iced::Color::WHITE,
-            border: iced::Border::default().rounded(6).width(1).color(iced::Color::from_rgb(0.23, 0.51, 0.96)),
+            border: iced::Border::default()
+                .rounded(6)
+                .width(1)
+                .color(iced::Color::from_rgb(0.23, 0.51, 0.96)),
             ..iced::widget::button::Style::default()
         }
     } else {
         iced::widget::button::Style {
             background: Some(iced::Color::TRANSPARENT.into()),
             text_color: iced::Color::from_rgb(0.7, 0.7, 0.7),
-            border: iced::Border::default().rounded(6).width(1).color(iced::Color::from_rgb(0.4, 0.4, 0.4)),
+            border: iced::Border::default()
+                .rounded(6)
+                .width(1)
+                .color(iced::Color::from_rgb(0.4, 0.4, 0.4)),
             ..iced::widget::button::Style::default()
         }
     }
 }
 
-pub fn slider_style(_theme: &iced::Theme, status: iced::widget::slider::Status) -> iced::widget::slider::Style {
+pub fn slider_style(
+    _theme: &iced::Theme,
+    status: iced::widget::slider::Status,
+) -> iced::widget::slider::Style {
     use iced::widget::slider::{Handle, HandleShape, Rail};
     // Matches curve control points: round handle with white ring.
     let (radius, border_width) = match status {
@@ -130,7 +249,10 @@ pub fn slider_style(_theme: &iced::Theme, status: iced::widget::slider::Status) 
     }
 }
 
-pub fn btn_style(_theme: &iced::Theme, status: iced::widget::button::Status) -> iced::widget::button::Style {
+pub fn btn_style(
+    _theme: &iced::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
     let (bg, text_color) = match status {
         iced::widget::button::Status::Hovered => (
             Some(iced::Color::from_rgba(0.3, 0.3, 0.3, 0.5).into()),
@@ -152,7 +274,10 @@ pub fn btn_style(_theme: &iced::Theme, status: iced::widget::button::Status) -> 
     iced::widget::button::Style {
         background: bg,
         text_color,
-        border: iced::Border::default().rounded(6).width(1).color(iced::Color::from_rgb(0.4, 0.4, 0.4)),
+        border: iced::Border::default()
+            .rounded(6)
+            .width(1)
+            .color(iced::Color::from_rgb(0.4, 0.4, 0.4)),
         ..iced::widget::button::Style::default()
     }
 }
