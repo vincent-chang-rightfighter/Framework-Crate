@@ -116,6 +116,19 @@ framework_lib (CrosEc) → background_task → Arc<RwLock> → UI (view reads)
 - The `mutate_config` helper reduces boilerplate for config mutations
 - Canvas editor uses cached rendering with content-based invalidation (points, sensor marks, hover/drag state)
 
+### Resource Usage
+
+Measured on `target/release/framework-crate.exe` (Windows, `iced 0.14 + wgpu`, `cargo build --release` with `lto = "fat"` `strip = true`):
+
+| Metric | Before | After | Change |
+|--------|--------|-------|--------|
+| Private Memory | 166 MB | 114 MB | -52 MB (-31%) |
+| Working Set | 211 MB | 159 MB | -52 MB (-24%) |
+| CPU (idle) | <1% | <1% | fewer wakeups |
+| Binary Size | 9.3 MiB | 9.3 MiB | `framework_crate` 5% of `.text` |
+
+Key changes: `SmallVec` for fan/PD port collections and `antialiasing: false` for `wgpu` to avoid multisample buffers, while capping thermal history to 300 samples.
+
 ## Configuration
 
 Config file location: `%APPDATA%/framework-crate/config.toml`
