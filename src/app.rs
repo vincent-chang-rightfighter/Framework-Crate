@@ -347,8 +347,8 @@ impl App {
             },
             peripherals: PeripheralState {
                 kblight: Arc::new(RwLock::new(Arc::new(None))),
-                expansion_cards: Arc::new(RwLock::new(Arc::new(Vec::new()))),
-                pd_ports: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+                expansion_cards: Arc::new(RwLock::new(Arc::new(smallvec::SmallVec::new()))),
+                pd_ports: Arc::new(RwLock::new(Arc::new(smallvec::SmallVec::new()))),
                 pd_ports_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
                 pd_usb_c_seen: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             },
@@ -1281,7 +1281,7 @@ impl App {
                             .unwrap_or(false);
                         let card_type = crate::cli::ec_wrapper::classify_pd_port(
                             port,
-                            history.iter().map(|a| a.as_ref()),
+                            history.iter().map(|a| a.as_ref().as_slice()),
                             crate::style::STABLE_THRESHOLD,
                             dp_card.is_some(),
                             ever_seen_sink,

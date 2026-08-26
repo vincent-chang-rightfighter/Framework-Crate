@@ -85,7 +85,7 @@ fn verify_affinity(expected_id: usize) {
 }
 
 fn push_pd_ports_history(
-    pd_ports: &Arc<RwLock<Arc<Vec<cli::ec_wrapper::UsbCPort>>>>,
+    pd_ports: &Arc<RwLock<Arc<smallvec::SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>>>,
     history: &Arc<RwLock<Arc<crate::sub_state::PdPortsHistory>>>,
 ) {
     let snapshot = Arc::clone(&read_lock(pd_ports));

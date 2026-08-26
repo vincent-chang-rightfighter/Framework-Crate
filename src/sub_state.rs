@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
+use smallvec::SmallVec;
 use parking_lot::RwLock;
 
 use crate::cli;
@@ -9,7 +10,7 @@ use crate::temp_chart;
 use crate::types::{Config, BatteryInfo};
 use crate::util::{read_lock, with_write_lock};
 
-pub type PdPortsHistory = VecDeque<Arc<Vec<cli::ec_wrapper::UsbCPort>>>;
+pub type PdPortsHistory = VecDeque<Arc<SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>>;
 
 #[derive(Clone)]
 pub struct FanState {
@@ -76,8 +77,8 @@ impl ThermalState {
 #[derive(Clone)]
 pub struct PeripheralState {
     pub kblight: Arc<RwLock<Arc<Option<u32>>>>,
-    pub expansion_cards: Arc<RwLock<Arc<Vec<cli::ec_wrapper::ExpansionCard>>>>,
-    pub pd_ports: Arc<RwLock<Arc<Vec<cli::ec_wrapper::UsbCPort>>>>,
+    pub expansion_cards: Arc<RwLock<Arc<SmallVec<[cli::ec_wrapper::ExpansionCard; 4]>>>>,
+    pub pd_ports: Arc<RwLock<Arc<SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>>>,
     pub pd_ports_history: Arc<RwLock<Arc<PdPortsHistory>>>,
     /// NOTE: Ports once seen as Sink are permanently USB-C.
     pub pd_usb_c_seen: Arc<RwLock<Arc<Vec<bool>>>>,
@@ -87,8 +88,8 @@ impl Default for PeripheralState {
     fn default() -> Self {
         Self {
             kblight: Arc::new(RwLock::new(Arc::new(None))),
-            expansion_cards: Arc::new(RwLock::new(Arc::new(Vec::new()))),
-            pd_ports: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            expansion_cards: Arc::new(RwLock::new(Arc::new(SmallVec::new()))),
+            pd_ports: Arc::new(RwLock::new(Arc::new(SmallVec::new()))),
             pd_ports_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
             pd_usb_c_seen: Arc::new(RwLock::new(Arc::new(Vec::new()))),
         }
@@ -97,8 +98,8 @@ impl Default for PeripheralState {
 
 pub struct PeripheralSnapshot {
     pub kblight: Arc<Option<u32>>,
-    pub expansion_cards: Arc<Vec<cli::ec_wrapper::ExpansionCard>>,
-    pub pd_ports: Arc<Vec<cli::ec_wrapper::UsbCPort>>,
+    pub expansion_cards: Arc<SmallVec<[cli::ec_wrapper::ExpansionCard; 4]>>,
+    pub pd_ports: Arc<SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>,
     pub pd_ports_history: Arc<PdPortsHistory>,
     pub pd_usb_c_seen: Arc<Vec<bool>>,
 }

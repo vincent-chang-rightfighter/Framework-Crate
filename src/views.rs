@@ -8,6 +8,7 @@ use iced::widget::{button, column, container, row, scrollable, text, text_input}
 use iced::widget::rule;
 use iced::widget::space;
 use iced::{Element, Length};
+use smallvec::SmallVec;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -19,8 +20,8 @@ pub(crate) struct ViewSnapshot {
     pub temp_history: std::sync::Arc<std::collections::VecDeque<crate::temp_chart::TempSample>>,
     pub battery: Arc<Option<crate::types::BatteryInfo>>,
     pub kblight: Arc<Option<u32>>,
-    pub expansion_cards: Arc<Vec<cli::ec_wrapper::ExpansionCard>>,
-    pub pd_ports: Arc<Vec<cli::ec_wrapper::UsbCPort>>,
+    pub expansion_cards: Arc<SmallVec<[cli::ec_wrapper::ExpansionCard; 4]>>,
+    pub pd_ports: Arc<SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>,
     pub pd_ports_history: Arc<crate::sub_state::PdPortsHistory>,
     pub pd_usb_c_seen: Arc<Vec<bool>>,
     pub curve_full_points: Arc<Vec<[u32; 2]>>,
@@ -1157,7 +1158,7 @@ fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 .get(port.port as usize)
                 .copied()
                 .unwrap_or(false);
-            let card_type = crate::cli::ec_wrapper::classify_pd_port(port, history.iter().map(|a| a.as_ref()), STABLE_THRESHOLD, dp_card.is_some(), ever_seen_sink);
+            let card_type = crate::cli::ec_wrapper::classify_pd_port(port, history.iter().map(|a| a.as_ref().as_slice()), STABLE_THRESHOLD, dp_card.is_some(), ever_seen_sink);
             let is_display_card = card_type == "DisplayPort Expansion Card"
                 || card_type == "HDMI Expansion Card"
                 || card_type == "DP/HDMI Expansion Card";

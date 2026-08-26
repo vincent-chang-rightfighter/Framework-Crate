@@ -134,7 +134,7 @@ fn is_sink_no_pd(port: &UsbCPort) -> bool {
     !port.dp_alt_mode && role_is(port, "Sink") && !port.pd_contract
 }
 
-fn history_has_role(history: &[&Vec<UsbCPort>], port_id: u32, power_role: &str, pd_contract: bool) -> bool {
+fn history_has_role(history: &[&[UsbCPort]], port_id: u32, power_role: &str, pd_contract: bool) -> bool {
     history.iter().any(|h| h.iter().any(|p| p.port == port_id
         && p.power_role == Some(power_role)
         && p.pd_contract == pd_contract))
@@ -149,14 +149,14 @@ fn same_port_identity(a: &UsbCPort, b: &UsbCPort) -> bool {
 
 pub fn classify_pd_port<'a>(
     port: &UsbCPort,
-    history: impl IntoIterator<Item = &'a Vec<UsbCPort>>,
+    history: impl IntoIterator<Item = &'a [UsbCPort]>,
     stable_threshold: usize,
     display_card_installed: bool,
     ever_seen_sink: bool,
 ) -> &'static str {
     const MAX_HIST: usize = 3;
-    let empty = Vec::new();
-    let mut hist_buf: [&Vec<UsbCPort>; MAX_HIST] = [&empty; MAX_HIST];
+    let empty: &[UsbCPort] = &[];
+    let mut hist_buf: [&[UsbCPort]; MAX_HIST] = [empty; MAX_HIST];
     let mut hist_len: usize = 0;
     for h in history {
         if hist_len < MAX_HIST {
@@ -516,11 +516,11 @@ impl EcClient {
             .map_err(|e| format!("Failed to get charge limit: {:?}", e))
     }
 
-    pub fn pd_ports(&self) -> Vec<UsbCPort> {
+    pub fn pd_ports(&self) -> SmallVec<[UsbCPort; 4]> {
         use framework_lib::chromium_ec::commands::EcRequestGetPdPortState;
         use framework_lib::chromium_ec::EcRequestRaw;
 
-        let mut ports = Vec::new();
+        let mut ports = SmallVec::new();
         for i in 0u8..4 {
             let info = match (EcRequestGetPdPortState { port: i }).send_command(&self.ec) {
                 Ok(info) => info,
@@ -577,8 +577,8 @@ impl EcClient {
         ports
     }
 
-    pub fn expansion_cards(&self) -> Vec<ExpansionCard> {
-        let mut cards = Vec::new();
+    pub fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]> {
+        let mut cards = SmallVec::new();
         match self.ec.read_board_id_hc(framework_lib::chromium_ec::commands::BoardIdType::Mainboard) {
             Ok(Some(board_id)) => {
                 if board_id != 0 {
@@ -641,7 +641,7 @@ mod tests {
         let p = port("Source", false, false, Some(7.5));
         let hist = [vec![port("Sink", false, false, None)]];
         assert_eq!(
-            classify_pd_port(&p, hist.iter(), 2, false, true),
+            classify_pd_port(&p, hist.iter().map(|v| v.as_slice()), 2, false, true),
             "USB-C Expansion Card"
         );
     }
@@ -654,7 +654,7 @@ mod tests {
             vec![port("Source", false, false, Some(7.5))],
         ];
         assert_eq!(
-            classify_pd_port(&p, hist.iter(), 2, false, false),
+            classify_pd_port(&p, hist.iter().map(|v| v.as_slice()), 2, false, false),
             "USB-A Expansion Card"
         );
     }
