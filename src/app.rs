@@ -288,6 +288,9 @@ pub struct App {
     pub pl2_enabled: bool,
     pub pl1_clamped: bool,
     pub pl2_clamped: bool,
+    /// True when the user has uncommitted PL field edits; while set, incoming
+    /// CPU power readbacks must not overwrite the edit boxes (#7).
+    pub pl_fields_dirty: bool,
     pub cpu_power_error: Option<String>,
     pub ec_op_error: Option<String>,
     pub pl_custom_applied: Arc<std::sync::atomic::AtomicBool>,
@@ -466,6 +469,7 @@ impl App {
             pl2_enabled: true,
             pl1_clamped: false,
             pl2_clamped: false,
+            pl_fields_dirty: false,
             cpu_power_error: None,
             ec_op_error: None,
             pl_custom_applied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -798,13 +802,19 @@ impl App {
         }
 
         // Detect sync thread death (MSR write failure) with grace period.
+        // Restart it from the last desired params; if none are available the
+        // death is permanent and we stop reporting it as syncing.
         if self.state.cpu_power.is_sync_dead() {
-            self.state
-                .cpu_power
-                .sync_enabled
-                .store(false, Ordering::Release);
+            let restarted = self.state.cpu_power.try_restart_if_dead();
+            if !restarted && self.state.cpu_power.desired_sync_params().is_none() {
+                self.state
+                    .cpu_power
+                    .sync_enabled
+                    .store(false, Ordering::Release);
+                warn!("Sync thread exited and cannot be restarted (no desired params)");
+            }
+            // Reflect state change (or pending retry) in the UI.
             self.mark_dirty();
-            warn!("Sync thread exited unexpectedly");
         }
 
         tick_task(next_ms)
@@ -1116,7 +1126,7 @@ impl App {
             }
             Message::RestoreFromTray => {
                 self.tray.mark_restored();
-                self.tray.restore_window();
+                self.pl_fields_dirty = false;
                 self.state.lifecycle.visible.store(true, Ordering::Release);
                 self.mark_dirty();
                 self.icon_create_in_flight = false;
@@ -1676,6 +1686,7 @@ impl App {
                 } else {
                     // Refresh PawnIO version and re-read MSR/MMIO off UI thread.
                     self.cpu_power_error = None;
+                    self.pl_fields_dirty = false;
                     crate::cpu_power::invalidate_pawnio_version();
                     refresh_cpu_power_task(self.state.cpu_power.clone(), || {
                         crate::cpu_power::pawnio_version();
@@ -1701,6 +1712,7 @@ impl App {
             Message::PawnIOModulesDownloaded(result) => match result {
                 Ok(()) => {
                     self.modules_download_error = None;
+                    self.pl_fields_dirty = false;
                     refresh_cpu_power_task(self.state.cpu_power.clone(), || {})
                 }
                 Err(e) => {
@@ -1712,18 +1724,21 @@ impl App {
             },
             Message::CpuPowerPl1Changed(val) => {
                 self.pl1_edit = val;
+                self.pl_fields_dirty = true;
                 self.cpu_power_error = None;
                 self.mark_dirty();
                 Task::none()
             }
             Message::CpuPowerPl2Changed(val) => {
                 self.pl2_edit = val;
+                self.pl_fields_dirty = true;
                 self.cpu_power_error = None;
                 self.mark_dirty();
                 Task::none()
             }
             Message::CpuPowerPl1TimeChanged(val) => {
                 self.pl1_time_edit = val;
+                self.pl_fields_dirty = true;
                 self.cpu_power_error = None;
                 self.mark_dirty();
                 Task::none()
@@ -1760,6 +1775,7 @@ impl App {
                         return Task::none();
                     }
                 };
+                self.pl_fields_dirty = false;
                 self.cpu_power_error = None;
                 let pl1_en = self.pl1_enabled;
                 let pl2_en = self.pl2_enabled;
@@ -1789,6 +1805,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.pl_custom_applied.store(true, Ordering::Release);
+                        self.pl_fields_dirty = false;
                         self.cpu_power_error = None;
                         // Refresh readback and restart sync with fresh values if enabled.
                         let cpu_power = self.state.cpu_power.clone();
@@ -1836,6 +1853,7 @@ impl App {
                         return Task::none();
                     }
                 };
+                self.pl_fields_dirty = false;
                 self.cpu_power_error = None;
                 let pl1_en = self.pl1_enabled;
                 let pl2_en = self.pl2_enabled;
@@ -1889,7 +1907,10 @@ impl App {
                 }
                 stop_sync_task(self.state.cpu_power.clone())
             }
-            Message::CpuPowerSyncReset => self.handle_cpu_power_sync_reset(),
+            Message::CpuPowerSyncReset => {
+                self.pl_fields_dirty = false;
+                self.handle_cpu_power_sync_reset()
+            }
             Message::CpuPowerResetDone(result) => {
                 match result {
                     Ok(()) => {
@@ -2044,6 +2065,10 @@ impl App {
 
     /// Populates edit fields from CPU power snapshot.
     fn apply_edit_fields_from_snapshot(&mut self, info: &crate::cpu_power::CpuPowerInfo) {
+        // Do not clobber uncommitted user edits with a fresh readback (#7).
+        if self.pl_fields_dirty {
+            return;
+        }
         let (pl1, pl2, p1en, p2en, p1cl, p2cl, t1, _t2) = info.init_edit_fields();
         self.pl1_edit = pl1;
         self.pl2_edit = pl2;

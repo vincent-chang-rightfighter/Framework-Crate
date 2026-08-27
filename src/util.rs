@@ -38,13 +38,6 @@ pub fn cpu_power_mutex() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// Generation counter for coalescing rapid EC slider writes (e.g. kblight).
-#[allow(dead_code)]
-pub fn next_ec_generation() -> u64 {
-    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -390,4 +390,45 @@ mod tests {
         let result: Result<Config, _> = toml::from_str(&raw);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn save_versioned_skips_stale_version() {
+        // An older (lower) version must not overwrite a newer one already on
+        // disk: this guards shutdown saves against being clobbered by a stale
+        // debounced save and vice versa.
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR");
+        unsafe {
+            std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", dir.path());
+        }
+
+        let mut old = Config::default();
+        old.fan.mode = FanControlMode::Manual;
+        old.fan.manual = Some(ManualConfig { duty_pct: 30 });
+        crate::config::save_versioned(&old, 100, true).unwrap();
+
+        let mut new = Config::default();
+        new.fan.mode = FanControlMode::Manual;
+        new.fan.manual = Some(ManualConfig { duty_pct: 70 });
+        crate::config::save_versioned(&new, 200, true).unwrap();
+
+        // Stale write (lower version than the on-disk newest) must be skipped.
+        let mut stale = Config::default();
+        stale.fan.mode = FanControlMode::Manual;
+        stale.fan.manual = Some(ManualConfig { duty_pct: 10 });
+        crate::config::save_versioned(&stale, 150, true).unwrap();
+
+        let path = crate::config::config_path().unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let loaded: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(loaded.fan.manual.as_ref().unwrap().duty_pct, 70);
+
+        unsafe {
+            if let Some(v) = prev {
+                std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", v);
+            } else {
+                std::env::remove_var("FRAMEWORK_CONTROL_CONFIG_DIR");
+            }
+        }
+    }
 }

@@ -799,8 +799,16 @@ pub fn find_tray_window() -> Option<isize> {
 
 /// Asks running instance to restore its parked window (only owner has saved placement).
 pub fn request_show_running_instance() {
-    if let Some(hwnd) = find_tray_window() {
-        post_message(hwnd, show_request_message_id(), 0, 0);
+    // The running instance's tray window is created a moment after its main
+    // window appears, so a second instance launched immediately (or while the
+    // first is still booting) may find nothing. Retry briefly so the restore
+    // request is not silently dropped.
+    for _ in 0..20 {
+        if let Some(hwnd) = find_tray_window() {
+            post_message(hwnd, show_request_message_id(), 0, 0);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 

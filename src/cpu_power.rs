@@ -1368,22 +1368,26 @@ impl CpuPowerState {
             power_unit,
             time_unit,
         };
-        // Join old thread outside mutex to avoid blocking liveness check.
-        let old_handle = {
-            let mut thread = self.sync_thread.lock();
-            thread.running.store(false, Ordering::Release);
-            thread.handle.take()
-        };
-        if let Some(old) = old_handle {
+        self.start_sync_with_params(params)
+    }
+
+    /// Shared implementation. Holds the `sync_thread` lock across the entire
+    /// stop-old + join + start sequence so a concurrent `start_sync` (e.g.
+    /// `CpuPowerSyncStart` racing `CpuPowerApplied`, or a resume handler) cannot
+    /// slip into the gap between taking the old handle and starting a new one
+    /// and spawn two sync threads writing MSR/MMIO at once. The sync loop never
+    /// takes this lock, so joining under it cannot deadlock.
+    fn start_sync_with_params(&self, params: PowerLimitParams) -> Result<(), &'static str> {
+        let mut thread = self.sync_thread.lock();
+        thread.running.store(false, Ordering::Release);
+        if let Some(old) = thread.handle.take() {
             let _ = old.join();
         }
-        let mut thread = self.sync_thread.lock();
         thread.start(params, Arc::clone(&self.sync_alive))?;
         self.sync_enabled.store(true, Ordering::Release);
         self.sync_start_ms
             .store(crate::util::monotonic_ms(), Ordering::Release);
         *self.desired_sync.write() = Some(params);
-        // liveness will be set by the thread after successful handle init (startup handshake)
         Ok(())
     }
 
@@ -1408,23 +1412,50 @@ impl CpuPowerState {
         true
     }
 
-    /// Stops sync thread.
-    pub fn stop_sync(&self) {
-        let old_handle = {
-            let mut thread = self.sync_thread.lock();
-            thread.running.store(false, Ordering::Release);
-            thread.handle.take()
+    /// Attempts to revive a dead sync thread using the last desired params.
+    /// Returns true if a restart was actually initiated on this call. Throttled
+    /// to once per 5s so a persistently failing handle init does not spawn a
+    /// new thread every UI tick. No-ops (returns false) during the 1.5s startup
+    /// grace period or while a restart is still in progress.
+    pub fn try_restart_if_dead(&self) -> bool {
+        if !self.is_sync_dead() {
+            return false;
+        }
+        let now = crate::util::monotonic_ms();
+        let last = self.sync_start_ms.load(Ordering::Acquire);
+        if last != 0 && now.saturating_sub(last) < 5000 {
+            return false;
+        }
+        let params = match *self.desired_sync.read() {
+            Some(p) => p,
+            None => return false,
         };
-        if let Some(old) = old_handle {
+        match self.start_sync_with_params(params) {
+            Ok(()) => {
+                tracing::info!("Restarted dead CPU power sync thread");
+                true
+            }
+            Err(e) => {
+                warn!("Failed to restart CPU power sync thread: {}", e);
+                false
+            }
+        }
+    }
+
+    /// Stops sync thread. Holds the `sync_thread` lock across the whole teardown
+    /// so a concurrent `start_sync` cannot re-spawn a thread in the gap and then
+    /// be incorrectly marked stopped (which would disable a freshly started sync).
+    pub fn stop_sync(&self) {
+        let mut thread = self.sync_thread.lock();
+        thread.running.store(false, Ordering::Release);
+        if let Some(old) = thread.handle.take() {
             let _ = old.join();
         }
-        {
-            let thread = self.sync_thread.lock();
-            thread.alive.store(false, Ordering::Release);
-        }
+        thread.alive.store(false, Ordering::Release);
+        drop(thread);
         self.sync_alive.store(false, Ordering::Release);
         self.sync_enabled.store(false, Ordering::Release);
-        // Keep desired_sync for resume restore; only clear on explicit stop? keep until next start.
+        // Keep desired_sync for resume restore.
     }
 
     pub(crate) fn desired_sync_params(&self) -> Option<PowerLimitParams> {
@@ -1655,5 +1686,66 @@ mod tests {
         assert_eq!(info.effective_pl2(), 25.0);
         info.pl1_msr_enabled = true;
         assert_eq!(info.effective_pl1(), 15.0);
+    }
+
+    #[test]
+    fn concurrent_start_stop_sync_is_safe() {
+        // Exercises the start_sync/stop_sync locking path reworked for #1.
+        // Without PawnIO present the sync cannot actually initialize, but the
+        // calls must serialize cleanly: no panic and no duplicate live threads.
+        let state = CpuPowerState::default();
+        let p = PowerLimitParams {
+            pl1_watts: 15.0,
+            pl1_enabled: true,
+            pl1_clamped: false,
+            pl1_time_s: 28.0,
+            pl2_watts: 35.0,
+            pl2_enabled: true,
+            pl2_clamped: false,
+            pl2_time_s: 28.0,
+            power_unit: 0.125,
+            time_unit: 0.0009765625,
+        };
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let s = state.clone();
+            handles.push(std::thread::spawn(move || {
+                let _ = s.start_sync(
+                    p.pl1_watts,
+                    p.pl1_enabled,
+                    p.pl1_clamped,
+                    p.pl1_time_s,
+                    p.pl2_watts,
+                    p.pl2_enabled,
+                    p.pl2_clamped,
+                    p.pl2_time_s,
+                    p.power_unit,
+                    p.time_unit,
+                );
+                s.stop_sync();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert!(!state.is_sync_alive());
+        assert!(
+            !state
+                .sync_enabled
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+
+    #[test]
+    fn try_restart_if_dead_safe_without_params() {
+        let state = CpuPowerState::default();
+        // No desired params -> must not restart and must not panic.
+        assert!(!state.try_restart_if_dead());
+        state.stop_sync();
+        assert!(
+            !state
+                .sync_enabled
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
     }
 }
