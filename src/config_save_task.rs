@@ -46,9 +46,12 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
         let ec_clone = ec.clone();
         let _guard = crate::util::ec_write_mutex().lock().await;
         // min_pct=0: EC ignores software minimum; hardware enforces ~25%.
-        if let Err(e) = tokio::task::spawn_blocking(move || ec_clone.charge_limit_set(0, pct))
-            .await
-            .unwrap_or_else(|e| Err(format!("spawn error: {}", e)))
+        if let Err(e) = crate::util::spawn_blocking_with_timeout(
+            crate::util::EC_IO_TIMEOUT,
+            move || ec_clone.charge_limit_set(0, pct),
+        )
+        .await
+        .unwrap_or_else(|e| Err(e))
         {
             warn!("Failed to set charge limit: {}", e);
             return false;
@@ -108,12 +111,15 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
                         // Channel closed; save latest and exit (versioned).
                         let (cfg_arc, ver) = latest;
                         let save_failed = Arc::clone(&state.lifecycle.bg_config_save_failed);
-                        tokio::task::spawn_blocking(move || {
-                            if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, false) {
-                                warn!("Failed to save config on channel close: {}", e);
-                                save_failed.store(true, Ordering::Relaxed);
-                            }
-                        })
+                        crate::util::spawn_blocking_with_timeout(
+                            crate::util::EC_IO_TIMEOUT,
+                            move || {
+                                if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, false) {
+                                    warn!("Failed to save config on channel close: {}", e);
+                                    save_failed.store(true, Ordering::Relaxed);
+                                }
+                            },
+                        )
                         .await
                         .unwrap_or_else(|e| warn!("config save task panicked: {}", e));
                         return;
@@ -129,14 +135,17 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
             let (cfg_arc, ver) = latest;
             let cfg_for_battery = Arc::clone(&cfg_arc);
             let save_failed = Arc::clone(&state.lifecycle.bg_config_save_failed);
-            tokio::task::spawn_blocking(move || {
-                if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, false) {
-                    warn!("Failed to save config: {}", e);
-                    save_failed.store(true, Ordering::Relaxed);
-                } else {
-                    save_failed.store(false, Ordering::Relaxed);
-                }
-            })
+            crate::util::spawn_blocking_with_timeout(
+                crate::util::EC_IO_TIMEOUT,
+                move || {
+                    if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, false) {
+                        warn!("Failed to save config: {}", e);
+                        save_failed.store(true, Ordering::Relaxed);
+                    } else {
+                        save_failed.store(false, Ordering::Relaxed);
+                    }
+                },
+            )
             .await
             .unwrap_or_else(|e| warn!("config save task panicked: {}", e));
 

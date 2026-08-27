@@ -78,7 +78,12 @@ pub(crate) fn run_ec_task(
             let ec_opt = { read_lock(&ec_client) };
             if let Some(ref ec) = *ec_opt {
                 let ec = ec.clone();
-                if let Err(e) = tokio::task::spawn_blocking(move || f(ec)).await {
+                if let Err(e) = crate::util::spawn_blocking_with_timeout(
+                    crate::util::EC_IO_TIMEOUT,
+                    move || f(ec),
+                )
+                .await
+                {
                     warn!("EC task failed: {}", e);
                 }
             }
@@ -110,9 +115,14 @@ pub(crate) fn run_ec_task_result(
             let ec_opt = { read_lock(&ec_client) };
             let res = if let Some(ref ec) = *ec_opt {
                 let ec = ec.clone();
-                match tokio::task::spawn_blocking(move || f(ec)).await {
+                match crate::util::spawn_blocking_with_timeout(
+                    crate::util::EC_IO_TIMEOUT,
+                    move || f(ec),
+                )
+                .await
+                {
                     Ok(r) => r,
-                    Err(e) => Err(format!("EC task failed: {}", e)),
+                    Err(e) => Err(e),
                 }
             } else {
                 // No EC client: silently no-op to avoid spurious error.
@@ -142,12 +152,14 @@ fn refresh_cpu_power_task(
     let task_state = state.clone();
     Task::perform(
         async move {
-            tokio::task::spawn_blocking(move || {
-                task_state.refresh();
-                after();
-            })
-            .await
-            .ok();
+            let _ = crate::util::spawn_blocking_with_timeout(
+                crate::util::PAWNIO_IO_TIMEOUT,
+                move || {
+                    task_state.refresh();
+                    after();
+                },
+            )
+            .await;
             Message::CpuPowerDataRefreshed
         },
         |msg| msg,
@@ -159,9 +171,11 @@ fn stop_sync_task(state: crate::cpu_power::CpuPowerState) -> Task<Message> {
     Task::perform(
         async move {
             let _guard = crate::util::cpu_power_mutex().lock().await;
-            tokio::task::spawn_blocking(move || state.stop_sync())
-                .await
-                .ok();
+            let _ = crate::util::spawn_blocking_with_timeout(
+                crate::util::PAWNIO_IO_TIMEOUT,
+                move || state.stop_sync(),
+            )
+            .await;
             Message::CpuPowerSyncStopped
         },
         |msg| msg,
@@ -478,7 +492,12 @@ impl App {
 
         let init_task = Task::perform(
             async move {
-                match tokio::task::spawn_blocking(cli::EcClient::new).await {
+                match crate::util::spawn_blocking_with_timeout(
+                    crate::util::EC_IO_TIMEOUT,
+                    cli::EcClient::new,
+                )
+                .await
+                {
                     Ok(Ok(ec)) => {
                         state.system.cli_available.store(true, Ordering::Release);
                         let arc_ec = Arc::new(ec);
@@ -489,7 +508,12 @@ impl App {
                         state.system.ec_init_done.store(true, Ordering::Release);
                         let versions = Arc::clone(&state.system.versions);
                         let ec_cl = Arc::clone(&arc_ec);
-                        match tokio::task::spawn_blocking(move || ec_cl.versions()).await {
+                        match crate::util::spawn_blocking_with_timeout(
+                            crate::util::EC_IO_TIMEOUT,
+                            move || ec_cl.versions(),
+                        )
+                        .await
+                        {
                             Ok(Ok(v)) => {
                                 with_write_lock(&versions, |guard| {
                                     *guard = Arc::new(Some(v));
@@ -508,11 +532,12 @@ impl App {
                             if let Some(ref limit) = cfg.battery.charge_limit_max_pct {
                                 let pct = if limit.enabled { limit.value } else { 100 };
                                 let ec_clone = Arc::clone(&arc_ec);
-                                if let Err(e) = tokio::task::spawn_blocking(move || {
-                                    ec_clone.charge_limit_set(0, pct)
-                                })
+                                if let Err(e) = crate::util::spawn_blocking_with_timeout(
+                                    crate::util::EC_IO_TIMEOUT,
+                                    move || ec_clone.charge_limit_set(0, pct),
+                                )
                                 .await
-                                .unwrap_or_else(|e| Err(e.to_string()))
+                                .unwrap_or_else(|e| Err(e))
                                 {
                                     warn!("Failed to apply saved charge limit: {}", e);
                                 }
@@ -1668,11 +1693,12 @@ impl App {
                 }
                 Task::perform(
                     async {
-                        tokio::task::spawn_blocking(|| {
-                            crate::cpu_power::install_pawnio().map_err(|e| e.to_string())
-                        })
+                        crate::util::spawn_blocking_with_timeout(
+                            crate::util::PAWNIO_IO_TIMEOUT,
+                            || crate::cpu_power::install_pawnio().map_err(|e| e.to_string()),
+                        )
                         .await
-                        .unwrap_or_else(|e| Err(e.to_string()))
+                        .unwrap_or_else(|e| Err(e))
                     },
                     Message::PawnIOInstalled,
                 )
@@ -1699,12 +1725,15 @@ impl App {
                 }
                 Task::perform(
                     async {
-                        tokio::task::spawn_blocking(|| {
-                            crate::cpu_power::download_and_extract_modules()
-                                .map_err(|e| e.to_string())
-                        })
+                        crate::util::spawn_blocking_with_timeout(
+                            crate::util::PAWNIO_IO_TIMEOUT,
+                            || {
+                                crate::cpu_power::download_and_extract_modules()
+                                    .map_err(|e| e.to_string())
+                            },
+                        )
                         .await
-                        .unwrap_or_else(|e| Err(e.to_string()))
+                        .unwrap_or_else(|e| Err(e))
                     },
                     Message::PawnIOModulesDownloaded,
                 )
@@ -1788,15 +1817,18 @@ impl App {
                 Task::perform(
                     async move {
                         let _guard = crate::util::cpu_power_mutex().lock().await;
-                        tokio::task::spawn_blocking(move || {
-                            crate::cpu_power::write_msr_pl1_pl2_public(
-                                pl1, pl1_en, pl1_cl, pl1_time, pl2, pl2_en, pl2_cl, pl2_time,
-                                power_unit, time_unit,
-                            )
-                            .map_err(|e| e.to_string())
-                        })
+                        crate::util::spawn_blocking_with_timeout(
+                            crate::util::PAWNIO_IO_TIMEOUT,
+                            move || {
+                                crate::cpu_power::write_msr_pl1_pl2_public(
+                                    pl1, pl1_en, pl1_cl, pl1_time, pl2, pl2_en, pl2_cl, pl2_time,
+                                    power_unit, time_unit,
+                                )
+                                .map_err(|e| e.to_string())
+                            },
+                        )
                         .await
-                        .unwrap_or_else(|e| Err(e.to_string()))
+                        .unwrap_or_else(|e| Err(e))
                     },
                     Message::CpuPowerApplied,
                 )
@@ -1867,16 +1899,19 @@ impl App {
                 Task::perform(
                     async move {
                         let _guard = crate::util::cpu_power_mutex().lock().await;
-                        tokio::task::spawn_blocking(move || {
-                            cpu_power
-                                .start_sync(
-                                    pl1, pl1_en, pl1_cl, pl1_time, pl2, pl2_en, pl2_cl, pl2_time,
-                                    power_unit, time_unit,
-                                )
-                                .map_err(|e| e.to_string())
-                        })
+                        crate::util::spawn_blocking_with_timeout(
+                            crate::util::PAWNIO_IO_TIMEOUT,
+                            move || {
+                                cpu_power
+                                    .start_sync(
+                                        pl1, pl1_en, pl1_cl, pl1_time, pl2, pl2_en, pl2_cl, pl2_time,
+                                        power_unit, time_unit,
+                                    )
+                                    .map_err(|e| e.to_string())
+                            },
+                        )
                         .await
-                        .unwrap_or_else(|e| Err(e.to_string()))
+                        .unwrap_or_else(|e| Err(e))
                     },
                     Message::CpuPowerSyncStarted,
                 )
@@ -2006,15 +2041,18 @@ impl App {
         Task::perform(
             async move {
                 let _guard = crate::util::cpu_power_mutex().lock().await;
-                let write_result = tokio::task::spawn_blocking(move || {
-                    cpu_power.stop_sync();
-                    crate::cpu_power::write_bios_defaults(&bios).map_err(|e| e.to_string())
-                })
+                let write_result = crate::util::spawn_blocking_with_timeout(
+                    crate::util::PAWNIO_IO_TIMEOUT,
+                    move || {
+                        cpu_power.stop_sync();
+                        crate::cpu_power::write_bios_defaults(&bios).map_err(|e| e.to_string())
+                    },
+                )
                 .await;
                 let result = match write_result {
                     Ok(Ok(())) => Ok(()),
                     Ok(Err(e)) => Err(e),
-                    Err(e) => Err(e.to_string()),
+                    Err(e) => Err(e),
                 };
                 Message::CpuPowerResetDone(result)
             },

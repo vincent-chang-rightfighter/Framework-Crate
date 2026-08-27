@@ -1,4 +1,4 @@
-use parking_lot::RwLock;
+﻿use parking_lot::RwLock;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tracing::warn;
@@ -323,7 +323,7 @@ pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<cli::
     let exp_ref = Arc::clone(&state.peripherals.expansion_cards);
     let ec_clone = Arc::clone(ec);
     // Single blocking task for all EC reads to reduce wakes.
-    let batch = tokio::task::spawn_blocking(move || {
+    let batch = crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
         (
             ec_clone.thermal(),
             ec_clone.power(),
@@ -524,7 +524,7 @@ pub fn spawn(state: AppState) {
                                 continue;
                             }
                             let state_cl = bg_state2.clone();
-                            match tokio::task::spawn_blocking(cli::EcClient::new).await {
+                            match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, cli::EcClient::new).await {
                                 Ok(Ok(c)) => {
                                     let arc_ec = Arc::new(c);
                                     with_write_lock(&state_cl.system.ec_client, |guard| {
@@ -556,7 +556,7 @@ pub fn spawn(state: AppState) {
                     };
 
                     let ec_clone = Arc::clone(&ec);
-                    match tokio::task::spawn_blocking(move || ec_clone.thermal()).await {
+                    match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.thermal()).await {
                         Ok(Ok(t)) => {
                             if t.temps.is_empty() {
                                 warn!("Thermal read returned empty temps");
@@ -595,7 +595,7 @@ pub fn spawn(state: AppState) {
                     // Skip UI-only reads while idle to save spawns.
                     if !is_idle {
                         let ec_clone = Arc::clone(&ec);
-                        match tokio::task::spawn_blocking(move || ec_clone.power()).await {
+                        match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.power()).await {
                             Ok(Ok(bat)) => {
                                 let ac_now = bat.ac_present == Some(true);
                                 // Signal PL reset on AC->battery transition (only on success to avoid spurious).
@@ -670,7 +670,7 @@ pub fn spawn(state: AppState) {
                         last_expansion_scan = now_ms;
                         let ec_clone = Arc::clone(&ec);
                         if let Ok(ports) =
-                            tokio::task::spawn_blocking(move || ec_clone.pd_ports()).await
+                            crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.pd_ports()).await
                         {
                             let changed = {
                                 let current = read_lock(&bg_state2.peripherals.pd_ports);
@@ -693,7 +693,7 @@ pub fn spawn(state: AppState) {
                         }
                         let ec_clone = Arc::clone(&ec);
                         if let Ok(cards) =
-                            tokio::task::spawn_blocking(move || ec_clone.expansion_cards()).await
+                            crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.expansion_cards()).await
                         {
                             with_write_lock(&bg_state2.peripherals.expansion_cards, |guard| {
                                 if **guard != cards {
@@ -712,7 +712,7 @@ pub fn spawn(state: AppState) {
                         versions_scan_attempts += 1;
                         let ec_clone = Arc::clone(&ec);
                         if let Ok(Ok(v)) =
-                            tokio::task::spawn_blocking(move || ec_clone.versions()).await
+                            crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.versions()).await
                         {
                             with_write_lock(&bg_state2.system.versions, |guard| {
                                 if guard.as_ref().as_ref() != Some(&v) {
@@ -739,7 +739,7 @@ pub fn spawn(state: AppState) {
                         // Run PawnIO ioctls off async worker like other EC I/O.
                         let cpu_power = bg_state2.cpu_power.clone();
                         if let Err(e) =
-                            tokio::task::spawn_blocking(move || cpu_power.refresh()).await
+                            crate::util::spawn_blocking_with_timeout(crate::util::PAWNIO_IO_TIMEOUT, move || cpu_power.refresh()).await
                         {
                             warn!("CPU power refresh task failed: {}", e);
                         }
@@ -831,7 +831,7 @@ pub fn spawn(state: AppState) {
                                 {
                                     let _ec_guard = crate::util::ec_write_mutex().lock().await;
                                     let ec_clone = Arc::clone(&ec);
-                                    match tokio::task::spawn_blocking(move || {
+                                    match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
                                         ec_clone.autofanctrl()
                                     })
                                     .await
@@ -899,7 +899,7 @@ pub fn spawn(state: AppState) {
                                             let _ec_guard =
                                                 crate::util::ec_write_mutex().lock().await;
                                             let ec_clone = Arc::clone(&ec);
-                                            match tokio::task::spawn_blocking(move || {
+                                            match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
                                                 ec_clone.set_fan_duty(next, None)
                                             })
                                             .await
@@ -1020,7 +1020,7 @@ pub fn spawn(state: AppState) {
                                                 crate::util::ec_write_mutex().lock().await;
                                             let ec_clone = Arc::clone(&ec);
                                             let fan_idx = idx as u32;
-                                            match tokio::task::spawn_blocking(move || {
+                                            match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
                                                 ec_clone.set_fan_duty(next_i, Some(fan_idx))
                                             })
                                             .await
@@ -1101,7 +1101,7 @@ pub fn spawn(state: AppState) {
                                 }
                                 let _ec_guard = crate::util::ec_write_mutex().lock().await;
                                 let ec_clone = Arc::clone(&ec);
-                                match tokio::task::spawn_blocking(move || ec_clone.autofanctrl())
+                                match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.autofanctrl())
                                     .await
                                 {
                                     Ok(Ok(())) => {
@@ -1142,7 +1142,7 @@ pub fn spawn(state: AppState) {
                                 }
                                 let _ec_guard = crate::util::ec_write_mutex().lock().await;
                                 let ec_clone = Arc::clone(&ec);
-                                let _ = tokio::task::spawn_blocking(move || ec_clone.autofanctrl())
+                                let _ = crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.autofanctrl())
                                     .await;
                                 continue 'poll_loop;
                             };
@@ -1168,7 +1168,7 @@ pub fn spawn(state: AppState) {
                                     }
                                     let _ec_guard = crate::util::ec_write_mutex().lock().await;
                                     let ec_clone = Arc::clone(&ec);
-                                    match tokio::task::spawn_blocking(move || {
+                                    match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
                                         ec_clone.autofanctrl()
                                     })
                                     .await
@@ -1255,7 +1255,7 @@ pub fn spawn(state: AppState) {
                                         }
                                         let _ec_guard = crate::util::ec_write_mutex().lock().await;
                                         let ec_clone = Arc::clone(&ec);
-                                        match tokio::task::spawn_blocking(move || {
+                                        match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
                                             ec_clone.set_fan_duty(next, Some(fan_idx))
                                         })
                                         .await
@@ -1321,7 +1321,7 @@ pub fn spawn(state: AppState) {
                                     }
                                     let _ec_guard = crate::util::ec_write_mutex().lock().await;
                                     let ec_clone = Arc::clone(&ec);
-                                    match tokio::task::spawn_blocking(move || {
+                                    match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
                                         ec_clone.set_fan_duty(next, None)
                                     })
                                     .await
@@ -1505,3 +1505,4 @@ mod tests {
         );
     }
 }
+
