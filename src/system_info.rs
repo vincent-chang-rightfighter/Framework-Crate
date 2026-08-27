@@ -31,8 +31,15 @@ use crate::tray::event::{ID_QUIT, ID_SHOW};
 
 use windows_sys::Win32::Foundation::RECT;
 use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC};
+use windows_sys::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW};
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, WINDOWPLACEMENT};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SetFocus, keybd_event};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    AppendMenuW, CreatePopupMenu, DestroyMenu, FindWindowExW, FindWindowW, GetSystemMetrics,
+    GetWindowLongPtrW, GetWindowPlacement, IsIconic, IsWindow, IsZoomed, PostMessageW,
+    RegisterWindowMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPlacement,
+    SetWindowPos, ShowWindow, TrackPopupMenu, WINDOWPLACEMENT,
+};
 
 const VREFRESH: i32 = 116;
 
@@ -49,76 +56,6 @@ struct OsVersionInfoW {
 #[link(name = "ntdll")]
 unsafe extern "system" {
     fn RtlGetVersion(version_info: *mut OsVersionInfoW) -> u32;
-}
-
-#[link(name = "advapi32")]
-unsafe extern "system" {
-    fn RegOpenKeyExW(
-        hKey: HKEY,
-        lpSubKey: LPCWSTR,
-        ulOptions: u32,
-        samDesired: u32,
-        phkResult: *mut HKEY,
-    ) -> u32;
-    fn RegQueryValueExW(
-        hKey: HKEY,
-        lpValueName: LPCWSTR,
-        lpReserved: *mut u32,
-        lpType: *mut u32,
-        lpData: *mut u8,
-        lpcbData: *mut u32,
-    ) -> u32;
-    fn RegCloseKey(hKey: HKEY) -> u32;
-}
-
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn FindWindowW(lpClassName: LPCWSTR, lpWindowName: LPCWSTR) -> *mut core::ffi::c_void;
-    fn FindWindowExW(
-        hWndParent: *mut core::ffi::c_void,
-        hWndChildAfter: *mut core::ffi::c_void,
-        lpszClass: LPCWSTR,
-        lpszWindow: LPCWSTR,
-    ) -> *mut core::ffi::c_void;
-    fn ShowWindow(hWnd: *mut core::ffi::c_void, nCmdShow: i32) -> i32;
-    fn SetForegroundWindow(hWnd: *mut core::ffi::c_void) -> i32;
-    fn IsIconic(hWnd: *mut core::ffi::c_void) -> i32;
-    fn IsZoomed(hWnd: *mut core::ffi::c_void) -> i32;
-    fn IsWindow(hWnd: *mut core::ffi::c_void) -> i32;
-    fn PostMessageW(hWnd: *mut core::ffi::c_void, msg: u32, wParam: usize, lParam: isize) -> i32;
-    fn RegisterWindowMessageW(lpString: LPCWSTR) -> u32;
-    fn CreatePopupMenu() -> *mut core::ffi::c_void;
-    fn AppendMenuW(
-        hMenu: *mut core::ffi::c_void,
-        uFlags: u32,
-        uIDNewItem: usize,
-        lpNewItem: LPCWSTR,
-    ) -> i32;
-    fn TrackPopupMenu(
-        hMenu: *mut core::ffi::c_void,
-        uFlags: u32,
-        x: i32,
-        y: i32,
-        nReserved: i32,
-        hWnd: *mut core::ffi::c_void,
-        prcRect: *const core::ffi::c_void,
-    ) -> i32;
-    fn DestroyMenu(hMenu: *mut core::ffi::c_void) -> i32;
-    fn GetWindowPlacement(hWnd: *mut core::ffi::c_void, lpwndpl: *mut WINDOWPLACEMENT) -> i32;
-    fn SetWindowPlacement(hWnd: *mut core::ffi::c_void, lpwndpl: *const WINDOWPLACEMENT) -> i32;
-    fn GetWindowLongPtrW(hWnd: *mut core::ffi::c_void, nIndex: i32) -> isize;
-    fn SetWindowLongPtrW(hWnd: *mut core::ffi::c_void, nIndex: i32, dwNewLong: isize) -> isize;
-    fn SetFocus(hWnd: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
-    fn SetWindowPos(
-        hWnd: *mut core::ffi::c_void,
-        hWndInsertAfter: *mut core::ffi::c_void,
-        x: i32,
-        y: i32,
-        cx: i32,
-        cy: i32,
-        uFlags: u32,
-    ) -> i32;
-    fn keybd_event(bVk: u8, bScan: u8, dwFlags: u32, dwExtraInfo: usize);
 }
 
 // Win32 constants for window management (POINT/RECT/WINDOWPLACEMENT now from windows-sys).
