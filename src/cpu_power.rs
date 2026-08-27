@@ -150,7 +150,15 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
         } else {
             format!("exit code {}", output.status.code().unwrap_or(-1))
         };
-        warn!("PowerShell download failed: {}", detail);
+        warn!("PowerShell download failed: {}, trying curl fallback", detail);
+        if try_curl_download(&url, &zip_path, &dir).is_ok()
+            && verify_cached_modules(&dir).is_ok()
+        {
+            debug!("PawnIO modules extracted via curl fallback to {}", dir.display());
+            invalidate_blob_cache();
+            return Ok(());
+        }
+        warn!("curl fallback also failed");
         return Err("download/extraction failed");
     }
 
@@ -166,6 +174,63 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
     Ok(())
 }
 
+fn try_curl_download(
+    url: &str,
+    zip_path: &std::path::Path,
+    dir: &std::path::Path,
+) -> Result<(), &'static str> {
+    let _ = std::fs::remove_file(dir.join("IntelMSR.bin"));
+    let _ = std::fs::remove_file(dir.join("IntelMCHBAR.bin"));
+    let curl_output = std::process::Command::new("curl.exe")
+        .args(["-L", "-o", &zip_path.display().to_string(), url])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|_| "curl not available")?;
+    if !curl_output.status.success() {
+        return Err("curl download failed");
+    }
+    // Try tar.exe first (Windows 10 1803+)
+    let tar_output = std::process::Command::new("tar.exe")
+        .args([
+            "-xf",
+            &zip_path.display().to_string(),
+            "-C",
+            &dir.display().to_string(),
+        ])
+        .creation_flags(0x08000000)
+        .output();
+    if let Ok(out) = tar_output
+        && out.status.success()
+    {
+        let _ = std::fs::remove_file(zip_path);
+        return Ok(());
+    }
+    // Fallback to PowerShell Expand-Archive
+    let esc = |s: &str| s.replace('\'', "''");
+    let ps_script = format!(
+        "Expand-Archive -Path '{}' -DestinationPath '{}' -Force; Remove-Item '{}' -ErrorAction SilentlyContinue",
+        esc(&zip_path.display().to_string()),
+        esc(&dir.display().to_string()),
+        esc(&zip_path.display().to_string())
+    );
+    let ps_out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &ps_script,
+        ])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|_| "tar and powershell extraction failed")?;
+    if !ps_out.status.success() {
+        return Err("extraction failed");
+    }
+    let _ = std::fs::remove_file(zip_path);
+    Ok(())
+}
+
 static MSR_BLOB_CACHE: std::sync::Mutex<Option<Arc<Vec<u8>>>> = std::sync::Mutex::new(None);
 static MCHBAR_BLOB_CACHE: std::sync::Mutex<Option<Arc<Vec<u8>>>> = std::sync::Mutex::new(None);
 
@@ -173,6 +238,23 @@ fn invalidate_blob_cache() {
     let _ = MSR_BLOB_CACHE.lock().map(|mut g| *g = None);
     let _ = MCHBAR_BLOB_CACHE.lock().map(|mut g| *g = None);
     invalidate_modules_cache();
+}
+
+/// Opens modules directory in Explorer.
+pub fn open_modules_dir() -> Result<(), String> {
+    let dir = modules_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::process::Command::new("explorer.exe")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Re-validates modules after manual placement; clears caches.
+pub fn redetect_modules() -> bool {
+    invalidate_blob_cache();
+    modules_downloaded()
 }
 
 /// Loads IntelMSR blob (cached after first verified load).

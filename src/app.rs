@@ -231,6 +231,8 @@ pub enum Message {
     PawnIOInstalled(Result<(), String>),
     DownloadPawnIOModules,
     PawnIOModulesDownloaded(Result<(), String>),
+    OpenModulesDir,
+    RedetectModules,
     CpuPowerPl1Changed(String),
     CpuPowerPl2Changed(String),
     CpuPowerPl1TimeChanged(String),
@@ -1747,6 +1749,26 @@ impl App {
                 Err(e) => {
                     tracing::error!("PawnIO Modules download failed: {}", e);
                     self.modules_download_error = Some(e);
+                    self.mark_dirty();
+                    Task::none()
+                }
+            },
+            Message::OpenModulesDir => {
+                if let Err(e) = crate::cpu_power::open_modules_dir() {
+                    self.modules_download_error = Some(e);
+                    self.mark_dirty();
+                }
+                Task::none()
+            },
+            Message::RedetectModules => {
+                let ok = crate::cpu_power::redetect_modules();
+                if ok {
+                    self.modules_download_error = None;
+                    self.pl_fields_dirty = false;
+                    refresh_cpu_power_task(self.state.cpu_power.clone(), || {})
+                } else {
+                    self.modules_download_error =
+                        Some("Modules not found or hash mismatch".into());
                     self.mark_dirty();
                     Task::none()
                 }

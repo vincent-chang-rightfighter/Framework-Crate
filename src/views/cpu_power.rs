@@ -79,6 +79,24 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     .on_press(Message::DownloadPawnIOModules)
                     .style(btn_style),
             );
+            content = content.push(
+                text("Manual: download release_0_2_10.zip from https://github.com/namazso/PawnIO.Modules/releases/tag/0.2.10 and place IntelMSR.bin / IntelMCHBAR.bin into %APPDATA%\\framework-crate\\modules\\")
+                    .size(FONT_SMALL)
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(COLOR_GRAY),
+                    }),
+            );
+            content = content.push(
+                row![
+                    button(text("Open Modules Folder").size(FONT_BODY))
+                        .on_press(Message::OpenModulesDir)
+                        .style(btn_style),
+                    button(text("Redetect Modules").size(FONT_BODY))
+                        .on_press(Message::RedetectModules)
+                        .style(btn_style),
+                ]
+                .spacing(8),
+            );
         }
         return content.into();
     }
