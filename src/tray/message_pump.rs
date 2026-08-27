@@ -9,8 +9,9 @@ use crate::system_info::{PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, WM_POWERB
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
-    PostThreadMessageW, SetForegroundWindow, ShowWindow, TranslateMessage, MSG,
+    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetCursorPos,
+    GetMessageW, PostThreadMessageW, RegisterClassW, SetForegroundWindow, ShowWindow,
+    TranslateMessage, UnregisterClassW, WNDCLASSW, MSG,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -50,40 +51,7 @@ pub fn notify_tray_thread() -> bool {
     ok
 }
 
-#[repr(C)]
-#[allow(non_snake_case, clippy::upper_case_acronyms)]
-struct WNDCLASSW {
-    style: u32,
-    lpfnWndProc: *const core::ffi::c_void,
-    cbClsExtra: i32,
-    cbWndExtra: i32,
-    hInstance: *mut core::ffi::c_void,
-    hIcon: *mut core::ffi::c_void,
-    hCursor: *mut core::ffi::c_void,
-    hbrBackground: *mut core::ffi::c_void,
-    lpszMenuName: *const u16,
-    lpszClassName: *const u16,
-}
-
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn RegisterClassW(lpWndClass: *const WNDCLASSW) -> u16;
-    fn UnregisterClassW(lpClassName: *const u16, hInstance: *mut core::ffi::c_void) -> i32;
-    fn CreateWindowExW(
-        dwExStyle: u32,
-        lpClassName: *const u16,
-        lpWindowName: *const u16,
-        dwStyle: u32,
-        x: i32,
-        y: i32,
-        nWidth: i32,
-        nHeight: i32,
-        hWndParent: *mut core::ffi::c_void,
-        hMenu: *mut core::ffi::c_void,
-        hInstance: *mut core::ffi::c_void,
-        lpParam: *mut core::ffi::c_void,
-    ) -> *mut core::ffi::c_void;
-}
+// WNDCLASSW and window creation now from windows-sys.
 
 unsafe extern "system" fn tray_wnd_proc(
     hwnd: *mut core::ffi::c_void,
@@ -350,7 +318,7 @@ fn create_hidden_window() -> *mut core::ffi::c_void {
 
         let wc = WNDCLASSW {
             style: 0,
-            lpfnWndProc: tray_wnd_proc as *const core::ffi::c_void,
+            lpfnWndProc: Some(tray_wnd_proc),
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: h_instance,

@@ -38,7 +38,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, FindWindowExW, FindWindowW, GetSystemMetrics,
     GetWindowLongPtrW, GetWindowPlacement, IsIconic, IsWindow, IsZoomed, PostMessageW,
     RegisterWindowMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPlacement,
-    SetWindowPos, ShowWindow, TrackPopupMenu, WINDOWPLACEMENT,
+    SetWindowPos, ShowWindow, SystemParametersInfoW, TrackPopupMenu, SPI_GETWORKAREA,
+    WINDOWPLACEMENT,
 };
 
 const VREFRESH: i32 = 116;
@@ -393,23 +394,20 @@ pub fn display_resolution() -> String {
 }
 
 pub fn work_area_size() -> Option<(i32, i32)> {
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn SystemParametersInfoW(
-            uiAction: u32,
-            uiParam: u32,
-            pvParam: *mut RECT,
-            fWinIni: u32,
-        ) -> i32;
-    }
-    const SPI_GETWORKAREA: u32 = 0x0030;
     let mut rect = RECT {
         left: 0,
         top: 0,
         right: 0,
         bottom: 0,
     };
-    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut rect as *mut RECT, 0) };
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            &mut rect as *mut _ as *mut core::ffi::c_void,
+            0,
+        )
+    };
     if ok != 0 && rect.right > rect.left && rect.bottom > rect.top {
         Some((rect.right - rect.left, rect.bottom - rect.top))
     } else {
