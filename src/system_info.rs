@@ -8,7 +8,7 @@ use windows_sys::Win32::UI::Shell::{
 
 #[allow(clippy::upper_case_acronyms)]
 type HKEY = *mut core::ffi::c_void;
-#[allow(clippy::upper_case_acronyms)]
+#[allow(dead_code, clippy::upper_case_acronyms)]
 type LPCWSTR = *const u16;
 
 const HKEY_LOCAL_MACHINE: HKEY = 0x80000002 as HKEY;
@@ -29,10 +29,11 @@ const TPM_RIGHTBUTTON: u32 = 0x0002;
 const TPM_RETURNCMD: u32 = 0x0100;
 use crate::tray::event::{ID_QUIT, ID_SHOW};
 
-use windows_sys::Win32::Foundation::RECT;
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, RECT};
 use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC};
 use windows_sys::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW};
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SetFocus, keybd_event};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, FindWindowExW, FindWindowW, GetSystemMetrics,
@@ -522,10 +523,6 @@ impl Drop for SingleInstanceGuard {
         if self._handle.is_null() {
             return;
         }
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn CloseHandle(h: *mut core::ffi::c_void) -> i32;
-        }
         unsafe {
             CloseHandle(self._handle);
         }
@@ -535,16 +532,6 @@ impl Drop for SingleInstanceGuard {
 impl SingleInstanceGuard {
     /// Tries to acquire named mutex; Err if another instance holds it.
     pub fn acquire(name: &str) -> Result<Self, ()> {
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn CreateMutexW(
-                lpMutexAttributes: *const core::ffi::c_void,
-                bInitialOwner: i32,
-                lpName: LPCWSTR,
-            ) -> *mut core::ffi::c_void;
-            fn GetLastError() -> u32;
-            fn CloseHandle(h: *mut core::ffi::c_void) -> i32;
-        }
         const ERROR_ALREADY_EXISTS: u32 = 183;
         let wide = to_wide(name);
         // SAFETY: Null-terminated UTF-16 name; non-null handle with ERROR_ALREADY_EXISTS means owned.
