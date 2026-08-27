@@ -6,6 +6,12 @@ use super::event::{ID_QUIT, ID_SHOW, TrayCommand, TrayEvent};
 use crate::system_info;
 
 use crate::system_info::{PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, WM_POWERBROADCAST};
+use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
+    PostThreadMessageW, SetForegroundWindow, ShowWindow, TranslateMessage, MSG,
+};
 
 const WM_APP: u32 = 0x8000;
 const WM_TRAYICON: u32 = WM_APP + 1;
@@ -46,24 +52,6 @@ pub fn notify_tray_thread() -> bool {
 
 #[repr(C)]
 #[allow(non_snake_case, clippy::upper_case_acronyms)]
-struct MSG {
-    hwnd: *mut core::ffi::c_void,
-    message: u32,
-    wParam: usize,
-    lParam: isize,
-    time: u32,
-    pt: POINT,
-}
-
-#[repr(C)]
-#[allow(clippy::upper_case_acronyms)]
-struct POINT {
-    x: i32,
-    y: i32,
-}
-
-#[repr(C)]
-#[allow(non_snake_case, clippy::upper_case_acronyms)]
 struct WNDCLASSW {
     style: u32,
     lpfnWndProc: *const core::ffi::c_void,
@@ -79,14 +67,6 @@ struct WNDCLASSW {
 
 #[link(name = "user32")]
 unsafe extern "system" {
-    fn GetMessageW(
-        lpMsg: *mut MSG,
-        hWnd: *mut core::ffi::c_void,
-        wMsgFilterMin: u32,
-        wMsgFilterMax: u32,
-    ) -> i32;
-    fn TranslateMessage(lpMsg: *const MSG) -> i32;
-    fn DispatchMessageW(lpMsg: *const MSG) -> i32;
     fn RegisterClassW(lpWndClass: *const WNDCLASSW) -> u16;
     fn UnregisterClassW(lpClassName: *const u16, hInstance: *mut core::ffi::c_void) -> i32;
     fn CreateWindowExW(
@@ -103,19 +83,6 @@ unsafe extern "system" {
         hInstance: *mut core::ffi::c_void,
         lpParam: *mut core::ffi::c_void,
     ) -> *mut core::ffi::c_void;
-    fn DestroyWindow(hWnd: *mut core::ffi::c_void) -> i32;
-    fn DestroyIcon(hIcon: *mut core::ffi::c_void) -> i32;
-    fn GetModuleHandleW(lpModuleName: *const u16) -> *mut core::ffi::c_void;
-    fn GetCursorPos(lpPoint: *mut POINT) -> i32;
-    fn SetForegroundWindow(hWnd: *mut core::ffi::c_void) -> i32;
-    fn DefWindowProcW(
-        hWnd: *mut core::ffi::c_void,
-        msg: u32,
-        wParam: usize,
-        lParam: isize,
-    ) -> isize;
-    fn PostThreadMessageW(idThread: u32, msg: u32, wParam: usize, lParam: isize) -> i32;
-    fn ShowWindow(hWnd: *mut core::ffi::c_void, nCmdShow: i32) -> i32;
 }
 
 unsafe extern "system" fn tray_wnd_proc(
