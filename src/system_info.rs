@@ -29,29 +29,11 @@ const TPM_RIGHTBUTTON: u32 = 0x0002;
 const TPM_RETURNCMD: u32 = 0x0100;
 use crate::tray::event::{ID_QUIT, ID_SHOW};
 
-#[repr(C)]
-struct MemoryStatusEx {
-    dw_length: u32,
-    dw_memory_load: u32,
-    ull_total_phys: u64,
-    ull_avail_phys: u64,
-    ull_total_page_file: u64,
-    ull_avail_page_file: u64,
-    ull_total_virtual: u64,
-    ull_avail_virtual: u64,
-    ull_avail_extended_virtual: u64,
-}
+use windows_sys::Win32::Foundation::RECT;
+use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC};
+use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, WINDOWPLACEMENT};
 
-// Raw Win32 FFI declarations (hand-declared for finer control).
-
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn GetSystemMetrics(nIndex: i32) -> i32;
-    fn GlobalMemoryStatusEx(lpBuffer: *mut MemoryStatusEx) -> i32;
-}
-
-#[allow(clippy::upper_case_acronyms)]
-type HDC = *mut core::ffi::c_void;
 const VREFRESH: i32 = 116;
 
 #[repr(C)]
@@ -67,17 +49,6 @@ struct OsVersionInfoW {
 #[link(name = "ntdll")]
 unsafe extern "system" {
     fn RtlGetVersion(version_info: *mut OsVersionInfoW) -> u32;
-}
-
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn GetDC(hwnd: *mut core::ffi::c_void) -> HDC;
-    fn ReleaseDC(hwnd: *mut core::ffi::c_void, hdc: HDC) -> i32;
-}
-
-#[link(name = "gdi32")]
-unsafe extern "system" {
-    fn GetDeviceCaps(hdc: HDC, index: i32) -> i32;
 }
 
 #[link(name = "advapi32")]
@@ -150,38 +121,7 @@ unsafe extern "system" {
     fn keybd_event(bVk: u8, bScan: u8, dwFlags: u32, dwExtraInfo: usize);
 }
 
-// Win32 structs and constants for window management.
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-#[allow(clippy::upper_case_acronyms)]
-struct POINT {
-    x: i32,
-    y: i32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-#[allow(clippy::upper_case_acronyms)]
-struct RECT {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-#[allow(clippy::upper_case_acronyms)]
-#[allow(non_snake_case)]
-struct WINDOWPLACEMENT {
-    length: u32,
-    flags: u32,
-    showCmd: u32,
-    ptMinPosition: POINT,
-    ptMaxPosition: POINT,
-    rcNormalPosition: RECT,
-}
+// Win32 constants for window management (POINT/RECT/WINDOWPLACEMENT now from windows-sys).
 
 const GWL_EXSTYLE: i32 = -20;
 const WS_EX_TOOLWINDOW: isize = 0x00000080;
@@ -385,22 +325,22 @@ pub fn is_intel_cpu() -> bool {
 }
 
 pub fn total_memory_gb() -> String {
-    let mut mem = MemoryStatusEx {
-        dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
-        dw_memory_load: 0,
-        ull_total_phys: 0,
-        ull_avail_phys: 0,
-        ull_total_page_file: 0,
-        ull_avail_page_file: 0,
-        ull_total_virtual: 0,
-        ull_avail_virtual: 0,
-        ull_avail_extended_virtual: 0,
+    let mut mem = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        dwMemoryLoad: 0,
+        ullTotalPhys: 0,
+        ullAvailPhys: 0,
+        ullTotalPageFile: 0,
+        ullAvailPageFile: 0,
+        ullTotalVirtual: 0,
+        ullAvailVirtual: 0,
+        ullAvailExtendedVirtual: 0,
     };
     // SAFETY: GlobalMemoryStatusEx with valid struct.
     let ok = unsafe { GlobalMemoryStatusEx(&mut mem) };
-    if ok != 0 && mem.ull_total_phys > 0 {
+    if ok != 0 && mem.ullTotalPhys > 0 {
         // Round to nearest GB.
-        let gb = ((mem.ull_total_phys as f64 / 1024.0 / 1024.0 / 1024.0).round()) as u64;
+        let gb = ((mem.ullTotalPhys as f64 / 1024.0 / 1024.0 / 1024.0).round()) as u64;
         format!("{} GB", gb)
     } else {
         "N/A".to_string()
