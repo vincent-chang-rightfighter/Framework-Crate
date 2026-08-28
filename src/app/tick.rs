@@ -1,7 +1,6 @@
 use super::{App, Message, refresh_cpu_power_task};
 use crate::style::{IDLE_THRESHOLD_MS, UI_HIDDEN_INTERVAL_MS, UI_IDLE_INTERVAL_MS};
 use crate::system_info;
-use crate::util::monotonic_ms;
 use iced::Task;
 use std::sync::atomic::Ordering;
 use std::time::Instant;

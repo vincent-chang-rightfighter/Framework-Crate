@@ -365,7 +365,6 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::cli::ec_wrapper::BatteryData;
     use crate::views::battery::{
         charge_limit_display, view_battery_info, view_battery_verbose, view_charge_limit_section,

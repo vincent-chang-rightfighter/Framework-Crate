@@ -51,7 +51,7 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
             move || ec_clone.charge_limit_set(0, pct),
         )
         .await
-        .unwrap_or_else(|e| Err(e))
+        .unwrap_or_else(Err)
         {
             warn!("Failed to set charge limit: {}", e);
             return false;
