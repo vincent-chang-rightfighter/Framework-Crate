@@ -1,4 +1,4 @@
-use super::{App, Message, run_ec_task_result, tick_task, MAX_DEBUG_REPORTS, prune_debug_reports};
+use super::{App, MAX_DEBUG_REPORTS, Message, prune_debug_reports, run_ec_task_result, tick_task};
 use crate::util::{read_lock, with_write_lock};
 use iced::Task;
 use std::sync::Arc;
@@ -8,10 +8,7 @@ use tracing::warn;
 impl App {
     /// Handles the remaining one-off UI/dispatch messages not covered by the
     /// config / cpu_power / tray / quit handlers.
-    pub(crate) fn handle_misc_message(
-        &mut self,
-        message: &Message,
-    ) -> Option<Task<Message>> {
+    pub(crate) fn handle_misc_message(&mut self, message: &Message) -> Option<Task<Message>> {
         match message {
             Message::InitComplete => {
                 self.init_complete = true;
@@ -103,9 +100,10 @@ impl App {
             }
             Message::FpLedLevelChanged(level) => {
                 let level = *level;
-                Some(run_ec_task_result(&self.state.system.ec_client, move |ec| {
-                    ec.fp_led_level_set(level)
-                }))
+                Some(run_ec_task_result(
+                    &self.state.system.ec_client,
+                    move |ec| ec.fp_led_level_set(level),
+                ))
             }
             Message::EcOpResult(err) => {
                 // Surface peripheral EC write failure to UI.

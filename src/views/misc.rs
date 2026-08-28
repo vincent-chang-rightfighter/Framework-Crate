@@ -253,4 +253,3 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
 
     content.into()
 }
-

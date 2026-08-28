@@ -1,4 +1,4 @@
-﻿use parking_lot::RwLock;
+use parking_lot::RwLock;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tracing::warn;
@@ -185,7 +185,10 @@ fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
         duties.resize(fan_count, fill);
         resized = true;
     });
-    state.fan.last_fan_count.store(fan_count as u64, Ordering::Release);
+    state
+        .fan
+        .last_fan_count
+        .store(fan_count as u64, Ordering::Release);
     // NOTE: Resize is not persisted; only tracks hardware changes. Config updates on explicit edits.
     if resized {
         mark_view_dirty(state);
@@ -525,7 +528,12 @@ pub fn spawn(state: AppState) {
                                 continue;
                             }
                             let state_cl = bg_state2.clone();
-                            match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, cli::EcClient::new).await {
+                            match crate::util::spawn_blocking_with_timeout(
+                                crate::util::EC_IO_TIMEOUT,
+                                cli::EcClient::new,
+                            )
+                            .await
+                            {
                                 Ok(Ok(c)) => {
                                     let arc_ec = Arc::new(c);
                                     with_write_lock(&state_cl.system.ec_client, |guard| {
@@ -557,7 +565,12 @@ pub fn spawn(state: AppState) {
                     };
 
                     let ec_clone = Arc::clone(&ec);
-                    match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.thermal()).await {
+                    match crate::util::spawn_blocking_with_timeout(
+                        crate::util::EC_IO_TIMEOUT,
+                        move || ec_clone.thermal(),
+                    )
+                    .await
+                    {
                         Ok(Ok(t)) => {
                             if t.temps.is_empty() {
                                 warn!("Thermal read returned empty temps");
@@ -596,7 +609,12 @@ pub fn spawn(state: AppState) {
                     // Skip UI-only reads while idle to save spawns.
                     if !is_idle {
                         let ec_clone = Arc::clone(&ec);
-                        match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.power()).await {
+                        match crate::util::spawn_blocking_with_timeout(
+                            crate::util::EC_IO_TIMEOUT,
+                            move || ec_clone.power(),
+                        )
+                        .await
+                        {
                             Ok(Ok(bat)) => {
                                 consecutive_ec_failures = 0;
                                 let ac_now = bat.ac_present == Some(true);
@@ -683,7 +701,12 @@ pub fn spawn(state: AppState) {
                     if now_ms.saturating_sub(last_expansion_scan) >= expansion_interval {
                         last_expansion_scan = now_ms;
                         let ec_clone = Arc::clone(&ec);
-                        match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.pd_ports()).await {
+                        match crate::util::spawn_blocking_with_timeout(
+                            crate::util::EC_IO_TIMEOUT,
+                            move || ec_clone.pd_ports(),
+                        )
+                        .await
+                        {
                             Ok(ports) => {
                                 last_pd_success_ms = crate::util::monotonic_ms();
                                 let changed = {
@@ -708,7 +731,9 @@ pub fn spawn(state: AppState) {
                             Err(e) => {
                                 warn!("PD ports read failed: {}", e);
                                 if last_pd_success_ms != 0
-                                    && crate::util::monotonic_ms().saturating_sub(last_pd_success_ms) > 30_000
+                                    && crate::util::monotonic_ms()
+                                        .saturating_sub(last_pd_success_ms)
+                                        > 30_000
                                 {
                                     with_write_lock(&bg_state2.peripherals.pd_ports, |guard| {
                                         if !guard.is_empty() {
@@ -720,7 +745,12 @@ pub fn spawn(state: AppState) {
                             }
                         }
                         let ec_clone = Arc::clone(&ec);
-                        match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.expansion_cards()).await {
+                        match crate::util::spawn_blocking_with_timeout(
+                            crate::util::EC_IO_TIMEOUT,
+                            move || ec_clone.expansion_cards(),
+                        )
+                        .await
+                        {
                             Ok(cards) => {
                                 last_expansion_success_ms = crate::util::monotonic_ms();
                                 with_write_lock(&bg_state2.peripherals.expansion_cards, |guard| {
@@ -733,14 +763,19 @@ pub fn spawn(state: AppState) {
                             Err(e) => {
                                 warn!("Expansion cards read failed: {}", e);
                                 if last_expansion_success_ms != 0
-                                    && crate::util::monotonic_ms().saturating_sub(last_expansion_success_ms) > 30_000
+                                    && crate::util::monotonic_ms()
+                                        .saturating_sub(last_expansion_success_ms)
+                                        > 30_000
                                 {
-                                    with_write_lock(&bg_state2.peripherals.expansion_cards, |guard| {
-                                        if !guard.is_empty() {
-                                            *guard = Arc::new(smallvec::SmallVec::new());
-                                            mark_view_dirty(&bg_state2);
-                                        }
-                                    });
+                                    with_write_lock(
+                                        &bg_state2.peripherals.expansion_cards,
+                                        |guard| {
+                                            if !guard.is_empty() {
+                                                *guard = Arc::new(smallvec::SmallVec::new());
+                                                mark_view_dirty(&bg_state2);
+                                            }
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -753,8 +788,11 @@ pub fn spawn(state: AppState) {
                         last_versions_scan = now_ms;
                         versions_scan_attempts += 1;
                         let ec_clone = Arc::clone(&ec);
-                        if let Ok(Ok(v)) =
-                            crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.versions()).await
+                        if let Ok(Ok(v)) = crate::util::spawn_blocking_with_timeout(
+                            crate::util::EC_IO_TIMEOUT,
+                            move || ec_clone.versions(),
+                        )
+                        .await
                         {
                             with_write_lock(&bg_state2.system.versions, |guard| {
                                 if guard.as_ref().as_ref() != Some(&v) {
@@ -780,8 +818,11 @@ pub fn spawn(state: AppState) {
                         last_cpu_power_poll = now_ms;
                         // Run PawnIO ioctls off async worker like other EC I/O.
                         let cpu_power = bg_state2.cpu_power.clone();
-                        if let Err(e) =
-                            crate::util::spawn_blocking_with_timeout(crate::util::PAWNIO_IO_TIMEOUT, move || cpu_power.refresh()).await
+                        if let Err(e) = crate::util::spawn_blocking_with_timeout(
+                            crate::util::PAWNIO_IO_TIMEOUT,
+                            move || cpu_power.refresh(),
+                        )
+                        .await
                         {
                             warn!("CPU power refresh task failed: {}", e);
                         }
@@ -873,9 +914,10 @@ pub fn spawn(state: AppState) {
                                 {
                                     let _ec_guard = crate::util::ec_write_mutex().lock().await;
                                     let ec_clone = Arc::clone(&ec);
-                                    match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
-                                        ec_clone.autofanctrl()
-                                    })
+                                    match crate::util::spawn_blocking_with_timeout(
+                                        crate::util::EC_IO_TIMEOUT,
+                                        move || ec_clone.autofanctrl(),
+                                    )
                                     .await
                                     {
                                         Ok(result) => {
@@ -941,9 +983,10 @@ pub fn spawn(state: AppState) {
                                             let _ec_guard =
                                                 crate::util::ec_write_mutex().lock().await;
                                             let ec_clone = Arc::clone(&ec);
-                                            match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
-                                                ec_clone.set_fan_duty(next, None)
-                                            })
+                                            match crate::util::spawn_blocking_with_timeout(
+                                                crate::util::EC_IO_TIMEOUT,
+                                                move || ec_clone.set_fan_duty(next, None),
+                                            )
                                             .await
                                             {
                                                 Ok(result) => match result {
@@ -1062,9 +1105,12 @@ pub fn spawn(state: AppState) {
                                                 crate::util::ec_write_mutex().lock().await;
                                             let ec_clone = Arc::clone(&ec);
                                             let fan_idx = idx as u32;
-                                            match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
-                                                ec_clone.set_fan_duty(next_i, Some(fan_idx))
-                                            })
+                                            match crate::util::spawn_blocking_with_timeout(
+                                                crate::util::EC_IO_TIMEOUT,
+                                                move || {
+                                                    ec_clone.set_fan_duty(next_i, Some(fan_idx))
+                                                },
+                                            )
                                             .await
                                             {
                                                 Ok(Ok(())) => {
@@ -1143,8 +1189,11 @@ pub fn spawn(state: AppState) {
                                 }
                                 let _ec_guard = crate::util::ec_write_mutex().lock().await;
                                 let ec_clone = Arc::clone(&ec);
-                                match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.autofanctrl())
-                                    .await
+                                match crate::util::spawn_blocking_with_timeout(
+                                    crate::util::EC_IO_TIMEOUT,
+                                    move || ec_clone.autofanctrl(),
+                                )
+                                .await
                                 {
                                     Ok(Ok(())) => {
                                         last_curve_failover_ms = now_ms;
@@ -1184,8 +1233,11 @@ pub fn spawn(state: AppState) {
                                 }
                                 let _ec_guard = crate::util::ec_write_mutex().lock().await;
                                 let ec_clone = Arc::clone(&ec);
-                                let _ = crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.autofanctrl())
-                                    .await;
+                                let _ = crate::util::spawn_blocking_with_timeout(
+                                    crate::util::EC_IO_TIMEOUT,
+                                    move || ec_clone.autofanctrl(),
+                                )
+                                .await;
                                 continue 'poll_loop;
                             };
                             if curve_hysteresis.is_none() || curve_rate_limit.is_none() {
@@ -1210,9 +1262,10 @@ pub fn spawn(state: AppState) {
                                     }
                                     let _ec_guard = crate::util::ec_write_mutex().lock().await;
                                     let ec_clone = Arc::clone(&ec);
-                                    match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
-                                        ec_clone.autofanctrl()
-                                    })
+                                    match crate::util::spawn_blocking_with_timeout(
+                                        crate::util::EC_IO_TIMEOUT,
+                                        move || ec_clone.autofanctrl(),
+                                    )
                                     .await
                                     {
                                         Ok(Ok(())) => {
@@ -1297,9 +1350,10 @@ pub fn spawn(state: AppState) {
                                         }
                                         let _ec_guard = crate::util::ec_write_mutex().lock().await;
                                         let ec_clone = Arc::clone(&ec);
-                                        match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
-                                            ec_clone.set_fan_duty(next, Some(fan_idx))
-                                        })
+                                        match crate::util::spawn_blocking_with_timeout(
+                                            crate::util::EC_IO_TIMEOUT,
+                                            move || ec_clone.set_fan_duty(next, Some(fan_idx)),
+                                        )
                                         .await
                                         {
                                             Ok(result) => {
@@ -1363,9 +1417,10 @@ pub fn spawn(state: AppState) {
                                     }
                                     let _ec_guard = crate::util::ec_write_mutex().lock().await;
                                     let ec_clone = Arc::clone(&ec);
-                                    match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
-                                        ec_clone.set_fan_duty(next, None)
-                                    })
+                                    match crate::util::spawn_blocking_with_timeout(
+                                        crate::util::EC_IO_TIMEOUT,
+                                        move || ec_clone.set_fan_duty(next, None),
+                                    )
                                     .await
                                     {
                                         Ok(result) => match result {
@@ -1547,4 +1602,3 @@ mod tests {
         );
     }
 }
-

@@ -10,8 +10,8 @@ use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetMessageW, PostMessageW, PostThreadMessageW, RegisterClassW, SetForegroundWindow,
-    ShowWindow, TranslateMessage, UnregisterClassW, WNDCLASSW, MSG,
+    GetMessageW, MSG, PostMessageW, PostThreadMessageW, RegisterClassW, SetForegroundWindow,
+    ShowWindow, TranslateMessage, UnregisterClassW, WNDCLASSW,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -118,9 +118,8 @@ unsafe extern "system" fn tray_wnd_proc(
             // PostThreadMessageW (fails if queue not primed).
             let hwnd = TRAY_HWND.with(|h| h.get());
             if hwnd != 0 {
-                let _ = unsafe {
-                    PostMessageW(hwnd as *mut core::ffi::c_void, WM_COMMAND_READY, 0, 0)
-                };
+                let _ =
+                    unsafe { PostMessageW(hwnd as *mut core::ffi::c_void, WM_COMMAND_READY, 0, 0) };
             } else {
                 let _ = unsafe {
                     PostThreadMessageW(

@@ -3,8 +3,8 @@ use crate::Message;
 use crate::style::*;
 use crate::types::FanControlMode;
 use crate::util::read_lock;
-use iced::widget::{button, column, container, space, text};
 use iced::widget::rule;
+use iced::widget::{button, column, container, space, text};
 use iced::{Element, Length};
 use std::sync::atomic::Ordering;
 

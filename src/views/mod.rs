@@ -147,7 +147,10 @@ impl ViewSnapshot {
             show_cpu_power_settings: app.show_cpu_power_settings,
             show_curve_settings: app.show_curve_settings,
             pl_custom_applied: app.pl_custom_applied.load(Ordering::Acquire),
-            modules_download_error: app.modules_download_error.as_ref().map(|s| Arc::new(s.clone())),
+            modules_download_error: app
+                .modules_download_error
+                .as_ref()
+                .map(|s| Arc::new(s.clone())),
             pl1_edit: Arc::new(app.pl1_edit.clone()),
             pl2_edit: Arc::new(app.pl2_edit.clone()),
             pl1_time_edit: Arc::new(app.pl1_time_edit.clone()),
@@ -322,9 +325,12 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     let content = container(
         row![
             container(
-                column![card(sensors::view_sensors(app, snap)), card(battery::view_battery(app, snap)),]
-                    .width(Length::FillPortion(1))
-                    .spacing(8)
+                column![
+                    card(sensors::view_sensors(app, snap)),
+                    card(battery::view_battery(app, snap)),
+                ]
+                .width(Length::FillPortion(1))
+                .spacing(8)
             )
             // Match right column inset for symmetric card alignment.
             .padding(iced::Padding {
@@ -361,7 +367,6 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     // Probe reports content height so window resizes to fit.
     crate::probe::HeightProbe::wrap(root.into(), Arc::clone(&app.content_height))
 }
-
 
 #[cfg(test)]
 mod tests {

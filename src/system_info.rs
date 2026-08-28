@@ -38,8 +38,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SetFocus, keybd_event};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, FindWindowExW, FindWindowW, GetSystemMetrics,
     GetWindowLongPtrW, GetWindowPlacement, IsIconic, IsWindow, IsZoomed, PostMessageW,
-    RegisterWindowMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPlacement,
-    SetWindowPos, ShowWindow, SystemParametersInfoW, TrackPopupMenu, SPI_GETWORKAREA,
+    RegisterWindowMessageW, SPI_GETWORKAREA, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPlacement, SetWindowPos, ShowWindow, SystemParametersInfoW, TrackPopupMenu,
     WINDOWPLACEMENT,
 };
 

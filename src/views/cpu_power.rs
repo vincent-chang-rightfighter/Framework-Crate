@@ -359,4 +359,3 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
 
     content.into()
 }
-

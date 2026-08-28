@@ -163,11 +163,15 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
         } else {
             format!("exit code {}", output.status.code().unwrap_or(-1))
         };
-        warn!("PowerShell download failed: {}, trying curl fallback", detail);
-        if try_curl_download(&url, &zip_path, &dir).is_ok()
-            && verify_cached_modules(&dir).is_ok()
-        {
-            debug!("PawnIO modules extracted via curl fallback to {}", dir.display());
+        warn!(
+            "PowerShell download failed: {}, trying curl fallback",
+            detail
+        );
+        if try_curl_download(&url, &zip_path, &dir).is_ok() && verify_cached_modules(&dir).is_ok() {
+            debug!(
+                "PawnIO modules extracted via curl fallback to {}",
+                dir.display()
+            );
             invalidate_blob_cache();
             return Ok(());
         }

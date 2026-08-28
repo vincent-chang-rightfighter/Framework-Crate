@@ -306,4 +306,3 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
 
     content.into()
 }
-

@@ -68,10 +68,7 @@ fn validate_config_dir(path: &std::path::Path) -> Result<(), String> {
         ));
     }
     // Reject parent-dir components that could escape after join.
-    if path
-        .components()
-        .any(|c| matches!(c, Component::ParentDir))
-    {
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(format!(
             "FRAMEWORK_CONTROL_CONFIG_DIR must not contain '..': {}",
             path.display()

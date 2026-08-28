@@ -21,11 +21,8 @@ pub(crate) fn run_ec_task(
             let ec_opt = { util::read_lock(&ec_client) };
             if let Some(ref ec) = *ec_opt {
                 let ec = ec.clone();
-                if let Err(e) = util::spawn_blocking_with_timeout(
-                    util::EC_IO_TIMEOUT,
-                    move || f(ec),
-                )
-                .await
+                if let Err(e) =
+                    util::spawn_blocking_with_timeout(util::EC_IO_TIMEOUT, move || f(ec)).await
                 {
                     warn!("EC task failed: {}", e);
                 }
@@ -58,8 +55,7 @@ pub(crate) fn run_ec_task_result(
             let ec_opt = { util::read_lock(&ec_client) };
             let res = if let Some(ref ec) = *ec_opt {
                 let ec = ec.clone();
-                match util::spawn_blocking_with_timeout(util::EC_IO_TIMEOUT, move || f(ec)).await
-                {
+                match util::spawn_blocking_with_timeout(util::EC_IO_TIMEOUT, move || f(ec)).await {
                     Ok(r) => r,
                     Err(e) => Err(e),
                 }
@@ -81,13 +77,10 @@ pub(crate) fn refresh_cpu_power_task(
     let task_state = state.clone();
     Task::perform(
         async move {
-            let _ = util::spawn_blocking_with_timeout(
-                util::PAWNIO_IO_TIMEOUT,
-                move || {
-                    task_state.refresh();
-                    after();
-                },
-            )
+            let _ = util::spawn_blocking_with_timeout(util::PAWNIO_IO_TIMEOUT, move || {
+                task_state.refresh();
+                after();
+            })
             .await;
             Message::CpuPowerDataRefreshed
         },
@@ -100,10 +93,9 @@ pub(crate) fn stop_sync_task(state: crate::cpu_power::CpuPowerState) -> Task<Mes
     Task::perform(
         async move {
             let _guard = util::cpu_power_mutex().lock().await;
-            let _ = util::spawn_blocking_with_timeout(
-                util::PAWNIO_IO_TIMEOUT,
-                move || state.stop_sync(),
-            )
+            let _ = util::spawn_blocking_with_timeout(util::PAWNIO_IO_TIMEOUT, move || {
+                state.stop_sync()
+            })
             .await;
             Message::CpuPowerSyncStopped
         },

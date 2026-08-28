@@ -333,4 +333,3 @@ pub(crate) fn battery_detail_rows(
         None
     }
 }
-

@@ -76,11 +76,8 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_blocking_with_timeout_success() {
-        let res = spawn_blocking_with_timeout(
-            std::time::Duration::from_millis(100),
-            || 42u32,
-        )
-        .await;
+        let res =
+            spawn_blocking_with_timeout(std::time::Duration::from_millis(100), || 42u32).await;
         assert_eq!(res.unwrap(), 42);
     }
 

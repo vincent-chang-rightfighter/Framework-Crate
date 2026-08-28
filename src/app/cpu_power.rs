@@ -4,10 +4,7 @@ use std::sync::atomic::Ordering;
 use tracing::{error, warn};
 
 impl App {
-    pub(crate) fn handle_cpu_power_message(
-        &mut self,
-        message: &Message,
-    ) -> Option<Task<Message>> {
+    pub(crate) fn handle_cpu_power_message(&mut self, message: &Message) -> Option<Task<Message>> {
         match message {
             Message::InstallPawnIO => {
                 if !self.cpu_power_supported() {
@@ -87,8 +84,7 @@ impl App {
                     self.pl_fields_dirty = false;
                     Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}))
                 } else {
-                    self.modules_download_error =
-                        Some("Modules not found or hash mismatch".into());
+                    self.modules_download_error = Some("Modules not found or hash mismatch".into());
                     self.mark_dirty();
                     Some(Task::none())
                 }
@@ -246,8 +242,8 @@ impl App {
                             move || {
                                 cpu_power
                                     .start_sync(
-                                        pl1, pl1_en, pl1_cl, pl1_time, pl2, pl2_en, pl2_cl, pl2_time,
-                                        power_unit, time_unit,
+                                        pl1, pl1_en, pl1_cl, pl1_time, pl2, pl2_en, pl2_cl,
+                                        pl2_time, power_unit, time_unit,
                                     )
                                     .map_err(|e| e.to_string())
                             },
