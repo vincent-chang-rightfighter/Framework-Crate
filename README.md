@@ -65,9 +65,26 @@ cargo run --release
 ```
 src/
   main.rs              — Iced 0.14 application entry point, boot function
-  app.rs               — App struct, Message handlers, mutate_config helper
+  app/                 — App struct, Message enum, dispatch, handler submodules
+    mod.rs             — App/AppState/Message types, new()/subscription()/update()/view(), update_inner dispatcher
+    config.rs          — Config-related message handlers + save/mutate_config helpers
+    cpu_power.rs       — CPU power (PL1/PL2) message handlers + input validation
+    tray.rs            — Tray message handlers (minimize/restore/quit, power-resume)
+    quit.rs            — Quit flow handlers (restore auto/duty fan on exit, flush charge limit)
+    tick.rs            — Self-rescheduling UI tick, autosize_task, snapshot rebuild
+    misc.rs            — One-off dispatch (settings toggles, debug report, peripheral writes)
+    tasks.rs           — Shared async task helpers (run_ec_task, refresh_cpu_power_task, ...)
   sub_state.rs         — AppState groups (fan, thermal, peripherals, battery, system, lifecycle)
-  views.rs             — UI layout (sensors, fan control, battery, misc, settings)
+  views/               — UI layout split into per-card submodules
+    mod.rs             — ViewSnapshot, view_main assembly, shared components
+    header.rs          — Top system info header + About button
+    sensors.rs         — Temperature sensors, chart settings
+    fan_control.rs     — Fan mode, duty slider, curve canvas + settings panel
+    cpu_power.rs       — PL1/PL2 control, sync status, MSR/MMIO display
+    battery.rs         — Battery info, charge limit section
+    misc.rs            — Keyboard backlight, ports section
+    settings.rs        — About / Settings popup
+    quit_warning.rs    — Quit-before fan state confirmation dialog
   types.rs             — Config structs, FanControlMode, CurveConfig, validation
   style.rs             — Colors, fonts, layout constants
   config.rs            — TOML config load/save (atomic write via tmp+rename, write-through)
@@ -79,7 +96,7 @@ src/
   fan_control.rs       — CurveStepper, rate limiting, duty calculation
   system_info.rs       — Windows API FFI (CPU, RAM, OS, display, tray)
   probe.rs             — HeightProbe widget for dynamic window sizing
-  util.rs              — Time utilities, lock helpers (read_lock, with_write_lock)
+  util.rs              — Time utilities, lock helpers (read_lock, with_write_lock), EC/PawnIO timeout guard
   cli/                 — EC wrapper only (not a command-line interface)
     ec_wrapper.rs      — EcClient wrapper around framework_lib's CrosEc
     mod.rs
@@ -147,9 +164,11 @@ duty_pct = 50
 [fan.curve]
 poll_ms = 500            # curve polling interval in ms (500–5000)
 sensors = []             # empty = hottest non-battery sensor
-points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]]
+points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]]  # editable 0–99°C; 100–110°C locked 100%
 hysteresis_c = 2
 rate_limit_pct_per_step = 10
+# optional asymmetric down-rate limit (defaults to rate_limit_pct_per_step if omitted)
+# rate_limit_down_pct_per_step = 5
 
 [battery.charge_limit_max_pct]
 enabled = true
@@ -189,11 +208,13 @@ The section reads and optionally writes PL1/PL2 via official PawnIO Modules. Tho
 
 A hash mismatch or failed download is rejected; the files are deleted and CPU Power stays unavailable until you retry.
 
+If the automatic download fails (no internet, firewall, or restricted PowerShell), the app falls back to `curl.exe` + `tar.exe` and, if that also fails, shows manual instructions: download `release_0_2_10.zip` from the releases page and place `IntelMSR.bin` + `IntelMCHBAR.bin` into `%APPDATA%/framework-crate/modules/`. Use **Open Modules Folder** and **Redetect** in the UI to verify — no restart needed.
+
 The first successful RAPL read also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` and resume-from-sleep both restore `min(MSR, MMIO)` from that snapshot.
 
 **Requirements:**
 - PawnIO installed
-- Internet connection for the first download
+- Internet connection for the first download (or place the module files manually — see above)
 
 **LGPL-2.1 Compliance:**
 
