@@ -63,6 +63,9 @@ impl ThermalHistory {
                 break;
             }
         }
+        // Force next snapshot to republish so the new window is reflected
+        // immediately without waiting for the next push_sample.
+        self.last_publish_ms = 0;
     }
 
     /// Push sample and prune entries outside retention (max window) to allow window switches.

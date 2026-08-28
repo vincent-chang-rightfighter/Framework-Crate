@@ -22,6 +22,7 @@ pub struct FanState {
     pub fan_count: Arc<AtomicU64>,
     pub unified_duty: Arc<AtomicBool>,
     pub per_fan_duty: Arc<RwLock<Arc<Vec<u32>>>>,
+    pub last_fan_count: Arc<AtomicU64>,
 }
 
 impl Default for FanState {
@@ -35,6 +36,7 @@ impl Default for FanState {
             fan_count: Arc::new(AtomicU64::new(0)),
             unified_duty: Arc::new(AtomicBool::new(true)),
             per_fan_duty: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            last_fan_count: Arc::new(AtomicU64::new(0)),
         }
     }
 }

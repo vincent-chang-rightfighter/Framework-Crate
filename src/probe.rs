@@ -53,7 +53,14 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for Height
             return layout::Node::new(limits.loose().max());
         };
         let node = self.content.as_widget_mut().layout(child, renderer, limits);
-        *self.report.lock() = Some(node.size().height);
+        let h = node.size().height;
+        // Avoid lock churn when height unchanged (every layout tick).
+        {
+            let mut guard = self.report.lock();
+            if *guard != Some(h) {
+                *guard = Some(h);
+            }
+        }
         node
     }
 

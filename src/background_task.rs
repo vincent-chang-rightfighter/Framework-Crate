@@ -163,10 +163,8 @@ fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
     if fan_count == 0 {
         return;
     }
-    // Process-global single-instance assumption; second AppState would cross-contaminate.
-    static LAST_FAN_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     // Fast path: avoid write lock when count unchanged and duties sized.
-    let last = LAST_FAN_COUNT.load(Ordering::Acquire) as usize;
+    let last = state.fan.last_fan_count.load(Ordering::Acquire) as usize;
     if fan_count == last {
         let len = read_lock(&state.fan.per_fan_duty).len();
         if len >= fan_count {
@@ -187,7 +185,7 @@ fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
         duties.resize(fan_count, fill);
         resized = true;
     });
-    LAST_FAN_COUNT.store(fan_count as u64, Ordering::Release);
+    state.fan.last_fan_count.store(fan_count as u64, Ordering::Release);
     // NOTE: Resize is not persisted; only tracks hardware changes. Config updates on explicit edits.
     if resized {
         mark_view_dirty(state);

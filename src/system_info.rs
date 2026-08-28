@@ -570,6 +570,8 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| format!("cannot resolve exe path: {e}"))?;
         let exe_str = exe.to_str().ok_or("exe path is not valid UTF-8")?;
         // Reject characters that would break schtasks command line or allow injection.
+        // schtasks /TR is parsed as a single command line; we wrap the exe in
+        // double quotes via raw_arg, so any embedded " would break out.
         if exe_str.contains('"')
             || exe_str.contains('\'')
             || exe_str.contains('&')
@@ -577,14 +579,22 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
             || exe_str.contains(';')
             || exe_str.contains('%')
             || exe_str.contains('^')
+            || exe_str.contains('\n')
+            || exe_str.contains('\r')
         {
             return Err("exe path contains invalid characters".to_string());
         }
-        // Use raw_arg for /TR to avoid double-escaping paths with spaces.
+        // A trailing backslash before the closing quote would escape it
+        // (e.g. "C:\path\" --minimized" → the \" becomes an escaped quote).
+        if exe_str.ends_with('\\') {
+            return Err("exe path must not end with backslash".to_string());
+        }
         let mut cmd = std::process::Command::new("schtasks");
         cmd.args(["/Create", "/TN", STARTUP_TASK_NAME, "/TR"]);
-        // --minimized avoids restoring window on ONLOGON (e.g. lock-screen unlock).
-        cmd.raw_arg(format!("\"\\\"{}\\\" --minimized\"", exe_str));
+        // Use raw_arg to pass the /TR value exactly as "\"<exe>\" --minimized"
+        // without Command's extra quoting; exe is already validated to contain
+        // no double quotes, so wrapping in quotes is safe.
+        cmd.raw_arg(format!("\"{}\" --minimized", exe_str));
         cmd.args(["/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]);
         cmd.creation_flags(CREATE_NO_WINDOW);
         cmd.output()

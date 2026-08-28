@@ -205,17 +205,17 @@ impl App {
         let current = self.window_height?;
         let target = *self.content_height.lock();
         let target = target?;
-        let mut target = target.min(super::AUTO_MAX_HEIGHT + 25.0);
+        let mut target = target.min(super::AUTO_MAX_HEIGHT + super::WINDOW_CHROME);
         if let Some((_, work_h)) = crate::system_info::work_area_size() {
-            let max_h = (work_h as f32 - 40.0).max(400.0);
+            let max_h = (work_h as f32 - super::WORK_AREA_MARGIN_H).max(super::WINDOW_MIN_HEIGHT);
             target = target.min(max_h);
         }
         let width = if let Some((work_w, _)) = crate::system_info::work_area_size() {
-            super::AUTO_WIDTH.min(work_w as f32 - 20.0)
+            super::AUTO_WIDTH.min(work_w as f32 - super::WORK_AREA_MARGIN_W)
         } else {
             super::AUTO_WIDTH
         };
-        if (target - current).abs() > 0.5 {
+        if (target - current).abs() > super::RESIZE_EPSILON {
             Some(iced::window::resize(id, iced::Size::new(width, target)))
         } else {
             None

@@ -27,6 +27,8 @@ const INTEL_MSR_SHA256: &str = "d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a2
 const INTEL_MCHBAR_SHA256: &str =
     "3f82b832d99b4aac37d2a20fdb7c9baa2a3bc0488612c9019c9484eb0e8a6eae";
 
+static PS_SCRIPT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Returns local modules directory (%APPDATA%/framework-crate/modules/).
 fn modules_dir() -> std::path::PathBuf {
     let base = dirs::config_dir()
@@ -105,11 +107,13 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
         let _ = std::fs::remove_file(&zip_path);
     }
 
-    // Write PowerShell script to unique temp file to avoid collisions.
+    // Write PowerShell script to unique temp file to avoid collisions and symlink races.
+    // Use create_new (O_EXCL) so we fail if an attacker pre-created a symlink at this path.
     let script_path = std::env::temp_dir().join(format!(
-        "pawnio_download_{}_{}.ps1",
+        "pawnio_download_{}_{}_{}.ps1",
         std::process::id(),
         crate::util::monotonic_ms(),
+        PS_SCRIPT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
     ));
     // Escape single quotes for PowerShell single-quoted strings.
     let esc = |s: &str| s.replace('\'', "''");
@@ -124,7 +128,16 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
         zip = esc(&zip_path.display().to_string()),
         dir = esc(&dir.display().to_string()),
     );
-    std::fs::write(&script_path, &script).map_err(|_| "failed to write script")?;
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&script_path)
+            .map_err(|_| "failed to create script (possible symlink race)")?;
+        f.write_all(script.as_bytes())
+            .map_err(|_| "failed to write script")?;
+    }
 
     let script_str = script_path.to_str().ok_or("temp path is not valid UTF-8")?;
     let output = std::process::Command::new("powershell")
@@ -763,23 +776,35 @@ fn init_dll_fns() -> Result<(), &'static str> {
     }
 
     unsafe {
-        // Transmute FARPROC safely with size assertion.
+        // Transmute FARPROC safely with size assertions for each target type.
         const _: () = assert!(
             std::mem::size_of::<PawnioOpen>()
                 == std::mem::size_of::<windows_sys::Win32::Foundation::FARPROC>()
         );
+        const _: () = assert!(
+            std::mem::size_of::<PawnioLoad>()
+                == std::mem::size_of::<windows_sys::Win32::Foundation::FARPROC>()
+        );
+        const _: () = assert!(
+            std::mem::size_of::<PawnioExecute>()
+                == std::mem::size_of::<windows_sys::Win32::Foundation::FARPROC>()
+        );
+        const _: () = assert!(
+            std::mem::size_of::<PawnioClose>()
+                == std::mem::size_of::<windows_sys::Win32::Foundation::FARPROC>()
+        );
         let addr = GetProcAddress(dll, c"pawnio_open".as_ptr() as *const u8)
             .ok_or("pawnio_open not found")?;
-        let open: PawnioOpen = std::mem::transmute_copy(&addr);
+        let open: PawnioOpen = std::mem::transmute(addr);
         let addr = GetProcAddress(dll, c"pawnio_load".as_ptr() as *const u8)
             .ok_or("pawnio_load not found")?;
-        let load: PawnioLoad = std::mem::transmute_copy(&addr);
+        let load: PawnioLoad = std::mem::transmute(addr);
         let addr = GetProcAddress(dll, c"pawnio_execute".as_ptr() as *const u8)
             .ok_or("pawnio_execute not found")?;
-        let exec: PawnioExecute = std::mem::transmute_copy(&addr);
+        let exec: PawnioExecute = std::mem::transmute(addr);
         let addr = GetProcAddress(dll, c"pawnio_close".as_ptr() as *const u8)
             .ok_or("pawnio_close not found")?;
-        let close: PawnioClose = std::mem::transmute_copy(&addr);
+        let close: PawnioClose = std::mem::transmute(addr);
         let _ = DLL_OPEN.set(open);
         let _ = DLL_LOAD.set(load);
         let _ = DLL_EXEC.set(exec);

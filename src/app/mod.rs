@@ -34,6 +34,13 @@ pub(crate) use tasks::*;
 const AUTO_WIDTH: f32 = 900.0;
 /// Maximum auto-resized window height (logical px) to fit screen work area.
 const AUTO_MAX_HEIGHT: f32 = 1100.0;
+/// Window chrome (title bar + borders) added to content height for outer window.
+const WINDOW_CHROME: f32 = 25.0;
+/// Margins subtracted from work area when clamping autosize (avoid touching edges).
+const WORK_AREA_MARGIN_W: f32 = 20.0;
+const WORK_AREA_MARGIN_H: f32 = 40.0;
+const WINDOW_MIN_HEIGHT: f32 = 400.0;
+const RESIZE_EPSILON: f32 = 0.5;
 /// Maximum debug report files kept in temp directory.
 const MAX_DEBUG_REPORTS: usize = 5;
 
@@ -276,6 +283,7 @@ impl App {
                 per_fan_duty: Arc::new(RwLock::new(Arc::new(
                     loaded_config.fan.per_fan_duty.clone(),
                 ))),
+                last_fan_count: Arc::new(AtomicU64::new(0)),
             },
             thermal: ThermalState {
                 data: Arc::new(RwLock::new(Arc::new(None))),

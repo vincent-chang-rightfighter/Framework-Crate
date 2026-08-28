@@ -10,8 +10,8 @@ use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetMessageW, PostThreadMessageW, RegisterClassW, SetForegroundWindow, ShowWindow,
-    TranslateMessage, UnregisterClassW, WNDCLASSW, MSG,
+    GetMessageW, PostMessageW, PostThreadMessageW, RegisterClassW, SetForegroundWindow,
+    ShowWindow, TranslateMessage, UnregisterClassW, WNDCLASSW, MSG,
 };
 
 const WM_APP: u32 = 0x8000;
@@ -33,9 +33,40 @@ thread_local! {
 }
 
 static TRAY_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+static TRAY_HWND_GLOBAL: AtomicU32 = AtomicU32::new(0);
+static TRAY_HWND_GLOBAL_HI: AtomicU32 = AtomicU32::new(0);
+
+fn store_global_hwnd(hwnd: isize) {
+    let lo = hwnd as u32;
+    let hi = ((hwnd as u64) >> 32) as u32;
+    TRAY_HWND_GLOBAL.store(lo, Ordering::Release);
+    TRAY_HWND_GLOBAL_HI.store(hi, Ordering::Release);
+}
+
+fn load_global_hwnd() -> isize {
+    let lo = TRAY_HWND_GLOBAL.load(Ordering::Acquire) as u64;
+    let hi = TRAY_HWND_GLOBAL_HI.load(Ordering::Acquire) as u64;
+    ((hi << 32) | lo) as isize
+}
 
 /// Wakes tray thread to drain command queue; caller must retry on failure.
 pub fn notify_tray_thread() -> bool {
+    // Prefer PostMessageW to the tray window (always queued) over
+    // PostThreadMessageW (fails if thread hasn't primed GetMessageW yet).
+    let hwnd = load_global_hwnd();
+    if hwnd != 0 {
+        let ok = unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                hwnd as *mut core::ffi::c_void,
+                WM_COMMAND_READY,
+                0,
+                0,
+            ) != 0
+        };
+        if ok {
+            return true;
+        }
+    }
     let tid = TRAY_THREAD_ID.load(Ordering::Acquire);
     if tid == 0 {
         return false;
@@ -83,14 +114,23 @@ unsafe extern "system" fn tray_wnd_proc(
             // TrackPopupMenu runs a modal loop that consumes the thread's
             // WM_COMMAND_READY wake. Re-post after the menu so the outer
             // GetMessageW drains the buffered Shutdown/Reinit command.
-            let _ = unsafe {
-                PostThreadMessageW(
-                    TRAY_THREAD_ID.load(Ordering::Acquire),
-                    WM_COMMAND_READY,
-                    0,
-                    0,
-                )
-            };
+            // Prefer PostMessageW to the window (always queued) over
+            // PostThreadMessageW (fails if queue not primed).
+            let hwnd = TRAY_HWND.with(|h| h.get());
+            if hwnd != 0 {
+                let _ = unsafe {
+                    PostMessageW(hwnd as *mut core::ffi::c_void, WM_COMMAND_READY, 0, 0)
+                };
+            } else {
+                let _ = unsafe {
+                    PostThreadMessageW(
+                        TRAY_THREAD_ID.load(Ordering::Acquire),
+                        WM_COMMAND_READY,
+                        0,
+                        0,
+                    )
+                };
+            }
         }
         return 0;
     }
@@ -167,6 +207,7 @@ fn cleanup_and_exit(
     hicon: Option<isize>,
 ) {
     TRAY_THREAD_ID.store(0, Ordering::Release);
+    store_global_hwnd(0);
     if tray_icon_loaded {
         system_info::shell_notify_delete(tray_hwnd as isize);
     }
@@ -215,6 +256,7 @@ fn message_pump_loop(
     TRAY_HWND.with(|hwnd| {
         hwnd.set(tray_hwnd as isize);
     });
+    store_global_hwnd(tray_hwnd as isize);
 
     let mut tray_icon_loaded = false;
     let mut hicon: Option<isize> = None;

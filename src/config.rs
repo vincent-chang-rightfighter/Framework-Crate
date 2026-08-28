@@ -28,9 +28,13 @@ static CONFIG_DIR_CREATED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex:
 pub(crate) static CONFIG_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn config_path() -> Result<PathBuf, String> {
-    let config_dir = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(default_config_dir);
+    let config_dir = if let Some(os) = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR") {
+        let p = PathBuf::from(&os);
+        validate_config_dir(&p)?;
+        p
+    } else {
+        default_config_dir()
+    };
     {
         let mut guard = CONFIG_DIR_CREATED.lock().unwrap_or_else(|e| e.into_inner());
         if guard.as_ref() != Some(&config_dir) {
@@ -45,6 +49,35 @@ pub fn config_path() -> Result<PathBuf, String> {
         }
     }
     Ok(config_dir.join("config.toml"))
+}
+
+fn validate_config_dir(path: &std::path::Path) -> Result<(), String> {
+    use std::path::Component;
+    let s = path.to_string_lossy();
+    // Reject Win32 extended-length / device paths that bypass normalization.
+    if s.contains(r"\\?\") || s.contains(r"\\.\") {
+        return Err(format!(
+            "FRAMEWORK_CONTROL_CONFIG_DIR must not contain \\\\?\\ or \\\\.\\ prefix: {}",
+            path.display()
+        ));
+    }
+    if !path.is_absolute() {
+        return Err(format!(
+            "FRAMEWORK_CONTROL_CONFIG_DIR must be absolute: {}",
+            path.display()
+        ));
+    }
+    // Reject parent-dir components that could escape after join.
+    if path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(format!(
+            "FRAMEWORK_CONTROL_CONFIG_DIR must not contain '..': {}",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn default_config_dir() -> PathBuf {
