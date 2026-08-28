@@ -85,17 +85,13 @@ impl Config {
                 point[0] = point[0].clamp(0, CURVE_TEMP_MAX);
                 point[1] = point[1].clamp(0, 100);
             }
-            // Dedupe by temp keeping highest duty; sort to keep editor and
-            // canvas in consistent left-to-right order.
-            let mut deduped: Vec<[u32; 2]> = Vec::new();
+            // Dedupe by temp keeping highest duty; use BTreeMap to share
+            // dedupe/sort semantics with `curve_full_points` and avoid drift.
+            let mut map: BTreeMap<u32, u32> = BTreeMap::new();
             for &[t, d] in &curve.curve.points {
-                if let Some(existing) = deduped.iter_mut().find(|p| p[0] == t) {
-                    existing[1] = existing[1].max(d);
-                } else {
-                    deduped.push([t, d]);
-                }
+                map.entry(t).and_modify(|e| *e = (*e).max(d)).or_insert(d);
             }
-            deduped.sort_by_key(|p| p[0]);
+            let deduped: Vec<[u32; 2]> = map.into_iter().map(|(t, d)| [t, d]).collect();
             // Locked zone: 100–110°C must be 100% fixed, remove any editable points in that range.
             let mut filtered: Vec<[u32; 2]> = Vec::new();
             for &[t, d] in &deduped {

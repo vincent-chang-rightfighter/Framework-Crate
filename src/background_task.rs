@@ -396,6 +396,9 @@ pub fn spawn(state: AppState) {
                 let mut consecutive_ec_write_failures: u32 = 0;
                 // Last successful duty write time for periodic re-assert.
                 let mut last_duty_write_ms: u64 = 0;
+                // Last successful PD/expansion scan times for staleness.
+                let mut last_pd_success_ms: u64 = 0;
+                let mut last_expansion_success_ms: u64 = 0;
                 // Last curve fail-safe handover time.
                 let mut last_curve_failover_ms: u64 = 0;
                 // True on iteration after resume to re-assert manual control.
@@ -597,6 +600,7 @@ pub fn spawn(state: AppState) {
                         let ec_clone = Arc::clone(&ec);
                         match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.power()).await {
                             Ok(Ok(bat)) => {
+                                consecutive_ec_failures = 0;
                                 let ac_now = bat.ac_present == Some(true);
                                 // Signal PL reset on AC->battery transition (only on success to avoid spurious).
                                 let ac_was =
@@ -629,6 +633,12 @@ pub fn spawn(state: AppState) {
                             }
                             Ok(Err(e)) => {
                                 tracing::debug!("Battery read failed: {}", e);
+                                consecutive_ec_failures += 1;
+                                if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
+                                    reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                    continue;
+                                }
                                 let last_ok =
                                     bg_state2.battery.last_success_ms.load(Ordering::Acquire);
                                 let cur = crate::util::monotonic_ms();
@@ -643,6 +653,12 @@ pub fn spawn(state: AppState) {
                             }
                             Err(e) => {
                                 warn!("Battery spawn panicked: {}", e);
+                                consecutive_ec_failures += 1;
+                                if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
+                                    reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                    continue;
+                                }
                                 let last_ok =
                                     bg_state2.battery.last_success_ms.load(Ordering::Acquire);
                                 let cur = crate::util::monotonic_ms();
@@ -669,38 +685,66 @@ pub fn spawn(state: AppState) {
                     if now_ms.saturating_sub(last_expansion_scan) >= expansion_interval {
                         last_expansion_scan = now_ms;
                         let ec_clone = Arc::clone(&ec);
-                        if let Ok(ports) =
-                            crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.pd_ports()).await
-                        {
-                            let changed = {
-                                let current = read_lock(&bg_state2.peripherals.pd_ports);
-                                *current != ports
-                            };
-                            if changed {
-                                with_write_lock(&bg_state2.peripherals.pd_ports, |guard| {
-                                    *guard = Arc::new(ports);
-                                });
-                                mark_view_dirty(&bg_state2);
-                            }
-                            mark_pd_usb_c_seen(
-                                &read_lock(&bg_state2.peripherals.pd_ports),
-                                &bg_state2.peripherals.pd_usb_c_seen,
-                            );
-                            push_pd_ports_history(
-                                &bg_state2.peripherals.pd_ports,
-                                &bg_state2.peripherals.pd_ports_history,
-                            );
-                        }
-                        let ec_clone = Arc::clone(&ec);
-                        if let Ok(cards) =
-                            crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.expansion_cards()).await
-                        {
-                            with_write_lock(&bg_state2.peripherals.expansion_cards, |guard| {
-                                if **guard != cards {
-                                    *guard = Arc::new(cards);
+                        match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.pd_ports()).await {
+                            Ok(ports) => {
+                                last_pd_success_ms = crate::util::monotonic_ms();
+                                let changed = {
+                                    let current = read_lock(&bg_state2.peripherals.pd_ports);
+                                    *current != ports
+                                };
+                                if changed {
+                                    with_write_lock(&bg_state2.peripherals.pd_ports, |guard| {
+                                        *guard = Arc::new(ports);
+                                    });
                                     mark_view_dirty(&bg_state2);
                                 }
-                            });
+                                mark_pd_usb_c_seen(
+                                    &read_lock(&bg_state2.peripherals.pd_ports),
+                                    &bg_state2.peripherals.pd_usb_c_seen,
+                                );
+                                push_pd_ports_history(
+                                    &bg_state2.peripherals.pd_ports,
+                                    &bg_state2.peripherals.pd_ports_history,
+                                );
+                            }
+                            Err(e) => {
+                                warn!("PD ports read failed: {}", e);
+                                if last_pd_success_ms != 0
+                                    && crate::util::monotonic_ms().saturating_sub(last_pd_success_ms) > 30_000
+                                {
+                                    with_write_lock(&bg_state2.peripherals.pd_ports, |guard| {
+                                        if !guard.is_empty() {
+                                            *guard = Arc::new(smallvec::SmallVec::new());
+                                            mark_view_dirty(&bg_state2);
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        let ec_clone = Arc::clone(&ec);
+                        match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || ec_clone.expansion_cards()).await {
+                            Ok(cards) => {
+                                last_expansion_success_ms = crate::util::monotonic_ms();
+                                with_write_lock(&bg_state2.peripherals.expansion_cards, |guard| {
+                                    if **guard != cards {
+                                        *guard = Arc::new(cards);
+                                        mark_view_dirty(&bg_state2);
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                warn!("Expansion cards read failed: {}", e);
+                                if last_expansion_success_ms != 0
+                                    && crate::util::monotonic_ms().saturating_sub(last_expansion_success_ms) > 30_000
+                                {
+                                    with_write_lock(&bg_state2.peripherals.expansion_cards, |guard| {
+                                        if !guard.is_empty() {
+                                            *guard = Arc::new(smallvec::SmallVec::new());
+                                            mark_view_dirty(&bg_state2);
+                                        }
+                                    });
+                                }
+                            }
                         }
                     }
                     // Versions rarely change; only fetch a few times at startup.

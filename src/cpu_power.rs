@@ -1216,6 +1216,9 @@ pub fn publish_ac_snapshot(ac_present: bool) {
 
 fn load_persisted_bios_defaults() -> Option<BiosDefaults> {
     let path = bios_defaults_path().ok()?;
+    if path.exists() {
+        crate::config::warn_if_world_writable(&path);
+    }
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         // Missing file: first run.
@@ -1278,6 +1281,7 @@ fn persist_bios_defaults(defaults: &BiosDefaults) -> Result<(), String> {
             )
         };
         if ok != 0 {
+            crate::config::harden_file_acl(&path);
             Ok(())
         } else {
             let _ = std::fs::remove_file(&path);
@@ -1285,6 +1289,7 @@ fn persist_bios_defaults(defaults: &BiosDefaults) -> Result<(), String> {
                 let _ = std::fs::remove_file(&tmp);
                 format!("rename bios_defaults failed: {}", e)
             })?;
+            crate::config::harden_file_acl(&path);
             Ok(())
         }
     }
@@ -1294,6 +1299,7 @@ fn persist_bios_defaults(defaults: &BiosDefaults) -> Result<(), String> {
             let _ = std::fs::remove_file(&tmp);
             format!("rename bios_defaults failed: {}", e)
         })?;
+        crate::config::harden_file_acl(&path);
         Ok(())
     }
 }
