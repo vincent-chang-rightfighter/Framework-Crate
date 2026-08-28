@@ -1693,6 +1693,7 @@ mod tests {
 
     #[test]
     fn bios_defaults_persist_and_load() {
+        let _env_guard = crate::config::CONFIG_DIR_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR");
         unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", dir.path()) };

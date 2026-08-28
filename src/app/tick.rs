@@ -1,4 +1,4 @@
-use super::{App, Message, refresh_cpu_power_task};
+use super::{App, Message, refresh_cpu_power_task, tick_task};
 use crate::style::{IDLE_THRESHOLD_MS, UI_HIDDEN_INTERVAL_MS, UI_IDLE_INTERVAL_MS};
 use crate::system_info;
 use iced::Task;
@@ -258,13 +258,4 @@ impl App {
         }
         // else: new updates arrived during build, will rebuild next call
     }
-}
-
-pub(crate) fn tick_task(ms: u64) -> Task<Message> {
-    Task::perform(
-        async move {
-            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-        },
-        |_| Message::Tick,
-    )
 }

@@ -22,6 +22,11 @@ fn unique_tmp_extension() -> String {
 
 static CONFIG_DIR_CREATED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
+/// Serializes tests that mutate the process-global `FRAMEWORK_CONTROL_CONFIG_DIR`
+/// env var; parallel tests reading/writing different temp dirs would race otherwise.
+#[cfg(test)]
+pub(crate) static CONFIG_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn config_path() -> Result<PathBuf, String> {
     let config_dir = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR")
         .map(PathBuf::from)
@@ -393,6 +398,7 @@ mod tests {
 
     #[test]
     fn save_versioned_skips_stale_version() {
+        let _env_guard = CONFIG_DIR_TEST_LOCK.lock().unwrap();
         // An older (lower) version must not overwrite a newer one already on
         // disk: this guards shutdown saves against being clobbered by a stale
         // debounced save and vice versa.

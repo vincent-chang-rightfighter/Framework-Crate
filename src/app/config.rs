@@ -1,11 +1,12 @@
-use super::{App, Message};
+use super::{App, Message, next_config_version};
 use crate::style::*;
-use crate::types::FanControlMode;
+use crate::types::{Config, FanControlMode};
 use crate::util::{read_lock, with_write_lock};
 use iced::Task;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
+use tracing::{debug, warn};
 
 impl App {
     pub(crate) fn handle_config_message(&mut self, message: &Message) -> Option<Task<Message>> {
@@ -82,7 +83,7 @@ impl App {
                     }
                 }
                 // Clamp temperature between neighbors to avoid duplicate temps collapsing control points.
-                // Editable range is 0..99; 100–110 is locked 100%.
+                // Editable range is 0..99; 100??10 is locked 100%.
                 let temp = {
                     let cfg = read_lock(&self.state.lifecycle.config);
                     let points = cfg
@@ -102,7 +103,7 @@ impl App {
                         .filter(|&t| t < crate::types::CURVE_TEMP_LOCK_START as i64)
                         .collect();
                     others.sort_unstable();
-                    let mut lo: i64 = -1; // nothing below → allow down to 0
+                    let mut lo: i64 = -1; // nothing below ??allow down to 0
                     let mut hi: i64 = max_t + 1; // editable max is 99, locked 100 above
                     for &t in &others {
                         if t < temp as i64 {
@@ -265,5 +266,69 @@ impl App {
             }
             _ => None,
         }
+    }
+}
+
+impl App {
+    pub(crate) fn save_config(&mut self) {
+        self.mark_dirty();
+        let cfg = read_lock(&self.state.lifecycle.config);
+        let ver = next_config_version();
+        if self.config_tx.send((Arc::clone(&cfg), ver)).is_ok() {
+            self.config_save_failed = false;
+        } else {
+            debug!("Config save channel dropped — falling back to sync save");
+            // Fallback synchronous save when channel is dropped.
+            let cfg_owned: Config = (*cfg).clone();
+            drop(cfg);
+            if let Err(e) = crate::config::save_versioned(&cfg_owned, ver, true) {
+                warn!("Fallback sync config save failed: {}", e);
+                self.config_save_failed = true;
+                self.state
+                    .lifecycle
+                    .bg_config_save_failed
+                    .store(true, Ordering::Relaxed);
+            } else {
+                self.config_save_failed = false;
+                self.state
+                    .lifecycle
+                    .bg_config_save_failed
+                    .store(false, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Synchronous config save for shutdown paths.
+    pub(crate) fn save_config_now(&mut self) {
+        let cfg = read_lock(&self.state.lifecycle.config);
+        let ver = next_config_version();
+        if let Err(e) = crate::config::save_versioned(&cfg, ver, true) {
+            warn!("Failed to save config: {}", e);
+        }
+    }
+
+    /// Mutates config under write lock; caller must persist with save_config().
+    pub(crate) fn mutate_config(&self, f: impl FnOnce(&mut Config)) {
+        with_write_lock(&self.state.lifecycle.config, |guard| {
+            f(Arc::make_mut(guard));
+        });
+    }
+
+    pub(crate) fn update_curve_full_points(&mut self) {
+        let cfg = read_lock(&self.state.lifecycle.config);
+        let pts: &[[u32; 2]] = cfg
+            .fan
+            .curve
+            .as_ref()
+            .map(|c| c.curve.points.as_slice())
+            .unwrap_or(&[]);
+        if self.last_curve_points.as_slice() == pts {
+            return;
+        }
+        self.last_curve_points = pts.to_vec();
+        let new_full = Arc::new(crate::types::curve_full_points(pts));
+        with_write_lock(&self.state.fan.curve_full_points, |guard| {
+            *guard = new_full;
+        });
     }
 }
