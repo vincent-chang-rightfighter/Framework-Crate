@@ -20,8 +20,6 @@ fn unique_tmp_extension() -> String {
     format!("toml.{}.{}.{}.tmp", timestamp, pid, counter)
 }
 
-static CONFIG_DIR_CREATED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
-
 /// Serializes tests that mutate the process-global `FRAMEWORK_CONTROL_CONFIG_DIR`
 /// env var; parallel tests reading/writing different temp dirs would race otherwise.
 #[cfg(test)]
@@ -35,19 +33,14 @@ pub fn config_path() -> Result<PathBuf, String> {
     } else {
         default_config_dir()
     };
-    {
-        let mut guard = CONFIG_DIR_CREATED.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.as_ref() != Some(&config_dir) {
-            std::fs::create_dir_all(&config_dir).map_err(|e| {
-                format!(
-                    "Failed to create config directory {}: {}",
-                    config_dir.display(),
-                    e
-                )
-            })?;
-            *guard = Some(config_dir.clone());
-        }
-    }
+    // create_dir_all is idempotent and cheap; avoid caching to prevent stale test dir reuse
+    std::fs::create_dir_all(&config_dir).map_err(|e| {
+        format!(
+            "Failed to create config directory {}: {}",
+            config_dir.display(),
+            e
+        )
+    })?;
     Ok(config_dir.join("config.toml"))
 }
 
@@ -224,9 +217,13 @@ pub fn load() -> Result<Config, String> {
 
 /// Skips write if newer version already persisted; check is under lock to avoid shutdown race.
 pub fn save_versioned(config: &Config, ver: u64, sync: bool) -> Result<(), String> {
-    let _guard = CONFIG_SAVE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = match CONFIG_SAVE_LOCK.lock() {
+        Ok(g) => g,
+        Err(p) => {
+            tracing::warn!("CONFIG_SAVE_LOCK poisoned, recovering");
+            p.into_inner()
+        }
+    };
     let newest = LAST_SAVED_VERSION.load(Ordering::SeqCst);
     if ver < newest {
         tracing::debug!(

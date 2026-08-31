@@ -196,21 +196,52 @@ fn try_curl_download(
     zip_path: &std::path::Path,
     dir: &std::path::Path,
 ) -> Result<(), &'static str> {
+    // avoid TOCTOU/symlink hijack on deterministic zip_path.
+    // Download to a unique temp file created with create_new, then extract from it.
     let _ = std::fs::remove_file(dir.join("IntelMSR.bin"));
     let _ = std::fs::remove_file(dir.join("IntelMCHBAR.bin"));
+    // If zip_path is a symlink/reparse point, refuse to follow it
+    if let Ok(meta) = std::fs::symlink_metadata(zip_path)
+        && meta.file_type().is_symlink()
+    {
+        warn!("Refusing to use symlink at {}", zip_path.display());
+        return Err("zip path is symlink");
+    }
+    let zip_tmp = dir.join(format!(
+        "pawnio_modules_{}_{}_{}.zip.tmp",
+        PAWNIO_MODULES_VERSION,
+        std::process::id(),
+        PS_SCRIPT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    // Ensure tmp doesn't exist via create_new guard
+    {
+        let _guard = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&zip_tmp)
+            .map_err(|_| "failed to create temp zip (possible race)")?;
+    }
     let curl_output = std::process::Command::new("curl.exe")
-        .args(["-L", "-o", &zip_path.display().to_string(), url])
+        .args(["-L", "-o", &zip_tmp.display().to_string(), url])
         .creation_flags(0x08000000)
         .output()
         .map_err(|_| "curl not available")?;
     if !curl_output.status.success() {
+        let _ = std::fs::remove_file(&zip_tmp);
         return Err("curl download failed");
+    }
+    // Basic size sanity check before extraction
+    if let Ok(meta) = std::fs::metadata(&zip_tmp)
+        && meta.len() < 1000
+    {
+        let _ = std::fs::remove_file(&zip_tmp);
+        return Err("downloaded zip too small");
     }
     // Try tar.exe first (Windows 10 1803+)
     let tar_output = std::process::Command::new("tar.exe")
         .args([
             "-xf",
-            &zip_path.display().to_string(),
+            &zip_tmp.display().to_string(),
             "-C",
             &dir.display().to_string(),
         ])
@@ -219,16 +250,23 @@ fn try_curl_download(
     if let Ok(out) = tar_output
         && out.status.success()
     {
+        let _ = std::fs::remove_file(&zip_tmp);
         let _ = std::fs::remove_file(zip_path);
+        // Verify immediately after extraction; remove bins on mismatch
+        if verify_cached_modules(dir).is_err() {
+            let _ = std::fs::remove_file(dir.join("IntelMSR.bin"));
+            let _ = std::fs::remove_file(dir.join("IntelMCHBAR.bin"));
+            return Err("module hash mismatch after tar extract");
+        }
         return Ok(());
     }
     // Fallback to PowerShell Expand-Archive
     let esc = |s: &str| s.replace('\'', "''");
     let ps_script = format!(
         "Expand-Archive -Path '{}' -DestinationPath '{}' -Force; Remove-Item '{}' -ErrorAction SilentlyContinue",
-        esc(&zip_path.display().to_string()),
+        esc(&zip_tmp.display().to_string()),
         esc(&dir.display().to_string()),
-        esc(&zip_path.display().to_string())
+        esc(&zip_tmp.display().to_string())
     );
     let ps_out = std::process::Command::new("powershell")
         .args([
@@ -242,9 +280,16 @@ fn try_curl_download(
         .output()
         .map_err(|_| "tar and powershell extraction failed")?;
     if !ps_out.status.success() {
+        let _ = std::fs::remove_file(&zip_tmp);
         return Err("extraction failed");
     }
+    let _ = std::fs::remove_file(&zip_tmp);
     let _ = std::fs::remove_file(zip_path);
+    if verify_cached_modules(dir).is_err() {
+        let _ = std::fs::remove_file(dir.join("IntelMSR.bin"));
+        let _ = std::fs::remove_file(dir.join("IntelMCHBAR.bin"));
+        return Err("module hash mismatch after ps extract");
+    }
     Ok(())
 }
 
@@ -765,6 +810,49 @@ pub fn is_pawnio_installed() -> bool {
     std::path::Path::new(DLL_PATH).exists()
 }
 
+/// Verifies DLL is at expected location and not a symlink/reparse point before loading.
+fn verify_dll_path() -> Result<(), &'static str> {
+    let p = std::path::Path::new(DLL_PATH);
+    // Must exist and not be a symlink
+    let meta = std::fs::symlink_metadata(p).map_err(|_| "PawnIO not installed")?;
+    if meta.file_type().is_symlink() {
+        warn!("PawnIO DLL is a symlink, refusing to load: {}", DLL_PATH);
+        return Err("DLL is symlink");
+    }
+    // Canonicalize and ensure it stays under Program Files\PawnIO
+    if let Ok(canon) = std::fs::canonicalize(p) {
+        let canon_str = canon.to_string_lossy().to_lowercase();
+        if !canon_str.contains(r"pawnio") {
+            warn!("PawnIO DLL canonical path unexpected: {}", canon.display());
+            return Err("DLL path mismatch");
+        }
+    }
+    // Optional: Authenticode check via PowerShell Get-AuthenticodeSignature (best-effort, warn-only)
+    // Full WinVerifyTrust requires Win32_Security_WinTrust feature; we do a lightweight check here
+    if let Ok(out) = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "(Get-AuthenticodeSignature '{}').Status -eq 'Valid'",
+                DLL_PATH.replace('\'', "''")
+            ),
+        ])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        let txt = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        if txt.contains("false") {
+            warn!(
+                "PawnIO DLL authenticode not Valid (may be unsigned/test-signed): {}",
+                DLL_PATH
+            );
+            // Warn-only: allow loading for dev/test, but log for audit
+        }
+    }
+    Ok(())
+}
+
 /// Initializes DLL function pointers (once).
 fn init_dll_fns() -> Result<(), &'static str> {
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
@@ -772,6 +860,8 @@ fn init_dll_fns() -> Result<(), &'static str> {
     if DLL_OPEN.get().is_some() {
         return Ok(()); // already initialized
     }
+
+    verify_dll_path()?;
 
     let dll_path = CString::new(DLL_PATH).map_err(|_| "CString failed")?;
     let dll = unsafe { LoadLibraryA(dll_path.as_ptr() as *const u8) };
@@ -1159,8 +1249,11 @@ fn sync_thread_main(
                 }
             }
         }
-        // Back off on persistent failures; cap at 5s.
-        let interval_ms = if write_failures >= 10 {
+        // Back off on persistent failures; cap at 30s.
+        // BIOS-locked register will otherwise spin forever; 30s reduces thermal contention.
+        let interval_ms = if write_failures >= 20 {
+            30_000
+        } else if write_failures >= 10 {
             5000
         } else if write_failures >= 4 {
             1000

@@ -210,13 +210,19 @@ impl TrayManager {
     }
 
     pub fn reset(&mut self) {
+        // do not detach thread_handle immediately; keep handle so cleanup_and_exit
+        // can DestroyIcon even after we drop channels. Detaching (None) would leak HICON until process exit.
+        // We disconnect channels to signal the pump to exit, but keep handle for is_alive/poll.
         self.command_tx = None;
         // NOTE: Wakes live pump to observe disconnect and unregister window class.
         notify_tray_thread();
         self.event_rx = None;
         self.icon_ready_rx = None;
         self.thread_ready_rx = None;
-        self.thread_handle = None;
+        // Keep thread_handle to allow poll_reinit/is_alive to join; will be cleared on next init or poll
+        if self.thread_handle.as_ref().is_some_and(|h| h.is_finished()) {
+            self.thread_handle = None;
+        }
         self.pending_reinit_hwnd = None;
         self.initialized = false;
         self.thread_ready = false;
@@ -225,7 +231,7 @@ impl TrayManager {
         self.icon_loaded = false;
         self.last_notify_at = None;
         self.just_restored_at = None;
-        tracing::warn!("TrayManager state reset");
+        tracing::warn!("TrayManager state reset (thread_handle kept for join)");
     }
 
     pub fn hwnd(&self) -> isize {

@@ -88,11 +88,25 @@ fn main() {
     let info = reader
         .next_frame(&mut buf)
         .expect("Failed to decode PNG frame");
-    assert_eq!(
-        info.color_type,
-        png::ColorType::Rgba,
-        "app.png must be RGBA"
-    );
+    // gracefully handle non-RGBA (e.g. RGB) by expanding to RGBA instead of assert-failing build
+    let buf = if info.color_type != png::ColorType::Rgba {
+        if info.color_type == png::ColorType::Rgb {
+            // Expand RGB -> RGBA (alpha=0xFF)
+            let mut rgba = Vec::with_capacity((info.width * info.height * 4) as usize);
+            for chunk in buf.chunks_exact(3) {
+                rgba.extend_from_slice(chunk);
+                rgba.push(0xFF);
+            }
+            rgba
+        } else {
+            panic!(
+                "app.png must be RGBA or RGB, got {:?} — convert to RGBA",
+                info.color_type
+            );
+        }
+    } else {
+        buf
+    };
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("icon_rgba.rs");

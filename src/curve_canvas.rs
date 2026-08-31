@@ -47,7 +47,7 @@ struct CurveRenderer {
 /// State in widget Tree; survives `view()` rebuilds.
 struct CurveState {
     cache: Cache<iced::Renderer>,
-    cached_key: Cell<(*const (), usize)>,
+    cached_key: Cell<(*const (), usize, u64)>,
     last_points: std::cell::RefCell<Option<Arc<[[u32; 2]]>>>,
     /// Previous marks to detect temperature changes needing cache clear.
     last_marks: std::cell::RefCell<Option<Arc<Vec<SensorMark>>>>,
@@ -64,7 +64,7 @@ impl Default for CurveState {
     fn default() -> Self {
         Self {
             cache: Cache::new(),
-            cached_key: Cell::new((std::ptr::null::<()>(), 0)),
+            cached_key: Cell::new((std::ptr::null::<()>(), 0, 0)),
             last_points: std::cell::RefCell::new(None),
             last_marks: std::cell::RefCell::new(None),
             dragging: Cell::new(None),
@@ -233,7 +233,15 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
         _cursor: iced::mouse::Cursor,
     ) -> Vec<iced::widget::canvas::Geometry> {
         let size = bounds.size();
-        let key = (Arc::as_ptr(&self.all_pts) as *const (), self.all_pts.len());
+        // include content hash to avoid false hit when allocator reuses same address
+        let content_hash = self.all_pts.iter().fold(0u64, |acc, p| {
+            acc.wrapping_add((p[0] as u64).wrapping_mul(31).wrapping_add(p[1] as u64))
+        });
+        let key = (
+            Arc::as_ptr(&self.all_pts) as *const (),
+            self.all_pts.len(),
+            content_hash,
+        );
         let points_changed = state.last_points.borrow().as_deref() != Some(self.points.as_ref());
         let marks_changed = state.last_marks.borrow().as_deref() != Some(self.marks.as_ref());
         let highlight_changed = state.last_hover.get() != state.hover.get()

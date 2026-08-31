@@ -246,7 +246,7 @@ impl App {
                 Some(Task::none())
             }
             Message::PollRateChanged(ms) => {
-                let ms = ms.clamp(POLL_RATE_MIN_MS as u64, crate::types::POLL_MS_MAX);
+                let ms = ms.clamp(crate::types::POLL_MS_MIN, crate::types::POLL_MS_MAX);
                 self.mutate_config(|cfg| {
                     cfg.telemetry.poll_ms = ms;
                 });
@@ -255,7 +255,10 @@ impl App {
                 Some(Task::none())
             }
             Message::UiRefreshRateChanged(ms) => {
-                let ms = ms.clamp(50, 1000);
+                let ms = ms.clamp(
+                    crate::types::UI_REFRESH_MS_MIN,
+                    crate::types::UI_REFRESH_MS_MAX,
+                );
                 self.mutate_config(|cfg| {
                     cfg.telemetry.ui_refresh_ms = ms;
                 });

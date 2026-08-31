@@ -36,7 +36,6 @@ impl iced::Executor for SmallTokioExecutor {
             .worker_threads(2)
             .max_blocking_threads(8)
             .enable_all()
-            .on_thread_start(crate::background_task::pin_to_slowest_core)
             .build()
             .map_err(iced::futures::io::Error::other)
             .map(|rt| Self { rt })
@@ -56,12 +55,39 @@ impl iced::Executor for SmallTokioExecutor {
     }
 }
 
+fn fallback_log(msg: &str) {
+    // windows_subsystem hides stderr when double-clicked; also write to file
+    eprintln!("{}", msg);
+    if let Some(base) = dirs::config_dir().or_else(dirs::data_local_dir) {
+        let path = base.join("framework-crate").join("app.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "[{}] {}", chrono_like_timestamp(), msg);
+        }
+    }
+}
+
+fn chrono_like_timestamp() -> String {
+    // lightweight timestamp without chrono dep
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}", now.as_secs())
+}
+
 /// Single-instance guard; prevents parallel EC I/O and tray/config races from second process.
 fn acquire_single_instance(minimized: bool) -> Option<system_info::SingleInstanceGuard> {
     match system_info::SingleInstanceGuard::acquire("FrameworkCrateSingleInstance") {
         Ok(guard) => Some(guard),
         Err(()) => {
-            eprintln!("Framework Crate is already running.");
+            fallback_log("Framework Crate is already running.");
             // Only foreground existing window on manual launch; schtasks fires on unlock so stay silent.
             if !minimized {
                 // Signal running instance to restore; second process cannot restore parked window itself.

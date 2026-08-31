@@ -17,7 +17,7 @@ pub(crate) fn run_ec_task(
     let ec_client = Arc::clone(ec_client);
     Task::perform(
         async move {
-            let _guard = util::ec_write_mutex().lock().await;
+            let _guard = util::acquire_ec_write().await;
             let ec_opt = { util::read_lock(&ec_client) };
             if let Some(ref ec) = *ec_opt {
                 let ec = ec.clone();
@@ -51,7 +51,7 @@ pub(crate) fn run_ec_task_result(
     let ec_client = Arc::clone(ec_client);
     Task::perform(
         async move {
-            let _guard = util::ec_write_mutex().lock().await;
+            let _guard = util::acquire_ec_write().await;
             let ec_opt = { util::read_lock(&ec_client) };
             let res = if let Some(ref ec) = *ec_opt {
                 let ec = ec.clone();

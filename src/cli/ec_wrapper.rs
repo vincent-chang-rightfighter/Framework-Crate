@@ -189,16 +189,18 @@ pub fn classify_pd_port<'a>(
     }
     let history = &hist_buf[..hist_len];
 
-    tracing::debug!(
-        "[classify] Port {}: role={:?}, pd_contract={}, dp_alt={}, watts={:?}, hist_len={}, display_card={}",
-        port.port,
-        port.power_role,
-        port.pd_contract,
-        port.dp_alt_mode,
-        port.negotiated_watts,
-        hist_len,
-        display_card_installed
-    );
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        tracing::debug!(
+            "[classify] Port {}: role={:?}, pd_contract={}, dp_alt={}, watts={:?}, hist_len={}, display_card={}",
+            port.port,
+            port.power_role,
+            port.pd_contract,
+            port.dp_alt_mode,
+            port.negotiated_watts,
+            hist_len,
+            display_card_installed
+        );
+    }
 
     if is_pd_power_input(port) {
         tracing::debug!(

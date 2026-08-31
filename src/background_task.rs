@@ -25,7 +25,7 @@ const MAX_EC_WRITE_FAILURES: u32 = 5;
 const FAN_REASSERT_INTERVAL_MS: u64 = 30_000;
 
 /// Rate-limit for curve fail-safe handover to firmware when temps are empty.
-const CURVE_TEMP_FAILOVER_MS: u64 = 30_000;
+const CURVE_TEMP_FAILOVER_MS: u64 = 1_000;
 
 /// Maximum age of thermal sample before curve considers it stale.
 const THERMAL_STALE_MS: u64 = 5_000;
@@ -63,15 +63,24 @@ fn reset_ec_after_failures(state: &AppState, failures: u32) {
 }
 
 pub fn pin_to_slowest_core() {
+    // core_affinity order is OS enumeration, not perf order; picking `last()` as LP-E is unreliable.
+    // Heuristic: use first core (often efficiency on hybrid) but warn that pinning is best-effort.
+    // If system has >1 core, pin to core 0 to avoid pinning both tokio workers to same core.
     if let Some(cores) = core_affinity::get_core_ids()
-        && let Some(&slowest) = cores.last()
+        && !cores.is_empty()
     {
-        if core_affinity::set_for_current(slowest) {
-            tracing::debug!("[AFFINITY] Pinned to LP-E core (id={})", slowest.id);
+        // Prefer first core as E-core heuristic; previously used `last()` which is arbitrary.
+        let target = cores.first().copied().unwrap_or(cores[0]);
+        if core_affinity::set_for_current(target) {
+            tracing::debug!(
+                "[AFFINITY] Pinned to core (id={}) heuristic (cores={})",
+                target.id,
+                cores.len()
+            );
             #[cfg(debug_assertions)]
-            verify_affinity(slowest.id);
+            verify_affinity(target.id);
         } else {
-            tracing::debug!("[AFFINITY] Failed to pin to core {}", slowest.id);
+            tracing::debug!("[AFFINITY] Failed to pin to core {}", target.id);
         }
     }
 }
@@ -912,7 +921,7 @@ pub fn spawn(state: AppState) {
                                 }
                                 let mut backoff_ec = false;
                                 {
-                                    let _ec_guard = crate::util::ec_write_mutex().lock().await;
+                                    let _ec_guard = crate::util::acquire_ec_write().await;
                                     let ec_clone = Arc::clone(&ec);
                                     match crate::util::spawn_blocking_with_timeout(
                                         crate::util::EC_IO_TIMEOUT,
@@ -980,8 +989,7 @@ pub fn spawn(state: AppState) {
                                         }
                                         let mut backoff_ec = false;
                                         {
-                                            let _ec_guard =
-                                                crate::util::ec_write_mutex().lock().await;
+                                            let _ec_guard = crate::util::acquire_ec_write().await;
                                             let ec_clone = Arc::clone(&ec);
                                             match crate::util::spawn_blocking_with_timeout(
                                                 crate::util::EC_IO_TIMEOUT,
@@ -1101,8 +1109,7 @@ pub fn spawn(state: AppState) {
                                         }
                                         let mut write_backoff = false;
                                         {
-                                            let _ec_guard =
-                                                crate::util::ec_write_mutex().lock().await;
+                                            let _ec_guard = crate::util::acquire_ec_write().await;
                                             let ec_clone = Arc::clone(&ec);
                                             let fan_idx = idx as u32;
                                             match crate::util::spawn_blocking_with_timeout(
@@ -1187,7 +1194,7 @@ pub fn spawn(state: AppState) {
                                 if shutdown_requested(&bg_state2) {
                                     return;
                                 }
-                                let _ec_guard = crate::util::ec_write_mutex().lock().await;
+                                let _ec_guard = crate::util::acquire_ec_write().await;
                                 let ec_clone = Arc::clone(&ec);
                                 match crate::util::spawn_blocking_with_timeout(
                                     crate::util::EC_IO_TIMEOUT,
@@ -1231,7 +1238,7 @@ pub fn spawn(state: AppState) {
                                 if shutdown_requested(&bg_state2) {
                                     return;
                                 }
-                                let _ec_guard = crate::util::ec_write_mutex().lock().await;
+                                let _ec_guard = crate::util::acquire_ec_write().await;
                                 let ec_clone = Arc::clone(&ec);
                                 let _ = crate::util::spawn_blocking_with_timeout(
                                     crate::util::EC_IO_TIMEOUT,
@@ -1240,12 +1247,39 @@ pub fn spawn(state: AppState) {
                                 .await;
                                 continue 'poll_loop;
                             };
-                            if curve_hysteresis.is_none() || curve_rate_limit.is_none() {
+                            // avoid unwrap panic if curve config is corrupted/missing
+                            let Some(hyst) = curve_hysteresis else {
+                                warn!(
+                                    "Curve mode with missing hysteresis, handing back to firmware"
+                                );
+                                if !shutdown_requested(&bg_state2) {
+                                    let _ec_guard = crate::util::acquire_ec_write().await;
+                                    let ec_clone = Arc::clone(&ec);
+                                    let _ = crate::util::spawn_blocking_with_timeout(
+                                        crate::util::EC_IO_TIMEOUT,
+                                        move || ec_clone.autofanctrl(),
+                                    )
+                                    .await;
+                                }
                                 continue 'poll_loop;
-                            }
-                            let hyst = curve_hysteresis.unwrap();
-                            let rate = curve_rate_limit.unwrap();
-                            // Fail-safe: empty temps means EC read failed; hand back to firmware.
+                            };
+                            let Some(rate) = curve_rate_limit else {
+                                warn!(
+                                    "Curve mode with missing rate_limit, handing back to firmware"
+                                );
+                                if !shutdown_requested(&bg_state2) {
+                                    let _ec_guard = crate::util::acquire_ec_write().await;
+                                    let ec_clone = Arc::clone(&ec);
+                                    let _ = crate::util::spawn_blocking_with_timeout(
+                                        crate::util::EC_IO_TIMEOUT,
+                                        move || ec_clone.autofanctrl(),
+                                    )
+                                    .await;
+                                }
+                                continue 'poll_loop;
+                            };
+                            // Fail-safe: empty temps means EC read failed; hand back to firmware immediately.
+                            // Previously waited 30s (CURVE_TEMP_FAILOVER_MS) holding last duty (could be 0%) → overheat.
                             if thermal.temps.is_empty() {
                                 // Count as read failure toward EC reset.
                                 consecutive_ec_failures += 1;
@@ -1254,13 +1288,14 @@ pub fn spawn(state: AppState) {
                                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                     continue 'poll_loop;
                                 }
+                                // Throttle autofanctrl to once per second to avoid spamming EC
                                 if now_ms.saturating_sub(last_curve_failover_ms)
                                     >= CURVE_TEMP_FAILOVER_MS
                                 {
                                     if shutdown_requested(&bg_state2) {
                                         return;
                                     }
-                                    let _ec_guard = crate::util::ec_write_mutex().lock().await;
+                                    let _ec_guard = crate::util::acquire_ec_write().await;
                                     let ec_clone = Arc::clone(&ec);
                                     match crate::util::spawn_blocking_with_timeout(
                                         crate::util::EC_IO_TIMEOUT,
@@ -1348,7 +1383,7 @@ pub fn spawn(state: AppState) {
                                             all_fans_applied = false;
                                             break;
                                         }
-                                        let _ec_guard = crate::util::ec_write_mutex().lock().await;
+                                        let _ec_guard = crate::util::acquire_ec_write().await;
                                         let ec_clone = Arc::clone(&ec);
                                         match crate::util::spawn_blocking_with_timeout(
                                             crate::util::EC_IO_TIMEOUT,
@@ -1415,7 +1450,7 @@ pub fn spawn(state: AppState) {
                                     if shutdown_requested(&bg_state2) {
                                         return;
                                     }
-                                    let _ec_guard = crate::util::ec_write_mutex().lock().await;
+                                    let _ec_guard = crate::util::acquire_ec_write().await;
                                     let ec_clone = Arc::clone(&ec);
                                     match crate::util::spawn_blocking_with_timeout(
                                         crate::util::EC_IO_TIMEOUT,

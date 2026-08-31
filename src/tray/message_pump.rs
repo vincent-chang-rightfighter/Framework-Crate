@@ -54,7 +54,7 @@ pub fn notify_tray_thread() -> bool {
     // Prefer PostMessageW to the tray window (always queued) over
     // PostThreadMessageW (fails if thread hasn't primed GetMessageW yet).
     let hwnd = load_global_hwnd();
-    if hwnd != 0 {
+    if hwnd != 0 && crate::system_info::is_window(hwnd) {
         let ok = unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
                 hwnd as *mut core::ffi::c_void,

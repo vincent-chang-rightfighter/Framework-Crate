@@ -126,9 +126,10 @@ struct TempChartRenderer {
 struct TempChartState {
     cache: OnceCell<iced::widget::canvas::Cache<iced::Renderer>>,
     /// SAFETY: `Arc` pointer is stable; key changes only when new data arrives.
-    cached_key: Cell<(*const (), usize, *const (), *const (), i64)>,
+    cached_key: Cell<(*const (), usize, *const (), *const (), i64, i64)>,
     /// Reused line-point buffer to avoid per-frame allocation.
     points_buf: std::cell::RefCell<Vec<(f32, f32)>>,
+    last_theme: std::cell::RefCell<Option<String>>,
 }
 
 impl Default for TempChartState {
@@ -141,7 +142,9 @@ impl Default for TempChartState {
                 std::ptr::null::<()>(),
                 std::ptr::null::<()>(),
                 0,
+                0,
             )),
+            last_theme: std::cell::RefCell::new(None),
             points_buf: std::cell::RefCell::new(Vec::new()),
         }
     }
@@ -169,15 +172,22 @@ impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
         _cursor: iced::mouse::Cursor,
     ) -> Vec<iced::widget::canvas::Geometry> {
         let size = bounds.size();
+        // include last timestamp to avoid ptr-reuse false hit; additionally hash sensor_names length
+        let last_ts = self.samples.back().map(|s| s.ts_ms).unwrap_or(0);
         let key = (
             Arc::as_ptr(&self.samples) as *const (),
             self.samples.len(),
             Arc::as_ptr(&self.sensor_names) as *const (),
             Arc::as_ptr(&self.colors) as *const (),
             self.window_seconds,
+            last_ts,
         );
-        if state.cached_key.get() != key {
+        // theme change should invalidate cache (previously ignored)
+        let theme_str = format!("{:?}", _theme);
+        let theme_changed = state.last_theme.borrow().as_deref() != Some(&theme_str);
+        if state.cached_key.get() != key || theme_changed {
             state.cached_key.set(key);
+            *state.last_theme.borrow_mut() = Some(theme_str);
             if let Some(cache) = state.cache.get() {
                 cache.clear();
             }

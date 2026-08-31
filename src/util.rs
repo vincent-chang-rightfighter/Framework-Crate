@@ -32,6 +32,34 @@ pub fn ec_write_mutex() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// Acquires EC write lock with contention logging; avoids silent 1.5s stall.
+/// Tries 500ms, logs if contended, then waits.
+pub async fn acquire_ec_write() -> tokio::sync::MutexGuard<'static, ()> {
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        ec_write_mutex().lock(),
+    )
+    .await
+    {
+        Ok(g) => g,
+        Err(_) => {
+            tracing::warn!("EC write contended >500ms, waiting");
+            ec_write_mutex().lock().await
+        }
+    }
+}
+
+/// Tries to acquire EC write lock with timeout; avoids holding 1.5s blocking across all writers.
+/// Returns `None` if contended, caller should retry after short delay.
+#[allow(dead_code)]
+pub async fn try_acquire_ec_write_timeout(
+    timeout: std::time::Duration,
+) -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    tokio::time::timeout(timeout, ec_write_mutex().lock())
+        .await
+        .ok()
+}
+
 /// Serialized CPU power operation mutex to prevent concurrent Apply/Reset/Sync races.
 pub fn cpu_power_mutex() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -42,6 +70,8 @@ pub const EC_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(
 pub const PAWNIO_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2000);
 
 /// Runs blocking task with timeout; maps JoinError and timeout to String.
+/// Note: on timeout the blocking thread continues until completion (tokio pool reuses threads,
+/// bounded by max_blocking_threads=8). Caller should treat timeout as failure and reset EC if repeated.
 pub async fn spawn_blocking_with_timeout<F, T>(
     timeout: std::time::Duration,
     task: F,

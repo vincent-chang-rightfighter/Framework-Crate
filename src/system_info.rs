@@ -572,6 +572,15 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
         // Reject characters that would break schtasks command line or allow injection.
         // schtasks /TR is parsed as a single command line; we wrap the exe in
         // double quotes via raw_arg, so any embedded " would break out.
+        // extend blocklist to cover PowerShell/cmd metachars and enforce MAX_PATH.
+        const MAX_TR_LEN: usize = 260;
+        if exe_str.len() > MAX_TR_LEN {
+            return Err(format!(
+                "exe path too long ({} > {} chars), schtasks /TR would truncate",
+                exe_str.len(),
+                MAX_TR_LEN
+            ));
+        }
         if exe_str.contains('"')
             || exe_str.contains('\'')
             || exe_str.contains('&')
@@ -579,10 +588,25 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
             || exe_str.contains(';')
             || exe_str.contains('%')
             || exe_str.contains('^')
+            || exe_str.contains('`')
+            || exe_str.contains('$')
+            || exe_str.contains('(')
+            || exe_str.contains(')')
+            || exe_str.contains('<')
+            || exe_str.contains('>')
+            || exe_str.contains('*')
+            || exe_str.contains('?')
             || exe_str.contains('\n')
             || exe_str.contains('\r')
         {
             return Err("exe path contains invalid characters".to_string());
+        }
+        // Block non-ASCII control/bidi override that could hide injection
+        if exe_str
+            .chars()
+            .any(|c| c.is_control() || c == '\u{202E}' || c == '\u{202D}')
+        {
+            return Err("exe path contains invalid unicode".to_string());
         }
         // A trailing backslash before the closing quote would escape it
         // (e.g. "C:\path\" --minimized" → the \" becomes an escaped quote).

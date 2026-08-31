@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
 // POLL_MS_MIN reuses public UI constant to avoid duplication.
-const POLL_MS_MIN: u64 = crate::style::POLL_RATE_MIN_MS as u64;
+pub const POLL_MS_MIN: u64 = crate::style::POLL_RATE_MIN_MS as u64;
 pub const POLL_MS_MAX: u64 = 2000;
 pub const UI_REFRESH_MS_MIN: u64 = 50;
 pub const UI_REFRESH_MS_MAX: u64 = 1000;
