@@ -63,13 +63,14 @@ fn fallback_log(msg: &str) {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        // rotate if >1MB
+        // rotate if >1MB, keep up to 3 backups
         if let Ok(meta) = std::fs::metadata(&path)
             && meta.len() > 1024 * 1024
         {
-            let old = base.join("framework-crate").join("app.log.1");
-            let _ = std::fs::remove_file(&old);
-            let _ = std::fs::rename(&path, &old);
+            let dir_path = base.join("framework-crate");
+            let _ = std::fs::rename(dir_path.join("app.log.2"), dir_path.join("app.log.3"));
+            let _ = std::fs::rename(dir_path.join("app.log.1"), dir_path.join("app.log.2"));
+            let _ = std::fs::rename(&path, dir_path.join("app.log.1"));
         }
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
@@ -83,11 +84,64 @@ fn fallback_log(msg: &str) {
 }
 
 fn chrono_like_timestamp() -> String {
-    // lightweight timestamp without chrono dep
+    // lightweight ISO 8601 timestamp without chrono dep
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    format!("{}", now.as_secs())
+    let secs = now.as_secs();
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let h = time_of_day / 3600;
+    let m = (time_of_day % 3600) / 60;
+    let s = time_of_day % 60;
+    // days since 1970-01-01 to Y-M-D (simplified leap year calc)
+    let mut y = 1970u32;
+    let mut remaining = days;
+    loop {
+        let days_in_year =
+            if y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400)) {
+                366
+            } else {
+                365
+            };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
+    let month_days: [u32; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut mo = 1u32;
+    for &d in &month_days {
+        if remaining < d as u64 {
+            break;
+        }
+        remaining -= d as u64;
+        mo += 1;
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        y,
+        mo,
+        remaining + 1,
+        h,
+        m,
+        s
+    )
 }
 
 /// Single-instance guard; prevents parallel EC I/O and tray/config races from second process.

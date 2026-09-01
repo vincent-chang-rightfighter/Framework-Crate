@@ -1521,11 +1521,13 @@ pub fn spawn(state: AppState) {
                     );
                     break;
                 }
+                // Exponential backoff: 3s, 6s, 12s, 24s, ... capped at 60s
+                let backoff_secs = (3u64 * (1u64 << (consecutive_failures - 1).min(4))).min(60);
                 warn!(
-                    "Background polling task crashed: {}, restarting in 3s... ({}/{})",
-                    e, consecutive_failures, MAX_CONSECUTIVE_FAILURES
+                    "Background polling task crashed: {}, restarting in {}s... ({}/{})",
+                    e, backoff_secs, consecutive_failures, MAX_CONSECUTIVE_FAILURES
                 );
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                 if state.lifecycle.shutdown.load(Ordering::Acquire) {
                     break;
                 }

@@ -346,30 +346,35 @@ fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path, sync: bool) -> 
         if success != 0 {
             return Ok(());
         }
-        // Fallback: copy dest to .bak so dest survives until replace succeeds; .bak kept for manual recovery.
+        // Fallback: try rename first (atomically replaces on Windows when dest exists).
+        // If rename fails (e.g. cross-device), backup dest then delete-then-rename.
         let bak = dest.with_extension("toml.bak");
-        if dest.exists() {
-            // Copy preserves dest until atomic replace succeeds.
-            if let Err(e) = std::fs::copy(dest, &bak) {
-                tracing::warn!("Failed to back up config to {:?}: {}", bak, e);
-            }
-            // Remove dest only after successful backup; Windows rename needs absent dest.
-            let _ = std::fs::remove_file(dest);
-        }
         match std::fs::rename(tmp, dest) {
             Ok(()) => Ok(()),
-            Err(e) => {
-                if bak.exists()
-                    && let Err(restore_err) = std::fs::copy(&bak, dest)
-                {
-                    tracing::warn!(
-                        "Failed to restore config backup {:?} → {:?}: {}",
-                        bak,
-                        dest,
-                        restore_err
-                    );
+            Err(_) => {
+                // rename failed; backup dest, delete, then retry rename.
+                if dest.exists() {
+                    if let Err(e) = std::fs::copy(dest, &bak) {
+                        tracing::warn!("Failed to back up config to {:?}: {}", bak, e);
+                    }
+                    let _ = std::fs::remove_file(dest);
                 }
-                Err(format!("rename failed: {}", e))
+                match std::fs::rename(tmp, dest) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        if bak.exists()
+                            && let Err(restore_err) = std::fs::copy(&bak, dest)
+                        {
+                            tracing::warn!(
+                                "Failed to restore config backup {:?} → {:?}: {}",
+                                bak,
+                                dest,
+                                restore_err
+                            );
+                        }
+                        Err(format!("rename failed: {}", e))
+                    }
+                }
             }
         }
     }

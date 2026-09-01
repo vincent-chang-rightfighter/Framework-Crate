@@ -29,10 +29,10 @@ impl App {
                     self.mark_dirty();
                     Some(Task::none())
                 } else {
-                    // Refresh PawnIO version and re-read MSR/MMIO off UI thread.
+                    // Reset DLL pointers so next read picks up upgraded DLL.
                     self.cpu_power_error = None;
                     self.pl_fields_dirty = false;
-                    crate::cpu_power::invalidate_pawnio_version();
+                    crate::cpu_power::reset_dll_fns();
                     Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {
                         crate::cpu_power::pawnio_version();
                     }))

@@ -9,6 +9,9 @@ use crate::background_task::pin_to_slowest_core;
 use crate::types::{Config, SettingU8};
 use crate::util::read_lock;
 
+/// Config file I/O timeout (longer than EC_IO_TIMEOUT to avoid losing saves on slow disks).
+const CONFIG_SAVE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Debounce window to coalesce rapid slider changes.
 const DEBOUNCE_MS: u64 = 100;
 
@@ -49,12 +52,11 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
             return false;
         }
         // min_pct=0: EC ignores software minimum; hardware enforces ~25%.
-        if let Err(e) =
-            crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
-                ec_clone.charge_limit_set(0, pct)
-            })
-            .await
-            .unwrap_or_else(Err)
+        if let Err(e) = crate::util::spawn_blocking_with_timeout(CONFIG_SAVE_TIMEOUT, move || {
+            ec_clone.charge_limit_set(0, pct)
+        })
+        .await
+        .unwrap_or_else(Err)
         {
             warn!("Failed to set charge limit: {}", e);
             return false;
@@ -114,16 +116,12 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
                         // Channel closed; save latest and exit (versioned).
                         let (cfg_arc, ver) = latest;
                         let save_failed = Arc::clone(&state.lifecycle.bg_config_save_failed);
-                        crate::util::spawn_blocking_with_timeout(
-                            crate::util::EC_IO_TIMEOUT,
-                            move || {
-                                if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, false)
-                                {
-                                    warn!("Failed to save config on channel close: {}", e);
-                                    save_failed.store(true, Ordering::Relaxed);
-                                }
-                            },
-                        )
+                        crate::util::spawn_blocking_with_timeout(CONFIG_SAVE_TIMEOUT, move || {
+                            if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, false) {
+                                warn!("Failed to save config on channel close: {}", e);
+                                save_failed.store(true, Ordering::Relaxed);
+                            }
+                        })
                         .await
                         .unwrap_or_else(|e| warn!("config save task panicked: {}", e));
                         return;
@@ -139,7 +137,7 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
             let (cfg_arc, ver) = latest;
             let cfg_for_battery = Arc::clone(&cfg_arc);
             let save_failed = Arc::clone(&state.lifecycle.bg_config_save_failed);
-            crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
+            crate::util::spawn_blocking_with_timeout(CONFIG_SAVE_TIMEOUT, move || {
                 if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, false) {
                     warn!("Failed to save config: {}", e);
                     save_failed.store(true, Ordering::Relaxed);

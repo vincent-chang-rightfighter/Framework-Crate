@@ -23,40 +23,37 @@ type PawnioClose = unsafe extern "system" fn(HANDLE) -> i32; // HRESULT
 
 const MODULES_DIR_NAME: &str = "modules";
 const PAWNIO_MODULES_VERSION: &str = "0.2.11";
-#[allow(dead_code)]
 const PAWNIO_MODULES_VERSION_FALLBACK: &str = PAWNIO_MODULES_VERSION;
 const INTEL_MSR_SHA256: &str = "d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a21cb48413c9b92e5f";
 const INTEL_MCHBAR_SHA256: &str =
     "3f82b832d99b4aac37d2a20fdb7c9baa2a3bc0488612c9019c9484eb0e8a6eae";
 
 /// Tries to fetch latest PawnIO.Modules tag via GitHub API, fallback to pinned version.
-/// Pinning keeps hash reproducible; dynamic fetch allows following github updates without code change.
-#[allow(dead_code)]
+/// Used by pawnio_modules_version() for display; download uses latest_modules_download_url().
 fn latest_modules_version() -> String {
-    // Try GitHub API for latest tag, 2s timeout, fallback to pinned
-    let out = std::process::Command::new("powershell")
+    // Try curl for latest tag, 3s timeout, fallback to pinned
+    let out = std::process::Command::new("curl.exe")
         .args([
-            "-NoProfile",
-            "-Command",
-            "(Invoke-RestMethod -Uri 'https://api.github.com/repos/namazso/PawnIO.Modules/releases/latest' -TimeoutSec 3 -ErrorAction SilentlyContinue).tag_name",
+            "-s",
+            "-L",
+            "--max-time",
+            "3",
+            "https://api.github.com/repos/namazso/PawnIO.Modules/releases/latest",
         ])
         .creation_flags(0x08000000)
         .output();
     if let Ok(o) = out {
-        let tag = String::from_utf8_lossy(&o.stdout)
-            .trim()
-            .trim_matches('"')
-            .to_string();
-        let tag = tag.trim().to_string();
-        if !tag.is_empty()
-            && tag
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == 'v' || c == '-')
-        {
-            let ver = tag.trim_start_matches('v').to_string();
-            if !ver.is_empty() {
-                tracing::info!("PawnIO Modules latest version: {}", ver);
-                return ver;
+        let body = String::from_utf8_lossy(&o.stdout);
+        // Extract "tag_name":"0.2.11" from JSON
+        if let Some(start) = body.find("\"tag_name\":\"") {
+            let rest = &body[start + 12..];
+            if let Some(end) = rest.find('"') {
+                let tag = rest[..end].trim();
+                let ver = tag.trim_start_matches('v');
+                if !ver.is_empty() && ver.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+                    tracing::info!("PawnIO Modules latest version: {}", ver);
+                    return ver.to_string();
+                }
             }
         }
     }
@@ -66,19 +63,33 @@ fn latest_modules_version() -> String {
 /// Tries to fetch latest release asset download URL directly via GitHub API.
 /// Returns Some(url) if API succeeds, else None to use version-constructed URL.
 fn latest_modules_download_url() -> Option<String> {
-    let out = std::process::Command::new("powershell")
+    let out = std::process::Command::new("curl.exe")
         .args([
-            "-NoProfile",
-            "-Command",
-            "try { (Invoke-RestMethod -Uri 'https://api.github.com/repos/namazso/PawnIO.Modules/releases/latest' -TimeoutSec 3 -ErrorAction Stop).assets | Where-Object { $_.name -like 'release_*.zip' } | Select-Object -First 1 -ExpandProperty browser_download_url } catch {}",
+            "-s",
+            "-L",
+            "--max-time",
+            "3",
+            "https://api.github.com/repos/namazso/PawnIO.Modules/releases/latest",
         ])
         .creation_flags(0x08000000)
         .output();
     if let Ok(o) = out {
-        let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
-        if url.starts_with("https://") && url.contains("PawnIO.Modules") {
-            tracing::info!("PawnIO Modules latest asset URL: {}", url);
-            return Some(url);
+        let body = String::from_utf8_lossy(&o.stdout);
+        // Find browser_download_url for release_*.zip
+        for line in body.split(',') {
+            let line = line.trim();
+            if line.contains("browser_download_url")
+                && line.contains("release_")
+                && line.contains(".zip")
+                && let Some(start) = line.find("\"https://")
+                && let Some(end) = line[start..].find('"').map(|i| start + i)
+            {
+                let url = line[start..end].to_string();
+                if url.contains("PawnIO.Modules") {
+                    tracing::info!("PawnIO Modules latest asset URL: {}", url);
+                    return Some(url);
+                }
+            }
         }
     }
     None
@@ -104,11 +115,13 @@ fn verify_module_hash(path: &std::path::Path, expected: &str) -> Result<(), &'st
     let actual = sha256_hex(&bytes);
     if actual != expected {
         warn!(
-            "PawnIO module hash mismatch: {} expected {} got {} — allowing anyway (advisory)",
+            "PawnIO module hash mismatch: {} expected {} got {}",
             path.display(),
             expected,
             actual
         );
+        #[cfg(not(debug_assertions))]
+        return Err("module hash mismatch");
     }
     Ok(())
 }
@@ -119,11 +132,13 @@ fn read_verified_module(path: &std::path::Path, expected: &str) -> Result<Vec<u8
     let actual = sha256_hex(&bytes);
     if actual != expected {
         warn!(
-            "PawnIO module hash mismatch: {} expected {} got {} — allowing anyway (advisory)",
+            "PawnIO module hash mismatch: {} expected {} got {}",
             path.display(),
             expected,
             actual
         );
+        #[cfg(not(debug_assertions))]
+        return Err("module hash mismatch");
     }
     Ok(bytes)
 }
@@ -869,11 +884,11 @@ impl Drop for PawnioHandle {
     }
 }
 
-/// Global DLL pointers (loaded once).
-static DLL_OPEN: std::sync::OnceLock<PawnioOpen> = std::sync::OnceLock::new();
-static DLL_LOAD: std::sync::OnceLock<PawnioLoad> = std::sync::OnceLock::new();
-static DLL_EXEC: std::sync::OnceLock<PawnioExecute> = std::sync::OnceLock::new();
-static DLL_CLOSE: std::sync::OnceLock<PawnioClose> = std::sync::OnceLock::new();
+/// Global DLL pointers (reinitializable after PawnIO upgrade).
+static DLL_OPEN: parking_lot::Mutex<Option<PawnioOpen>> = parking_lot::Mutex::new(None);
+static DLL_LOAD: parking_lot::Mutex<Option<PawnioLoad>> = parking_lot::Mutex::new(None);
+static DLL_EXEC: parking_lot::Mutex<Option<PawnioExecute>> = parking_lot::Mutex::new(None);
+static DLL_CLOSE: parking_lot::Mutex<Option<PawnioClose>> = parking_lot::Mutex::new(None);
 
 const DLL_PATH: &str = r"C:\Program Files\PawnIO\PawnIOLib.dll";
 
@@ -1018,29 +1033,36 @@ fn verify_dll_path() -> Result<(), &'static str> {
             return Err("DLL path mismatch");
         }
     }
-    // Authenticode check via PowerShell Get-AuthenticodeSignature
-    // Full WinVerifyTrust requires Win32_Security_WinTrust feature; we do a lightweight check here
-    if let Ok(out) = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "(Get-AuthenticodeSignature '{}').Status -eq 'Valid'",
-                p.display().to_string().replace('\'', "''")
-            ),
-        ])
-        .creation_flags(0x08000000)
-        .output()
-    {
-        let txt = String::from_utf8_lossy(&out.stdout).to_lowercase();
-        if txt.contains("false") {
-            warn!(
-                "PawnIO DLL authenticode not Valid (may be unsigned/test-signed): {}",
-                p.display()
-            );
-            #[cfg(not(debug_assertions))]
-            return Err("DLL authenticode not valid");
+    // Authenticode check via PowerShell Get-AuthenticodeSignature (cached per process)
+    static AUTHENTICODE_RESULT: parking_lot::Once = parking_lot::Once::new();
+    static AUTHENTICODE_OK: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(true);
+    AUTHENTICODE_RESULT.call_once(|| {
+        if let Ok(out) = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "(Get-AuthenticodeSignature '{}').Status -eq 'Valid'",
+                    p.display().to_string().replace('\'', "''")
+                ),
+            ])
+            .creation_flags(0x08000000)
+            .output()
+        {
+            let txt = String::from_utf8_lossy(&out.stdout).to_lowercase();
+            if txt.contains("false") {
+                warn!(
+                    "PawnIO DLL authenticode not Valid (may be unsigned/test-signed): {}",
+                    p.display()
+                );
+                AUTHENTICODE_OK.store(false, std::sync::atomic::Ordering::Release);
+            }
         }
+    });
+    if !AUTHENTICODE_OK.load(std::sync::atomic::Ordering::Acquire) {
+        #[cfg(not(debug_assertions))]
+        return Err("DLL authenticode not valid");
     }
     // Hash pin: ensure DLL is not zero/truncated and log hash for audit
     if let Ok(bytes) = std::fs::read(&p) {
@@ -1054,20 +1076,33 @@ fn verify_dll_path() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Initializes DLL function pointers (once).
+/// Initializes DLL function pointers (reinitializable).
 fn init_dll_fns() -> Result<(), &'static str> {
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW};
 
-    if DLL_OPEN.get().is_some() {
+    if DLL_OPEN.lock().is_some() {
         return Ok(()); // already initialized
     }
 
     verify_dll_path()?;
 
     let resolved = resolved_dll_path();
-    let s = resolved.to_str().ok_or("DLL path not valid UTF-8")?;
-    let dll_path = CString::new(s).map_err(|_| "CString failed")?;
-    let dll = unsafe { LoadLibraryA(dll_path.as_ptr() as *const u8) };
+    let wide: Vec<u16> = resolved
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // Restrict DLL search to the DLL's own directory + System32 to prevent side-loading.
+    const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x00000100;
+    const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x00000800;
+    let dll = unsafe {
+        LoadLibraryExW(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    };
     if dll.is_null() {
         return Err("PawnIO not installed");
     }
@@ -1102,12 +1137,22 @@ fn init_dll_fns() -> Result<(), &'static str> {
         let addr = GetProcAddress(dll, c"pawnio_close".as_ptr() as *const u8)
             .ok_or("pawnio_close not found")?;
         let close: PawnioClose = std::mem::transmute(addr);
-        let _ = DLL_OPEN.set(open);
-        let _ = DLL_LOAD.set(load);
-        let _ = DLL_EXEC.set(exec);
-        let _ = DLL_CLOSE.set(close);
+        *DLL_OPEN.lock() = Some(open);
+        *DLL_LOAD.lock() = Some(load);
+        *DLL_EXEC.lock() = Some(exec);
+        *DLL_CLOSE.lock() = Some(close);
     }
     Ok(())
+}
+
+/// Resets DLL function pointers so next call to init_dll_fns re-loads from disk.
+/// Called after PawnIO upgrade to pick up the new DLL.
+pub fn reset_dll_fns() {
+    *DLL_OPEN.lock() = None;
+    *DLL_LOAD.lock() = None;
+    *DLL_EXEC.lock() = None;
+    *DLL_CLOSE.lock() = None;
+    invalidate_pawnio_version();
 }
 
 /// Opens PawnIO handle and loads module blob.
@@ -1115,24 +1160,24 @@ fn open_handle(blob: &[u8]) -> Result<PawnioHandle, &'static str> {
     init_dll_fns()?;
 
     let mut handle: HANDLE = std::ptr::null_mut();
-    let open = *DLL_OPEN.get().ok_or("PawnIO DLL not initialized")?;
+    let open = DLL_OPEN.lock().ok_or("PawnIO DLL not initialized")?;
     let hr = unsafe { open(&mut handle) };
     if hr < 0 || handle.is_null() {
         warn!("pawnio_open returned hr=0x{:X} handle={:?}", hr, handle);
         return Err("pawnio_open failed");
     }
 
-    let load = *DLL_LOAD.get().ok_or("PawnIO DLL not initialized")?;
+    let load = DLL_LOAD.lock().ok_or("PawnIO DLL not initialized")?;
     let hr = unsafe { load(handle, blob.as_ptr(), blob.len()) };
     if hr < 0 {
         warn!("pawnio_load returned hr=0x{:X}", hr);
-        let close = *DLL_CLOSE.get().ok_or("PawnIO DLL not initialized")?;
+        let close = DLL_CLOSE.lock().ok_or("PawnIO DLL not initialized")?;
         unsafe { close(handle) };
         return Err("pawnio_load failed");
     }
 
-    let exec_fn = *DLL_EXEC.get().ok_or("PawnIO DLL not initialized")?;
-    let close_fn = *DLL_CLOSE.get().ok_or("PawnIO DLL not initialized")?;
+    let exec_fn = DLL_EXEC.lock().ok_or("PawnIO DLL not initialized")?;
+    let close_fn = DLL_CLOSE.lock().ok_or("PawnIO DLL not initialized")?;
     Ok(PawnioHandle {
         handle,
         exec_fn,
@@ -1964,9 +2009,10 @@ pub fn invalidate_pawnio_version() {
     *PAWNIO_VERSION.write() = None;
 }
 
-/// Returns embedded PawnIO Modules blob version.
+/// Returns latest PawnIO Modules version (fetched from GitHub API, cached).
 pub fn pawnio_modules_version() -> &'static str {
-    PAWNIO_MODULES_VERSION
+    static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHED.get_or_init(latest_modules_version)
 }
 
 #[cfg(test)]

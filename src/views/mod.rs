@@ -281,7 +281,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
             container(
                 row![
                     colored_dot(iced::Color::from_rgb(0.9, 0.3, 0.3), 8.0),
-                    text("EC unavailable ??hardware control disabled").size(FONT_BODY),
+                    text("EC unavailable — hardware control disabled").size(FONT_BODY),
                 ]
                 .align_y(iced::Alignment::Center)
                 .spacing(8),

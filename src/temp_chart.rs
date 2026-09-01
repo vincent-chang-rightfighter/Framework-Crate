@@ -29,6 +29,8 @@ pub struct ThermalHistory {
     published: Arc<std::collections::VecDeque<TempSample>>,
     last_publish_ms: i64,
     window_ms: i64,
+    /// Track whether draft changed since last publish to avoid unnecessary clone.
+    draft_dirty: bool,
 }
 
 impl Default for ThermalHistory {
@@ -47,6 +49,7 @@ impl ThermalHistory {
             published: Arc::new(std::collections::VecDeque::new()),
             last_publish_ms: 0,
             window_ms: HISTORY_SECONDS * 1_000,
+            draft_dirty: false,
         }
     }
 
@@ -59,6 +62,7 @@ impl ThermalHistory {
         while let Some(front) = self.draft.front() {
             if front.ts_ms < cutoff {
                 self.draft.pop_front();
+                self.draft_dirty = true;
             } else {
                 break;
             }
@@ -71,6 +75,7 @@ impl ThermalHistory {
     /// Push sample and prune entries outside retention (max window) to allow window switches.
     pub fn push_sample(&mut self, sample: TempSample, now_ms: i64) {
         self.draft.push_back(sample);
+        self.draft_dirty = true;
         let cutoff = now_ms - HISTORY_MAX_MS;
         while let Some(front) = self.draft.front() {
             if front.ts_ms < cutoff {
@@ -85,11 +90,14 @@ impl ThermalHistory {
         self.draft.back().map(|s| s.ts_ms)
     }
 
-    /// Return `Arc` snapshot, re-publishing at most once per interval.
+    /// Return `Arc` snapshot, re-publishing at most once per interval and only when draft changed.
     pub fn snapshot(&mut self, now_ms: i64) -> Arc<std::collections::VecDeque<TempSample>> {
-        if self.last_publish_ms == 0 || now_ms - self.last_publish_ms >= HISTORY_PUBLISH_MS {
+        if self.draft_dirty
+            && (self.last_publish_ms == 0 || now_ms - self.last_publish_ms >= HISTORY_PUBLISH_MS)
+        {
             self.published = Arc::new(self.draft.clone());
             self.last_publish_ms = now_ms;
+            self.draft_dirty = false;
         }
         Arc::clone(&self.published)
     }

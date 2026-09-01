@@ -34,7 +34,7 @@ use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC};
 use windows_sys::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW};
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows_sys::Win32::System::Threading::CreateMutexW;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SetFocus, keybd_event};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, FindWindowExW, FindWindowW, GetSystemMetrics,
     GetWindowLongPtrW, GetWindowPlacement, IsIconic, IsWindow, IsZoomed, PostMessageW,
@@ -216,13 +216,65 @@ pub fn restore_window_from_tray(hwnd: isize) {
 /// Forces window to foreground via Alt key trick to bypass foreground restriction.
 pub fn force_foreground_window(hwnd: isize) {
     let h = hwnd as *mut core::ffi::c_void;
-    const VK_MENU: u8 = 0x12; // Alt key
+    // Simulate Alt key press/release via SendInput (keybd_event is deprecated).
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct KeyboardInput {
+        wVk: u16,
+        wScan: u16,
+        dwFlags: u32,
+        time: u32,
+        dwExtraInfo: usize,
+    }
+    #[repr(C)]
+    struct InputInner {
+        ki: KeyboardInput,
+    }
+    #[repr(C)]
+    struct Input {
+        r#type: u32,
+        u: InputInner,
+    }
+    const INPUT_KEYBOARD: u32 = 1;
     const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
     const KEYEVENTF_KEYUP: u32 = 0x0002;
+    const VK_MENU: u16 = 0x12;
     unsafe {
-        // Simulate Alt key press/release to allow SetForegroundWindow to work.
-        keybd_event(VK_MENU, 0, KEYEVENTF_EXTENDEDKEY, 0);
-        keybd_event(VK_MENU, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);
+        let mut inputs = [
+            Input {
+                r#type: INPUT_KEYBOARD,
+                u: InputInner {
+                    ki: KeyboardInput {
+                        wVk: VK_MENU,
+                        wScan: 0,
+                        dwFlags: KEYEVENTF_EXTENDEDKEY,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+            Input {
+                r#type: INPUT_KEYBOARD,
+                u: InputInner {
+                    ki: KeyboardInput {
+                        wVk: VK_MENU,
+                        wScan: 0,
+                        dwFlags: KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+        ];
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn SendInput(cInputs: u32, pInputs: *mut Input, cbSize: i32) -> u32;
+        }
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_mut_ptr(),
+            std::mem::size_of::<Input>() as i32,
+        );
         SetForegroundWindow(h);
     }
 }
@@ -595,6 +647,9 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
             || exe_str.contains('>')
             || exe_str.contains('*')
             || exe_str.contains('?')
+            || exe_str.contains('{')
+            || exe_str.contains('}')
+            || exe_str.contains('!')
             || exe_str.contains('\n')
             || exe_str.contains('\r')
         {
