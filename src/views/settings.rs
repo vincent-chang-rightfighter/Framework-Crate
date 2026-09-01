@@ -59,6 +59,8 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     sw_content = sw_content.push(info_row("framework_lib", env!("FRAMEWORK_LIB_VERSION")));
     if let Some(ref ver) = crate::cpu_power::pawnio_version() {
         sw_content = sw_content.push(info_row("PawnIO", ver));
+    } else {
+        sw_content = sw_content.push(info_row("PawnIO", "Not installed"));
     }
     sw_content = sw_content.push(info_row(
         "PawnIO Modules",
@@ -143,6 +145,12 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     );
     content = content.push(
         row![
+            button(text("Update PawnIO & Modules").size(FONT_BODY))
+                .on_press(Message::UpdatePawnIOAll)
+                .style(btn_style),
+            button(text("Open Modules Folder").size(FONT_BODY))
+                .on_press(Message::OpenModulesDir)
+                .style(btn_style),
             button(text("Collect Debug Info").size(FONT_BODY))
                 .on_press(Message::CollectDebugInfo)
                 .style(btn_style),
@@ -152,6 +160,27 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         ]
         .spacing(8),
     );
+    content = content.push(
+        text("If update fails, check internet or download manually: PawnIO → https://github.com/namazso/PawnIO/releases | Modules → https://github.com/namazso/PawnIO.Modules/releases/latest")
+            .size(FONT_SMALL)
+            .style(|_theme| iced::widget::text::Style {
+                color: Some(COLOR_GRAY),
+            }),
+    );
+    if let Some(ref err) = app.cpu_power_error {
+        content = content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+            iced::widget::text::Style {
+                color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+            }
+        }));
+    }
+    if let Some(ref err) = app.modules_download_error {
+        content = content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+            iced::widget::text::Style {
+                color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+            }
+        }));
+    }
 
     content = content.push(space::vertical().height(8));
     content = content.push(

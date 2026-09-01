@@ -358,13 +358,13 @@ fn sensor_name_for_index(platform: Option<Platform>, index: usize) -> String {
 }
 
 /// Cached per-platform sensor names to avoid re-matching on every thermal poll.
-type SensorNamesCache = std::sync::Mutex<Option<(Option<Platform>, Vec<String>)>>;
+type SensorNamesCache = parking_lot::Mutex<Option<(Option<Platform>, Vec<String>)>>;
 
 static SENSOR_NAMES: std::sync::OnceLock<SensorNamesCache> = std::sync::OnceLock::new();
 
 fn sensor_name(platform: Option<Platform>, index: usize) -> String {
-    let cache = SENSOR_NAMES.get_or_init(|| std::sync::Mutex::new(None));
-    let mut guard = cache.lock().unwrap_or_else(|p| p.into_inner());
+    let cache = SENSOR_NAMES.get_or_init(|| parking_lot::Mutex::new(None));
+    let mut guard = cache.lock();
     let (cached_platform, names) = guard.get_or_insert_with(|| (platform, Vec::new()));
     if *cached_platform != platform {
         *cached_platform = platform;

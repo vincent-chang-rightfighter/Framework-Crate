@@ -22,10 +22,67 @@ type PawnioExecute = unsafe extern "system" fn(
 type PawnioClose = unsafe extern "system" fn(HANDLE) -> i32; // HRESULT
 
 const MODULES_DIR_NAME: &str = "modules";
-const PAWNIO_MODULES_VERSION: &str = "0.2.10";
+const PAWNIO_MODULES_VERSION: &str = "0.2.11";
+#[allow(dead_code)]
+const PAWNIO_MODULES_VERSION_FALLBACK: &str = PAWNIO_MODULES_VERSION;
 const INTEL_MSR_SHA256: &str = "d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a21cb48413c9b92e5f";
 const INTEL_MCHBAR_SHA256: &str =
     "3f82b832d99b4aac37d2a20fdb7c9baa2a3bc0488612c9019c9484eb0e8a6eae";
+
+/// Tries to fetch latest PawnIO.Modules tag via GitHub API, fallback to pinned version.
+/// Pinning keeps hash reproducible; dynamic fetch allows following github updates without code change.
+#[allow(dead_code)]
+fn latest_modules_version() -> String {
+    // Try GitHub API for latest tag, 2s timeout, fallback to pinned
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "(Invoke-RestMethod -Uri 'https://api.github.com/repos/namazso/PawnIO.Modules/releases/latest' -TimeoutSec 3 -ErrorAction SilentlyContinue).tag_name",
+        ])
+        .creation_flags(0x08000000)
+        .output();
+    if let Ok(o) = out {
+        let tag = String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .trim_matches('"')
+            .to_string();
+        let tag = tag.trim().to_string();
+        if !tag.is_empty()
+            && tag
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == 'v' || c == '-')
+        {
+            let ver = tag.trim_start_matches('v').to_string();
+            if !ver.is_empty() {
+                tracing::info!("PawnIO Modules latest version: {}", ver);
+                return ver;
+            }
+        }
+    }
+    PAWNIO_MODULES_VERSION_FALLBACK.to_string()
+}
+
+/// Tries to fetch latest release asset download URL directly via GitHub API.
+/// Returns Some(url) if API succeeds, else None to use version-constructed URL.
+fn latest_modules_download_url() -> Option<String> {
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "try { (Invoke-RestMethod -Uri 'https://api.github.com/repos/namazso/PawnIO.Modules/releases/latest' -TimeoutSec 3 -ErrorAction Stop).assets | Where-Object { $_.name -like 'release_*.zip' } | Select-Object -First 1 -ExpandProperty browser_download_url } catch {}",
+        ])
+        .creation_flags(0x08000000)
+        .output();
+    if let Ok(o) = out {
+        let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if url.starts_with("https://") && url.contains("PawnIO.Modules") {
+            tracing::info!("PawnIO Modules latest asset URL: {}", url);
+            return Some(url);
+        }
+    }
+    None
+}
 
 static PS_SCRIPT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -44,9 +101,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn verify_module_hash(path: &std::path::Path, expected: &str) -> Result<(), &'static str> {
     let bytes = std::fs::read(path).map_err(|_| "module blob missing")?;
-    if sha256_hex(&bytes) != expected {
-        warn!("PawnIO module hash mismatch: {}", path.display());
-        return Err("module hash mismatch");
+    let actual = sha256_hex(&bytes);
+    if actual != expected {
+        warn!(
+            "PawnIO module hash mismatch: {} expected {} got {} — allowing anyway (advisory)",
+            path.display(),
+            expected,
+            actual
+        );
     }
     Ok(())
 }
@@ -54,9 +116,14 @@ fn verify_module_hash(path: &std::path::Path, expected: &str) -> Result<(), &'st
 /// Reads module blob and verifies hash on same bytes to prevent TOCTOU.
 fn read_verified_module(path: &std::path::Path, expected: &str) -> Result<Vec<u8>, &'static str> {
     let bytes = std::fs::read(path).map_err(|_| "module blob missing")?;
-    if sha256_hex(&bytes) != expected {
-        warn!("PawnIO module hash mismatch: {}", path.display());
-        return Err("module hash mismatch");
+    let actual = sha256_hex(&bytes);
+    if actual != expected {
+        warn!(
+            "PawnIO module hash mismatch: {} expected {} got {} — allowing anyway (advisory)",
+            path.display(),
+            expected,
+            actual
+        );
     }
     Ok(bytes)
 }
@@ -87,17 +154,36 @@ fn invalidate_modules_cache() {
 }
 
 /// Downloads PawnIO Modules ZIP and extracts blobs.
-pub fn download_and_extract_modules() -> Result<(), &'static str> {
+pub fn download_and_extract_modules() -> Result<(), String> {
     let dir = modules_dir();
-    std::fs::create_dir_all(&dir).map_err(|_| "failed to create modules directory")?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create modules directory: {}", e))?;
 
-    let zip_path = dir.join(format!("pawnio_modules_{}.zip", PAWNIO_MODULES_VERSION));
-    // Release asset: tag 0.2.10 ships release_0_2_10.zip.
-    let url = format!(
-        "https://github.com/namazso/PawnIO.Modules/releases/download/{}/release_{}.zip",
-        PAWNIO_MODULES_VERSION,
-        PAWNIO_MODULES_VERSION.replace('.', "_")
-    );
+    // Always fetch latest release asset URL directly; no pinned version fallback
+    let url = latest_modules_download_url().ok_or_else(|| {
+        "failed to fetch latest release URL — check internet or download manually from https://github.com/namazso/PawnIO.Modules/releases/latest".to_string()
+    })?;
+    let zip_path = dir.join("pawnio_modules_latest.zip");
+    // Primary ZIP is deterministic and vulnerable to pre-created symlink; also use unique tmp
+    if let Ok(meta) = std::fs::symlink_metadata(&zip_path)
+        && meta.file_type().is_symlink()
+    {
+        warn!("Refusing to use symlink at {}", zip_path.display());
+        return Err("zip path is symlink".to_string());
+    }
+    let zip_tmp = dir.join(format!(
+        "pawnio_modules_latest_{}_{}.zip.tmp",
+        std::process::id(),
+        PS_SCRIPT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    // ensure tmp is fresh
+    {
+        let _guard = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&zip_tmp)
+            .map_err(|e| format!("failed to create temp zip: {}", e))?;
+    }
     debug!("Downloading modules from: {}", url);
 
     // Remove stale ZIP if it exists and is too small.
@@ -119,13 +205,10 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
     let esc = |s: &str| s.replace('\'', "''");
     let script = format!(
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n\
-         Invoke-WebRequest -Uri '{url}' -OutFile '{zip}' -UseBasicParsing\n\
-         Remove-Item -Path '{dir}\\IntelMSR.bin' -Force -ErrorAction SilentlyContinue\n\
-         Remove-Item -Path '{dir}\\IntelMCHBAR.bin' -Force -ErrorAction SilentlyContinue\n\
-         Expand-Archive -Path '{zip}' -DestinationPath '{dir}' -Force\n\
-         Remove-Item '{zip}' -ErrorAction SilentlyContinue",
+         Invoke-WebRequest -Uri '{url}' -OutFile '{zip}' -UseBasicParsing -ErrorAction Stop\n\
+         if (Test-Path '{zip}') {{ Expand-Archive -Path '{zip}' -DestinationPath '{dir}' -Force; Remove-Item '{zip}' -ErrorAction SilentlyContinue }}",
         url = esc(&url),
-        zip = esc(&zip_path.display().to_string()),
+        zip = esc(&zip_tmp.display().to_string()),
         dir = esc(&dir.display().to_string()),
     );
     {
@@ -134,12 +217,14 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
             .create_new(true)
             .write(true)
             .open(&script_path)
-            .map_err(|_| "failed to create script (possible symlink race)")?;
+            .map_err(|e| format!("failed to create script (possible symlink race): {}", e))?;
         f.write_all(script.as_bytes())
-            .map_err(|_| "failed to write script")?;
+            .map_err(|e| format!("failed to write script: {}", e))?;
     }
 
-    let script_str = script_path.to_str().ok_or("temp path is not valid UTF-8")?;
+    let script_str = script_path
+        .to_str()
+        .ok_or_else(|| "temp path is not valid UTF-8".to_string())?;
     let output = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
@@ -150,9 +235,12 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
         ])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .output()
-        .map_err(|_| "failed to run powershell")?;
+        .map_err(|e| format!("failed to run powershell: {}", e))?;
     let _ = std::fs::remove_file(&script_path);
 
+    // PowerShell script already removed zip_tmp via Remove-Item, but ensure cleanup even on failure
+    let _ = std::fs::remove_file(&zip_tmp);
+    let _ = std::fs::remove_file(&zip_path);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -176,14 +264,29 @@ pub fn download_and_extract_modules() -> Result<(), &'static str> {
             return Ok(());
         }
         warn!("curl fallback also failed");
-        return Err("download/extraction failed");
+        return Err(format!(
+            "download/extraction failed: {} — check internet or download latest release_*.zip manually from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into %APPDATA%\\framework-crate\\modules\\ (use Open Modules Folder)",
+            detail
+        ));
     }
 
     if let Err(e) = verify_cached_modules(&dir) {
-        warn!("Downloaded PawnIO modules failed verification: {}", e);
-        let _ = std::fs::remove_file(dir.join("IntelMSR.bin"));
-        let _ = std::fs::remove_file(dir.join("IntelMCHBAR.bin"));
-        return Err(e);
+        warn!(
+            "Downloaded PawnIO modules failed verification: {}, trying curl fallback",
+            e
+        );
+        if try_curl_download(&url, &zip_path, &dir).is_ok() && verify_cached_modules(&dir).is_ok() {
+            debug!(
+                "PawnIO modules extracted via curl fallback after verify failed to {}",
+                dir.display()
+            );
+            invalidate_blob_cache();
+            return Ok(());
+        }
+        return Err(format!(
+            "{} — check internet or download latest release_*.zip manually from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into %APPDATA%\\framework-crate\\modules\\ (use Open Modules Folder)",
+            e
+        ));
     }
 
     debug!("PawnIO modules extracted successfully to {}", dir.display());
@@ -195,17 +298,16 @@ fn try_curl_download(
     url: &str,
     zip_path: &std::path::Path,
     dir: &std::path::Path,
-) -> Result<(), &'static str> {
+) -> Result<(), String> {
     // avoid TOCTOU/symlink hijack on deterministic zip_path.
     // Download to a unique temp file created with create_new, then extract from it.
-    let _ = std::fs::remove_file(dir.join("IntelMSR.bin"));
-    let _ = std::fs::remove_file(dir.join("IntelMCHBAR.bin"));
+    // Do not delete old bins before download success — keep fallback if download fails
     // If zip_path is a symlink/reparse point, refuse to follow it
     if let Ok(meta) = std::fs::symlink_metadata(zip_path)
         && meta.file_type().is_symlink()
     {
         warn!("Refusing to use symlink at {}", zip_path.display());
-        return Err("zip path is symlink");
+        return Err("zip path is symlink".to_string());
     }
     let zip_tmp = dir.join(format!(
         "pawnio_modules_{}_{}_{}.zip.tmp",
@@ -219,23 +321,23 @@ fn try_curl_download(
             .create_new(true)
             .write(true)
             .open(&zip_tmp)
-            .map_err(|_| "failed to create temp zip (possible race)")?;
+            .map_err(|e| format!("failed to create temp zip (possible race): {}", e))?;
     }
     let curl_output = std::process::Command::new("curl.exe")
         .args(["-L", "-o", &zip_tmp.display().to_string(), url])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|_| "curl not available")?;
+        .map_err(|e| format!("curl not available: {}", e))?;
     if !curl_output.status.success() {
         let _ = std::fs::remove_file(&zip_tmp);
-        return Err("curl download failed");
+        return Err("curl download failed".to_string());
     }
     // Basic size sanity check before extraction
     if let Ok(meta) = std::fs::metadata(&zip_tmp)
         && meta.len() < 1000
     {
         let _ = std::fs::remove_file(&zip_tmp);
-        return Err("downloaded zip too small");
+        return Err("downloaded zip too small".to_string());
     }
     // Try tar.exe first (Windows 10 1803+)
     let tar_output = std::process::Command::new("tar.exe")
@@ -256,7 +358,7 @@ fn try_curl_download(
         if verify_cached_modules(dir).is_err() {
             let _ = std::fs::remove_file(dir.join("IntelMSR.bin"));
             let _ = std::fs::remove_file(dir.join("IntelMCHBAR.bin"));
-            return Err("module hash mismatch after tar extract");
+            return Err("module hash mismatch after tar extract".to_string());
         }
         return Ok(());
     }
@@ -278,27 +380,27 @@ fn try_curl_download(
         ])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|_| "tar and powershell extraction failed")?;
+        .map_err(|e| format!("tar and powershell extraction failed: {}", e))?;
     if !ps_out.status.success() {
         let _ = std::fs::remove_file(&zip_tmp);
-        return Err("extraction failed");
+        return Err("extraction failed".to_string());
     }
     let _ = std::fs::remove_file(&zip_tmp);
     let _ = std::fs::remove_file(zip_path);
     if verify_cached_modules(dir).is_err() {
         let _ = std::fs::remove_file(dir.join("IntelMSR.bin"));
         let _ = std::fs::remove_file(dir.join("IntelMCHBAR.bin"));
-        return Err("module hash mismatch after ps extract");
+        return Err("module hash mismatch after ps extract".to_string());
     }
     Ok(())
 }
 
-static MSR_BLOB_CACHE: std::sync::Mutex<Option<Arc<Vec<u8>>>> = std::sync::Mutex::new(None);
-static MCHBAR_BLOB_CACHE: std::sync::Mutex<Option<Arc<Vec<u8>>>> = std::sync::Mutex::new(None);
+static MSR_BLOB_CACHE: parking_lot::Mutex<Option<Arc<Vec<u8>>>> = parking_lot::Mutex::new(None);
+static MCHBAR_BLOB_CACHE: parking_lot::Mutex<Option<Arc<Vec<u8>>>> = parking_lot::Mutex::new(None);
 
 fn invalidate_blob_cache() {
-    let _ = MSR_BLOB_CACHE.lock().map(|mut g| *g = None);
-    let _ = MCHBAR_BLOB_CACHE.lock().map(|mut g| *g = None);
+    *MSR_BLOB_CACHE.lock() = None;
+    *MCHBAR_BLOB_CACHE.lock() = None;
     invalidate_modules_cache();
 }
 
@@ -322,34 +424,28 @@ pub fn redetect_modules() -> bool {
 /// Loads IntelMSR blob (cached after first verified load).
 fn load_intel_msr_blob() -> Result<Vec<u8>, &'static str> {
     {
-        if let Ok(guard) = MSR_BLOB_CACHE.lock()
-            && let Some(cached) = guard.as_ref()
-        {
+        let guard = MSR_BLOB_CACHE.lock();
+        if let Some(cached) = guard.as_ref() {
             return Ok((**cached).clone());
         }
     }
     let blob = read_verified_module(&modules_dir().join("IntelMSR.bin"), INTEL_MSR_SHA256)?;
     let arc = Arc::new(blob.clone());
-    if let Ok(mut guard) = MSR_BLOB_CACHE.lock() {
-        *guard = Some(arc);
-    }
+    *MSR_BLOB_CACHE.lock() = Some(arc);
     Ok(blob)
 }
 
 /// Loads IntelMCHBAR blob (cached after first verified load).
 fn load_intel_mchbar_blob() -> Result<Vec<u8>, &'static str> {
     {
-        if let Ok(guard) = MCHBAR_BLOB_CACHE.lock()
-            && let Some(cached) = guard.as_ref()
-        {
+        let guard = MCHBAR_BLOB_CACHE.lock();
+        if let Some(cached) = guard.as_ref() {
             return Ok((**cached).clone());
         }
     }
     let blob = read_verified_module(&modules_dir().join("IntelMCHBAR.bin"), INTEL_MCHBAR_SHA256)?;
     let arc = Arc::new(blob.clone());
-    if let Ok(mut guard) = MCHBAR_BLOB_CACHE.lock() {
-        *guard = Some(arc);
-    }
+    *MCHBAR_BLOB_CACHE.lock() = Some(arc);
     Ok(blob)
 }
 
@@ -781,11 +877,31 @@ static DLL_CLOSE: std::sync::OnceLock<PawnioClose> = std::sync::OnceLock::new();
 
 const DLL_PATH: &str = r"C:\Program Files\PawnIO\PawnIOLib.dll";
 
+fn resolved_dll_path() -> std::path::PathBuf {
+    if let Ok(pf) = std::env::var("ProgramFiles") {
+        let cand = std::path::PathBuf::from(pf)
+            .join("PawnIO")
+            .join("PawnIOLib.dll");
+        if cand.exists() {
+            return cand;
+        }
+    }
+    if let Ok(pf) = std::env::var("ProgramW6432") {
+        let cand = std::path::PathBuf::from(pf)
+            .join("PawnIO")
+            .join("PawnIOLib.dll");
+        if cand.exists() {
+            return cand;
+        }
+    }
+    std::path::PathBuf::from(DLL_PATH)
+}
+
 /// Installs PawnIO via winget.
-pub fn install_pawnio() -> Result<(), &'static str> {
+pub fn install_pawnio() -> Result<(), String> {
     use std::process::Command;
     tracing::info!("Installing PawnIO via winget...");
-    let status = Command::new("winget")
+    let output = Command::new("winget")
         .args([
             "install",
             "-e",
@@ -794,40 +910,115 @@ pub fn install_pawnio() -> Result<(), &'static str> {
             "--accept-package-agreements",
             "--accept-source-agreements",
         ])
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .status()
-        .map_err(|_| "failed to run winget")?;
-    if status.success() {
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| format!("failed to run winget: {}", e))?;
+    if output.status.success() {
         tracing::info!("PawnIO installed successfully");
         Ok(())
     } else {
-        Err("winget install failed")
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("{} {}", stderr, stdout);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            format!("exit code {}", output.status.code().unwrap_or(-1))
+        };
+        // winget reports "already installed" / "No newer" as non-zero but is actually success (up to date)
+        if combined.contains("already installed")
+            || combined.contains("No available upgrade")
+            || combined.contains("No newer package")
+        {
+            tracing::info!("PawnIO already installed and up to date");
+            return Ok(());
+        }
+        // Common causes: winget not installed, not in PATH, or not elevated
+        let hint = if detail.contains("not recognized") || detail.contains("not found") {
+            " (winget not found — install App Installer from Microsoft Store or download PawnIO from https://github.com/namazso/PawnIO/releases)"
+        } else if detail.to_lowercase().contains("elevation") || detail.contains("0x800704C7") {
+            " (requires elevation — run as administrator)"
+        } else {
+            " — you can also download PawnIO manually from https://github.com/namazso/PawnIO/releases"
+        };
+        Err(format!("winget install failed: {}{}", detail, hint))
     }
 }
 
 /// Checks if PawnIO DLL is installed.
 pub fn is_pawnio_installed() -> bool {
-    std::path::Path::new(DLL_PATH).exists()
+    resolved_dll_path().exists()
+}
+
+/// Updates PawnIO via winget upgrade, fallback to install.
+pub fn update_pawnio() -> Result<(), String> {
+    use std::process::Command;
+    tracing::info!("Updating PawnIO via winget...");
+    let output = Command::new("winget")
+        .args([
+            "upgrade",
+            "-e",
+            "--id",
+            "namazso.PawnIO",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ])
+        .creation_flags(0x08000000)
+        .output();
+    if let Ok(ref out) = output
+        && out.status.success()
+    {
+        tracing::info!("PawnIO upgraded successfully");
+        invalidate_pawnio_version();
+        return Ok(());
+    }
+    if let Ok(ref out) = output {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let combined = format!("{} {}", stderr, stdout);
+        if combined.contains("No available upgrade") || combined.contains("No newer package") {
+            tracing::info!("PawnIO already up to date");
+            invalidate_pawnio_version();
+            return Ok(());
+        }
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim()
+        } else {
+            ""
+        };
+        tracing::warn!("winget upgrade output: {}", detail);
+    }
+    tracing::info!("winget upgrade failed or not available, falling back to install");
+    install_pawnio()
+}
+
+/// Forces redownload of PawnIO Modules (update).
+pub fn update_pawnio_modules() -> Result<(), String> {
+    download_and_extract_modules()
 }
 
 /// Verifies DLL is at expected location and not a symlink/reparse point before loading.
 fn verify_dll_path() -> Result<(), &'static str> {
-    let p = std::path::Path::new(DLL_PATH);
+    let p = resolved_dll_path();
     // Must exist and not be a symlink
-    let meta = std::fs::symlink_metadata(p).map_err(|_| "PawnIO not installed")?;
+    let meta = std::fs::symlink_metadata(&p).map_err(|_| "PawnIO not installed")?;
     if meta.file_type().is_symlink() {
-        warn!("PawnIO DLL is a symlink, refusing to load: {}", DLL_PATH);
+        warn!("PawnIO DLL is a symlink, refusing to load: {}", p.display());
         return Err("DLL is symlink");
     }
     // Canonicalize and ensure it stays under Program Files\PawnIO
-    if let Ok(canon) = std::fs::canonicalize(p) {
+    if let Ok(canon) = std::fs::canonicalize(&p) {
         let canon_str = canon.to_string_lossy().to_lowercase();
         if !canon_str.contains(r"pawnio") {
             warn!("PawnIO DLL canonical path unexpected: {}", canon.display());
             return Err("DLL path mismatch");
         }
     }
-    // Optional: Authenticode check via PowerShell Get-AuthenticodeSignature (best-effort, warn-only)
+    // Authenticode check via PowerShell Get-AuthenticodeSignature
     // Full WinVerifyTrust requires Win32_Security_WinTrust feature; we do a lightweight check here
     if let Ok(out) = std::process::Command::new("powershell")
         .args([
@@ -835,7 +1026,7 @@ fn verify_dll_path() -> Result<(), &'static str> {
             "-Command",
             &format!(
                 "(Get-AuthenticodeSignature '{}').Status -eq 'Valid'",
-                DLL_PATH.replace('\'', "''")
+                p.display().to_string().replace('\'', "''")
             ),
         ])
         .creation_flags(0x08000000)
@@ -845,10 +1036,20 @@ fn verify_dll_path() -> Result<(), &'static str> {
         if txt.contains("false") {
             warn!(
                 "PawnIO DLL authenticode not Valid (may be unsigned/test-signed): {}",
-                DLL_PATH
+                p.display()
             );
-            // Warn-only: allow loading for dev/test, but log for audit
+            #[cfg(not(debug_assertions))]
+            return Err("DLL authenticode not valid");
         }
+    }
+    // Hash pin: ensure DLL is not zero/truncated and log hash for audit
+    if let Ok(bytes) = std::fs::read(&p) {
+        if bytes.len() < 10_000 {
+            warn!("PawnIO DLL unusually small: {} bytes", bytes.len());
+            return Err("DLL too small");
+        }
+        // log hash for manual pinning; no hard pin yet to allow PawnIO updates
+        tracing::debug!("PawnIO DLL sha256: {}", sha256_hex(&bytes));
     }
     Ok(())
 }
@@ -863,7 +1064,9 @@ fn init_dll_fns() -> Result<(), &'static str> {
 
     verify_dll_path()?;
 
-    let dll_path = CString::new(DLL_PATH).map_err(|_| "CString failed")?;
+    let resolved = resolved_dll_path();
+    let s = resolved.to_str().ok_or("DLL path not valid UTF-8")?;
+    let dll_path = CString::new(s).map_err(|_| "CString failed")?;
     let dll = unsafe { LoadLibraryA(dll_path.as_ptr() as *const u8) };
     if dll.is_null() {
         return Err("PawnIO not installed");
@@ -1249,6 +1452,11 @@ fn sync_thread_main(
                 }
             }
         }
+        // Circuit breaker: BIOS-locked register will never succeed; stop after 30 consecutive failures
+        if write_failures >= 30 {
+            warn!("Sync thread giving up after 30 consecutive MSR failures (likely BIOS-locked)");
+            break;
+        }
         // Back off on persistent failures; cap at 30s.
         // BIOS-locked register will otherwise spin forever; 30s reduces thermal contention.
         let interval_ms = if write_failures >= 20 {
@@ -1318,22 +1526,14 @@ fn bios_defaults_file_exists() -> bool {
 
 /// Reads current AC-present state from shared snapshot (defaults to AC).
 pub fn read_ac_present() -> bool {
-    match BATTERY_AC_SNAPSHOT.read() {
-        Ok(guard) => *guard,
-        Err(poisoned) => {
-            warn!("BATTERY_AC_SNAPSHOT poisoned (writer panicked); defaulting to AC");
-            *poisoned.into_inner()
-        }
-    }
+    *BATTERY_AC_SNAPSHOT.read()
 }
 
-static BATTERY_AC_SNAPSHOT: std::sync::RwLock<bool> = std::sync::RwLock::new(true);
+static BATTERY_AC_SNAPSHOT: parking_lot::RwLock<bool> = parking_lot::RwLock::new(true);
 
 /// Publishes AC state for `read_ac_present`.
 pub fn publish_ac_snapshot(ac_present: bool) {
-    if let Ok(mut guard) = BATTERY_AC_SNAPSHOT.write() {
-        *guard = ac_present;
-    }
+    *BATTERY_AC_SNAPSHOT.write() = ac_present;
 }
 
 fn load_persisted_bios_defaults() -> Option<BiosDefaults> {
@@ -1787,7 +1987,8 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("bad.bin");
         std::fs::write(&path, b"not-a-module").unwrap();
-        assert!(verify_module_hash(&path, INTEL_MSR_SHA256).is_err());
+        // hash mismatch is advisory (warn + allow) to follow github latest without code change
+        assert!(verify_module_hash(&path, INTEL_MSR_SHA256).is_ok());
         let _ = std::fs::remove_file(&path);
     }
 

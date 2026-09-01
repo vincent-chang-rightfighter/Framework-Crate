@@ -63,9 +63,11 @@ fn reset_ec_after_failures(state: &AppState, failures: u32) {
 }
 
 pub fn pin_to_slowest_core() {
-    // core_affinity order is OS enumeration, not perf order; picking `last()` as LP-E is unreliable.
-    // Heuristic: use first core (often efficiency on hybrid) but warn that pinning is best-effort.
-    // If system has >1 core, pin to core 0 to avoid pinning both tokio workers to same core.
+    // Pinning is disabled by default; OS scheduler is better than heuristic. Opt-in via FRAMEWORK_PIN_CORE=1
+    if std::env::var_os("FRAMEWORK_PIN_CORE").is_none() {
+        return;
+    }
+    // core_affinity order is OS enumeration, not perf order
     if let Some(cores) = core_affinity::get_core_ids()
         && !cores.is_empty()
     {
@@ -90,27 +92,19 @@ fn verify_affinity(expected_id: usize) {
     #[cfg(target_os = "windows")]
     {
         unsafe extern "system" {
-            fn GetCurrentThread() -> *mut core::ffi::c_void;
-            fn SetThreadAffinityMask(hThread: *mut core::ffi::c_void, dwMask: usize) -> usize;
+            fn GetCurrentProcessorNumber() -> u32;
         }
-        if expected_id >= usize::BITS as usize {
-            tracing::debug!(
-                "[AFFINITY] Verify: core {} exceeds bit width ({}), skipping",
-                expected_id,
-                usize::BITS
-            );
-            return;
-        }
-        let mask = 1usize << expected_id;
-        let prev = unsafe { SetThreadAffinityMask(GetCurrentThread(), mask) };
-        let prev_core = prev.trailing_zeros() as usize;
-        let ok = prev_core == expected_id;
+        let cur = unsafe { GetCurrentProcessorNumber() } as usize;
+        let ok = cur == expected_id;
         tracing::debug!(
-            "[AFFINITY] Verify: prev_mask=0x{:X}, prev_core={}, expected={} {}",
-            prev,
-            prev_core,
+            "[AFFINITY] Verify: cur={}, expected={} {}",
+            cur,
             expected_id,
-            if ok { "OK (confirmed)" } else { "UNEXPECTED" }
+            if ok {
+                "OK"
+            } else {
+                "mismatch (OS scheduled elsewhere)"
+            }
         );
     }
     #[cfg(not(target_os = "windows"))]

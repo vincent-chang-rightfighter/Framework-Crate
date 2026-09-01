@@ -53,19 +53,27 @@ fn load_global_hwnd() -> isize {
 pub fn notify_tray_thread() -> bool {
     // Prefer PostMessageW to the tray window (always queued) over
     // PostThreadMessageW (fails if thread hasn't primed GetMessageW yet).
-    let hwnd = load_global_hwnd();
-    if hwnd != 0 && crate::system_info::is_window(hwnd) {
-        let ok = unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
-                hwnd as *mut core::ffi::c_void,
-                WM_COMMAND_READY,
-                0,
-                0,
-            ) != 0
-        };
-        if ok {
-            return true;
+    // Retry once to handle HWND destroy race between IsWindow and PostMessageW.
+    for i in 0..2 {
+        let hwnd = load_global_hwnd();
+        if hwnd != 0 && crate::system_info::is_window(hwnd) {
+            let ok = unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    hwnd as *mut core::ffi::c_void,
+                    WM_COMMAND_READY,
+                    0,
+                    0,
+                ) != 0
+            };
+            if ok {
+                return true;
+            }
+        } else if i == 0 {
+            // brief yield before retry in case window is being recreated
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            continue;
         }
+        break;
     }
     let tid = TRAY_THREAD_ID.load(Ordering::Acquire);
     if tid == 0 {

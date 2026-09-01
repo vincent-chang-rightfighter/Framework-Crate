@@ -56,12 +56,20 @@ impl iced::Executor for SmallTokioExecutor {
 }
 
 fn fallback_log(msg: &str) {
-    // windows_subsystem hides stderr when double-clicked; also write to file
+    // windows_subsystem hides stderr when double-clicked; also write to file with rotation
     eprintln!("{}", msg);
     if let Some(base) = dirs::config_dir().or_else(dirs::data_local_dir) {
         let path = base.join("framework-crate").join("app.log");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
+        }
+        // rotate if >1MB
+        if let Ok(meta) = std::fs::metadata(&path)
+            && meta.len() > 1024 * 1024
+        {
+            let old = base.join("framework-crate").join("app.log.1");
+            let _ = std::fs::remove_file(&old);
+            let _ = std::fs::rename(&path, &old);
         }
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)

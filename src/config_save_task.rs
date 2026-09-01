@@ -45,6 +45,9 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
         let pct = if limit.enabled { limit.value } else { 100 };
         let ec_clone = ec.clone();
         let _guard = crate::util::acquire_ec_write().await;
+        if state.lifecycle.shutdown.load(Ordering::Acquire) {
+            return false;
+        }
         // min_pct=0: EC ignores software minimum; hardware enforces ~25%.
         if let Err(e) =
             crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {

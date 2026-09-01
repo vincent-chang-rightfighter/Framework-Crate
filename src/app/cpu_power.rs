@@ -13,7 +13,7 @@ impl App {
                 Some(Task::perform(
                     async {
                         crate::util::spawn_blocking_with_timeout(
-                            crate::util::PAWNIO_IO_TIMEOUT,
+                            crate::util::PAWNIO_INSTALL_TIMEOUT,
                             || crate::cpu_power::install_pawnio().map_err(|e| e.to_string()),
                         )
                         .await
@@ -45,7 +45,7 @@ impl App {
                 Some(Task::perform(
                     async {
                         crate::util::spawn_blocking_with_timeout(
-                            crate::util::PAWNIO_IO_TIMEOUT,
+                            crate::util::PAWNIO_INSTALL_TIMEOUT,
                             || {
                                 crate::cpu_power::download_and_extract_modules()
                                     .map_err(|e| e.to_string())
@@ -88,6 +88,86 @@ impl App {
                     self.mark_dirty();
                     Some(Task::none())
                 }
+            }
+            Message::UpdatePawnIO => {
+                tracing::info!("UpdatePawnIO triggered");
+                self.modules_download_error = Some("Updating PawnIO...".to_string());
+                self.mark_dirty();
+                Some(Task::perform(
+                    async {
+                        crate::util::spawn_blocking_with_timeout(
+                            crate::util::PAWNIO_INSTALL_TIMEOUT,
+                            || crate::cpu_power::update_pawnio().map_err(|e| e.to_string()),
+                        )
+                        .await
+                        .unwrap_or_else(Err)
+                    },
+                    Message::PawnIOInstalled,
+                ))
+            }
+            Message::UpdatePawnIOModules => {
+                tracing::info!("UpdatePawnIOModules triggered");
+                self.modules_download_error = Some("Updating PawnIO Modules...".to_string());
+                self.mark_dirty();
+                Some(Task::perform(
+                    async {
+                        crate::util::spawn_blocking_with_timeout(
+                            crate::util::PAWNIO_INSTALL_TIMEOUT,
+                            || crate::cpu_power::update_pawnio_modules().map_err(|e| e.to_string()),
+                        )
+                        .await
+                        .unwrap_or_else(Err)
+                    },
+                    Message::PawnIOModulesDownloaded,
+                ))
+            }
+            Message::UpdatePawnIOAll => {
+                tracing::info!("UpdatePawnIOAll triggered");
+                self.modules_download_error =
+                    Some("Updating PawnIO & Modules... Please wait 30s".to_string());
+                self.cpu_power_error = None;
+                self.mark_dirty();
+                Some(Task::perform(
+                    async {
+                        let r1 = crate::util::spawn_blocking_with_timeout(
+                            crate::util::PAWNIO_INSTALL_TIMEOUT,
+                            || crate::cpu_power::update_pawnio().map_err(|e| e.to_string()),
+                        )
+                        .await
+                        .unwrap_or_else(Err);
+                        let r2 = crate::util::spawn_blocking_with_timeout(
+                            crate::util::PAWNIO_INSTALL_TIMEOUT,
+                            || crate::cpu_power::update_pawnio_modules().map_err(|e| e.to_string()),
+                        )
+                        .await
+                        .unwrap_or_else(Err);
+                        match (r1, r2) {
+                            (Ok(()), Ok(())) => Ok(()),
+                            (Err(e1), Err(e2)) => Err(format!("PawnIO: {}; Modules: {}", e1, e2)),
+                            (Err(e), _) => Err(format!("PawnIO: {}", e)),
+                            (_, Err(e)) => Err(format!("Modules: {}", e)),
+                        }
+                    },
+                    Message::UpdatePawnIOAllDone,
+                ))
+            }
+            Message::UpdatePawnIOAllDone(result) => {
+                match result {
+                    Ok(()) => {
+                        self.modules_download_error = None;
+                        self.cpu_power_error = None;
+                        self.pl_fields_dirty = false;
+                        crate::cpu_power::invalidate_pawnio_version();
+                        return Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}));
+                    }
+                    Err(e) => {
+                        error!("Update PawnIO & Modules failed: {}", e);
+                        self.modules_download_error = Some(e.clone());
+                        self.cpu_power_error = Some(e.clone());
+                    }
+                }
+                self.mark_dirty();
+                Some(Task::none())
             }
             Message::CpuPowerPl1Changed(val) => {
                 self.pl1_edit = val.clone();
@@ -306,6 +386,9 @@ impl App {
             Message::CpuPowerSyncStopped => {
                 self.mark_dirty();
                 Some(Task::none())
+            }
+            Message::RefreshCpuPower => {
+                Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}))
             }
             _ => None,
         }

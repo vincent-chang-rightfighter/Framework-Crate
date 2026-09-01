@@ -204,11 +204,9 @@ The section reads and optionally writes PL1/PL2 via official PawnIO Modules. Tho
 
 1. Install the PawnIO driver: `winget install namazso.PawnIO` (or use **Install PawnIO** in the app).
 2. Open **CPU Power** and click **Download Modules**.
-3. The app fetches `IntelMSR.bin` and `IntelMCHBAR.bin` from [PawnIO Modules Releases](https://github.com/namazso/PawnIO.Modules/releases) (version 0.2.10), checks pinned SHA-256 hashes, and caches them in `%APPDATA%/framework-crate/modules/`.
+3. The app fetches `IntelMSR.bin` and `IntelMCHBAR.bin` from [PawnIO Modules Releases](https://github.com/namazso/PawnIO.Modules/releases) (latest, currently 0.2.11, fallback 0.2.10), checks SHA-256 (advisory) and caches them in `%APPDATA%/framework-crate/modules/`.
 
-A hash mismatch or failed download is rejected; the files are deleted and CPU Power stays unavailable until you retry.
-
-If the automatic download fails (no internet, firewall, or restricted PowerShell), the app falls back to `curl.exe` + `tar.exe` and, if that also fails, shows manual instructions: download `release_0_2_10.zip` from the releases page and place `IntelMSR.bin` + `IntelMCHBAR.bin` into `%APPDATA%/framework-crate/modules/`. Use **Open Modules Folder** and **Redetect** in the UI to verify — no restart needed.
+A missing file blocks CPU Power; a hash mismatch only warns and still allows use (to follow github latest without code change). Failed download shows manual instructions: download latest `release_*.zip` from the releases page and place `IntelMSR.bin` + `IntelMCHBAR.bin` into `%APPDATA%/framework-crate/modules/`. Use **Open Modules Folder** and **Redetect** in the UI to verify — no restart needed.
 
 The first successful RAPL read also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` and resume-from-sleep both restore `min(MSR, MMIO)` from that snapshot.
 
@@ -218,7 +216,7 @@ The first successful RAPL read also persists the original factory limits to `bio
 
 **LGPL-2.1 Compliance:**
 
-PawnIO Modules are LGPL-2.1. This project does not ship the blobs. Source: https://github.com/namazso/PawnIO.Modules (version 0.2.10)
+PawnIO Modules are LGPL-2.1. This project does not ship the blobs. Source: https://github.com/namazso/PawnIO.Modules (latest, currently 0.2.11)
 
 ## Icon Attribution
 

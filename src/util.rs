@@ -68,6 +68,8 @@ pub fn cpu_power_mutex() -> &'static tokio::sync::Mutex<()> {
 
 pub const EC_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
 pub const PAWNIO_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2000);
+/// PawnIO install/upgrade and Modules download may take 30s+ (winget + UAC + network)
+pub const PAWNIO_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Runs blocking task with timeout; maps JoinError and timeout to String.
 /// Note: on timeout the blocking thread continues until completion (tokio pool reuses threads,

@@ -41,6 +41,21 @@ pub fn config_path() -> Result<PathBuf, String> {
             e
         )
     })?;
+    // ensure it is a directory, not a file/symlink placed by attacker
+    if let Ok(meta) = std::fs::symlink_metadata(&config_dir) {
+        if !meta.is_dir() {
+            return Err(format!(
+                "config directory is not a directory: {}",
+                config_dir.display()
+            ));
+        }
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "config directory is a symlink, refusing: {}",
+                config_dir.display()
+            ));
+        }
+    }
     Ok(config_dir.join("config.toml"))
 }
 

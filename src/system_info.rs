@@ -537,9 +537,8 @@ impl SingleInstanceGuard {
         // SAFETY: Null-terminated UTF-16 name; non-null handle with ERROR_ALREADY_EXISTS means owned.
         let handle = unsafe { CreateMutexW(std::ptr::null(), 1, wide.as_ptr()) };
         if handle.is_null() {
-            // Allow instance on rare creation failure.
-            tracing::warn!("CreateMutexW failed; single-instance check skipped");
-            return Ok(Self { _handle: handle });
+            tracing::warn!("CreateMutexW failed; failing single-instance check");
+            return Err(());
         }
         // SAFETY: GetLastError immediately after CreateMutexW.
         let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;

@@ -233,10 +233,17 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
         _cursor: iced::mouse::Cursor,
     ) -> Vec<iced::widget::canvas::Geometry> {
         let size = bounds.size();
-        // include content hash to avoid false hit when allocator reuses same address
-        let content_hash = self.all_pts.iter().fold(0u64, |acc, p| {
-            acc.wrapping_add((p[0] as u64).wrapping_mul(31).wrapping_add(p[1] as u64))
-        });
+        // order-dependent hash to avoid collision like [30,0]+[45,20] vs [30,20]+[45,0]
+        let content_hash = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            for p in self.all_pts.iter() {
+                p[0].hash(&mut hasher);
+                p[1].hash(&mut hasher);
+            }
+            hasher.finish()
+        };
         let key = (
             Arc::as_ptr(&self.all_pts) as *const (),
             self.all_pts.len(),

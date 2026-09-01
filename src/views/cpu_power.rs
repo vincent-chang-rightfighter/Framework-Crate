@@ -80,7 +80,7 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     .style(btn_style),
             );
             content = content.push(
-                text("Manual: download release_0_2_10.zip from https://github.com/namazso/PawnIO.Modules/releases/tag/0.2.10 and place IntelMSR.bin / IntelMCHBAR.bin into %APPDATA%\\framework-crate\\modules\\")
+                text("Manual: download latest release_*.zip from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into %APPDATA%\\framework-crate\\modules\\")
                     .size(FONT_SMALL)
                     .style(|_theme| iced::widget::text::Style {
                         color: Some(COLOR_GRAY),
@@ -93,6 +93,36 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                         .style(btn_style),
                     button(text("Redetect Modules").size(FONT_BODY))
                         .on_press(Message::RedetectModules)
+                        .style(btn_style),
+                ]
+                .spacing(8),
+            );
+        } else {
+            // PawnIO and modules present but driver read still fails (needs reboot/elevation)
+            if let Some(ref err) = snap.cpu_power_error {
+                content = content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+                    iced::widget::text::Style {
+                        color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+                    }
+                }));
+            }
+            content = content.push(
+                text("PawnIO driver may require reboot or elevation. Try Retry, or reinstall PawnIO and reboot.")
+                    .size(FONT_SMALL)
+                    .style(|_theme| iced::widget::text::Style {
+                        color: Some(COLOR_GRAY),
+                    }),
+            );
+            content = content.push(
+                row![
+                    button(text("Retry").size(FONT_BODY))
+                        .on_press(Message::RefreshCpuPower)
+                        .style(btn_style),
+                    button(text("Redetect Modules").size(FONT_BODY))
+                        .on_press(Message::RedetectModules)
+                        .style(btn_style),
+                    button(text("Open Modules Folder").size(FONT_BODY))
+                        .on_press(Message::OpenModulesDir)
                         .style(btn_style),
                 ]
                 .spacing(8),
