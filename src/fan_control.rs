@@ -112,9 +112,13 @@ pub fn calculate_duty_from_curve(temp: i32, full_points: &[[u32; 2]]) -> u32 {
     );
     let temp = temp as f64;
     for w in full_points.windows(2) {
-        let [p1, p2] = *w else {
-            unreachable!("windows(2) always yields 2-element slices")
-        };
+        // windows(2) always yields 2-element slices; index directly so a
+        // logic error degrades to a skipped segment instead of aborting
+        // the process (release uses panic=abort, which would freeze fans).
+        if w.len() != 2 {
+            continue;
+        }
+        let (p1, p2) = (w[0], w[1]);
         let (x1, y1) = (p1[0] as f64, p1[1] as f64);
         let (x2, y2) = (p2[0] as f64, p2[1] as f64);
         if temp <= x1 {

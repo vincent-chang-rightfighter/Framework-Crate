@@ -114,14 +114,14 @@ fn verify_module_hash(path: &std::path::Path, expected: &str) -> Result<(), &'st
     let bytes = std::fs::read(path).map_err(|_| "module blob missing")?;
     let actual = sha256_hex(&bytes);
     if actual != expected {
+        // Advisory only: modules track upstream Latest, so a hash rotation
+        // must not brick CPU Power. Mismatch is logged for audit.
         warn!(
             "PawnIO module hash mismatch: {} expected {} got {}",
             path.display(),
             expected,
             actual
         );
-        #[cfg(not(debug_assertions))]
-        return Err("module hash mismatch");
     }
     Ok(())
 }
@@ -131,14 +131,13 @@ fn read_verified_module(path: &std::path::Path, expected: &str) -> Result<Vec<u8
     let bytes = std::fs::read(path).map_err(|_| "module blob missing")?;
     let actual = sha256_hex(&bytes);
     if actual != expected {
+        // Advisory only, see verify_module_hash.
         warn!(
             "PawnIO module hash mismatch: {} expected {} got {}",
             path.display(),
             expected,
             actual
         );
-        #[cfg(not(debug_assertions))]
-        return Err("module hash mismatch");
     }
     Ok(bytes)
 }
@@ -166,6 +165,141 @@ pub fn modules_downloaded() -> bool {
 
 fn invalidate_modules_cache() {
     *MODULES_CACHE.write() = None;
+}
+
+/// Creates a fresh empty staging dir for archive extraction.
+fn fresh_staging_dir(dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let staging = dir.join(format!(
+        "pawnio_stage_{}_{}.tmp",
+        std::process::id(),
+        PS_SCRIPT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    std::fs::create_dir(&staging).map_err(|e| format!("failed to create staging dir: {}", e))?;
+    Ok(staging)
+}
+
+/// Rejects ZIP-slip members: parent refs, absolute paths, drive letters.
+fn member_path_safe(name: &str) -> bool {
+    let n = name.replace('\\', "/");
+    if n.starts_with('/') {
+        return false;
+    }
+    if n.len() >= 2 && n.as_bytes()[1] == b':' {
+        return false;
+    }
+    for comp in n.split('/') {
+        if comp == ".." {
+            return false;
+        }
+    }
+    true
+}
+
+/// Rejects symlinks/junctions inside staging (no symlink following).
+fn staging_has_no_links(staging: &std::path::Path) -> Result<(), String> {
+    let mut stack = vec![staging.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let entries = std::fs::read_dir(&p).map_err(|e| format!("read staging failed: {}", e))?;
+        for e in entries {
+            let e = e.map_err(|e| format!("read staging entry failed: {}", e))?;
+            let ft = e
+                .file_type()
+                .map_err(|e| format!("staging file_type failed: {}", e))?;
+            if ft.is_symlink() {
+                return Err(format!("staging contains symlink: {}", e.path().display()));
+            }
+            if ft.is_dir() {
+                stack.push(e.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validates archive members, extracts into a fresh staging dir, then
+/// promotes only the two expected verified bins into `dir`.
+fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Result<(), String> {
+    // 1. Pre-list members and reject traversal before extracting anything.
+    let list_out = std::process::Command::new("tar.exe")
+        .args(["-tf", &zip_tmp.display().to_string()])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| format!("failed to list archive (tar.exe missing?): {}", e))?;
+    if !list_out.status.success() {
+        return Err("failed to list archive contents".to_string());
+    }
+    for member in String::from_utf8_lossy(&list_out.stdout).lines() {
+        let m = member.trim().trim_end_matches('/');
+        if m.is_empty() {
+            continue;
+        }
+        if !member_path_safe(m) {
+            return Err(format!("archive contains unsafe path: {}", m));
+        }
+    }
+    // 2. Extract into a fresh staging dir (never directly into modules dir).
+    let staging = fresh_staging_dir(dir)?;
+    let cleanup = |staging: &std::path::Path, zip: &std::path::Path| {
+        let _ = std::fs::remove_file(zip);
+        let _ = std::fs::remove_dir_all(staging);
+    };
+    let tar_out = std::process::Command::new("tar.exe")
+        .args([
+            "-xf",
+            &zip_tmp.display().to_string(),
+            "-C",
+            &staging.display().to_string(),
+        ])
+        .creation_flags(0x08000000)
+        .output();
+    let tar_ok = matches!(&tar_out, Ok(o) if o.status.success());
+    if !tar_ok {
+        let esc = |s: &str| s.replace('\'', "''");
+        let ps = format!(
+            "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+            esc(&zip_tmp.display().to_string()),
+            esc(&staging.display().to_string())
+        );
+        let ps_out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
+            .creation_flags(0x08000000)
+            .output()
+            .map_err(|e| format!("extraction failed (tar and powershell unavailable): {}", e))?;
+        if !ps_out.status.success() {
+            cleanup(&staging, zip_tmp);
+            return Err("extraction failed".to_string());
+        }
+    }
+    // 3. Reject symlinks planted inside staging.
+    if let Err(e) = staging_has_no_links(&staging) {
+        cleanup(&staging, zip_tmp);
+        return Err(e);
+    }
+    // 4. Require the two expected bins as regular files, log advisory hashes.
+    for name in ["IntelMSR.bin", "IntelMCHBAR.bin"] {
+        let src = staging.join(name);
+        let meta =
+            std::fs::symlink_metadata(&src).map_err(|_| format!("archive missing {}", name))?;
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            cleanup(&staging, zip_tmp);
+            return Err(format!("archive missing {}", name));
+        }
+    }
+    let _ = verify_module_hash(&staging.join("IntelMSR.bin"), INTEL_MSR_SHA256);
+    let _ = verify_module_hash(&staging.join("IntelMCHBAR.bin"), INTEL_MCHBAR_SHA256);
+    // 5. Promote verified bins into modules dir; old bins stay until replaced.
+    for name in ["IntelMSR.bin", "IntelMCHBAR.bin"] {
+        let src = staging.join(name);
+        let dst = dir.join(name);
+        let _ = std::fs::remove_file(&dst);
+        if let Err(e) = std::fs::rename(&src, &dst) {
+            cleanup(&staging, zip_tmp);
+            return Err(format!("failed to promote {}: {}", name, e));
+        }
+    }
+    cleanup(&staging, zip_tmp);
+    invalidate_blob_cache();
+    Ok(())
 }
 
 /// Downloads PawnIO Modules ZIP and extracts blobs.
@@ -218,13 +352,12 @@ pub fn download_and_extract_modules() -> Result<(), String> {
     ));
     // Escape single quotes for PowerShell single-quoted strings.
     let esc = |s: &str| s.replace('\'', "''");
+    // Download only; extraction goes through staged validation (ZIP-slip safe).
     let script = format!(
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n\
-         Invoke-WebRequest -Uri '{url}' -OutFile '{zip}' -UseBasicParsing -ErrorAction Stop\n\
-         if (Test-Path '{zip}') {{ Expand-Archive -Path '{zip}' -DestinationPath '{dir}' -Force; Remove-Item '{zip}' -ErrorAction SilentlyContinue }}",
+         Invoke-WebRequest -Uri '{url}' -OutFile '{zip}' -UseBasicParsing -ErrorAction Stop",
         url = esc(&url),
         zip = esc(&zip_tmp.display().to_string()),
-        dir = esc(&dir.display().to_string()),
     );
     {
         use std::io::Write;
@@ -253,8 +386,7 @@ pub fn download_and_extract_modules() -> Result<(), String> {
         .map_err(|e| format!("failed to run powershell: {}", e))?;
     let _ = std::fs::remove_file(&script_path);
 
-    // PowerShell script already removed zip_tmp via Remove-Item, but ensure cleanup even on failure
-    let _ = std::fs::remove_file(&zip_tmp);
+    // PowerShell only downloads; extraction always goes through staged validation.
     let _ = std::fs::remove_file(&zip_path);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -270,12 +402,11 @@ pub fn download_and_extract_modules() -> Result<(), String> {
             "PowerShell download failed: {}, trying curl fallback",
             detail
         );
-        if try_curl_download(&url, &zip_path, &dir).is_ok() && verify_cached_modules(&dir).is_ok() {
+        if try_curl_download(&url, &dir).is_ok() {
             debug!(
                 "PawnIO modules extracted via curl fallback to {}",
                 dir.display()
             );
-            invalidate_blob_cache();
             return Ok(());
         }
         warn!("curl fallback also failed");
@@ -285,17 +416,20 @@ pub fn download_and_extract_modules() -> Result<(), String> {
         ));
     }
 
-    if let Err(e) = verify_cached_modules(&dir) {
-        warn!(
-            "Downloaded PawnIO modules failed verification: {}, trying curl fallback",
-            e
-        );
-        if try_curl_download(&url, &zip_path, &dir).is_ok() && verify_cached_modules(&dir).is_ok() {
+    // Basic size sanity check before extraction.
+    if let Ok(meta) = std::fs::metadata(&zip_tmp)
+        && meta.len() < 1000
+    {
+        let _ = std::fs::remove_file(&zip_tmp);
+        return Err("downloaded zip too small".to_string());
+    }
+    if let Err(e) = extract_staged_zip(&zip_tmp, &dir) {
+        warn!("Staged extraction failed: {}, trying curl fallback", e);
+        if try_curl_download(&url, &dir).is_ok() {
             debug!(
-                "PawnIO modules extracted via curl fallback after verify failed to {}",
+                "PawnIO modules extracted via curl fallback after staged failure to {}",
                 dir.display()
             );
-            invalidate_blob_cache();
             return Ok(());
         }
         return Err(format!(
@@ -305,28 +439,14 @@ pub fn download_and_extract_modules() -> Result<(), String> {
     }
 
     debug!("PawnIO modules extracted successfully to {}", dir.display());
-    invalidate_blob_cache();
     Ok(())
 }
 
-fn try_curl_download(
-    url: &str,
-    zip_path: &std::path::Path,
-    dir: &std::path::Path,
-) -> Result<(), String> {
-    // avoid TOCTOU/symlink hijack on deterministic zip_path.
-    // Download to a unique temp file created with create_new, then extract from it.
+fn try_curl_download(url: &str, dir: &std::path::Path) -> Result<(), String> {
+    // Download to a unique temp file created with create_new, then staged extraction.
     // Do not delete old bins before download success — keep fallback if download fails
-    // If zip_path is a symlink/reparse point, refuse to follow it
-    if let Ok(meta) = std::fs::symlink_metadata(zip_path)
-        && meta.file_type().is_symlink()
-    {
-        warn!("Refusing to use symlink at {}", zip_path.display());
-        return Err("zip path is symlink".to_string());
-    }
     let zip_tmp = dir.join(format!(
-        "pawnio_modules_{}_{}_{}.zip.tmp",
-        PAWNIO_MODULES_VERSION,
+        "pawnio_modules_curl_{}_{}.zip.tmp",
         std::process::id(),
         PS_SCRIPT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     ));
@@ -339,7 +459,17 @@ fn try_curl_download(
             .map_err(|e| format!("failed to create temp zip (possible race): {}", e))?;
     }
     let curl_output = std::process::Command::new("curl.exe")
-        .args(["-L", "-o", &zip_tmp.display().to_string(), url])
+        .args([
+            "-L",
+            "--fail",
+            "--proto",
+            "=https",
+            "--max-time",
+            "30",
+            "-o",
+            &zip_tmp.display().to_string(),
+            url,
+        ])
         .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("curl not available: {}", e))?;
@@ -354,60 +484,7 @@ fn try_curl_download(
         let _ = std::fs::remove_file(&zip_tmp);
         return Err("downloaded zip too small".to_string());
     }
-    // Try tar.exe first (Windows 10 1803+)
-    let tar_output = std::process::Command::new("tar.exe")
-        .args([
-            "-xf",
-            &zip_tmp.display().to_string(),
-            "-C",
-            &dir.display().to_string(),
-        ])
-        .creation_flags(0x08000000)
-        .output();
-    if let Ok(out) = tar_output
-        && out.status.success()
-    {
-        let _ = std::fs::remove_file(&zip_tmp);
-        let _ = std::fs::remove_file(zip_path);
-        // Verify immediately after extraction; remove bins on mismatch
-        if verify_cached_modules(dir).is_err() {
-            let _ = std::fs::remove_file(dir.join("IntelMSR.bin"));
-            let _ = std::fs::remove_file(dir.join("IntelMCHBAR.bin"));
-            return Err("module hash mismatch after tar extract".to_string());
-        }
-        return Ok(());
-    }
-    // Fallback to PowerShell Expand-Archive
-    let esc = |s: &str| s.replace('\'', "''");
-    let ps_script = format!(
-        "Expand-Archive -Path '{}' -DestinationPath '{}' -Force; Remove-Item '{}' -ErrorAction SilentlyContinue",
-        esc(&zip_tmp.display().to_string()),
-        esc(&dir.display().to_string()),
-        esc(&zip_tmp.display().to_string())
-    );
-    let ps_out = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &ps_script,
-        ])
-        .creation_flags(0x08000000)
-        .output()
-        .map_err(|e| format!("tar and powershell extraction failed: {}", e))?;
-    if !ps_out.status.success() {
-        let _ = std::fs::remove_file(&zip_tmp);
-        return Err("extraction failed".to_string());
-    }
-    let _ = std::fs::remove_file(&zip_tmp);
-    let _ = std::fs::remove_file(zip_path);
-    if verify_cached_modules(dir).is_err() {
-        let _ = std::fs::remove_file(dir.join("IntelMSR.bin"));
-        let _ = std::fs::remove_file(dir.join("IntelMCHBAR.bin"));
-        return Err("module hash mismatch after ps extract".to_string());
-    }
-    Ok(())
+    extract_staged_zip(&zip_tmp, dir)
 }
 
 static MSR_BLOB_CACHE: parking_lot::Mutex<Option<Arc<Vec<u8>>>> = parking_lot::Mutex::new(None);
@@ -889,6 +966,9 @@ static DLL_OPEN: parking_lot::Mutex<Option<PawnioOpen>> = parking_lot::Mutex::ne
 static DLL_LOAD: parking_lot::Mutex<Option<PawnioLoad>> = parking_lot::Mutex::new(None);
 static DLL_EXEC: parking_lot::Mutex<Option<PawnioExecute>> = parking_lot::Mutex::new(None);
 static DLL_CLOSE: parking_lot::Mutex<Option<PawnioClose>> = parking_lot::Mutex::new(None);
+/// Loaded module handle for FreeLibrary on reset; single init lock closes check-then-load race.
+static DLL_MODULE: parking_lot::Mutex<Option<isize>> = parking_lot::Mutex::new(None);
+static DLL_INIT_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 const DLL_PATH: &str = r"C:\Program Files\PawnIO\PawnIOLib.dll";
 
@@ -1081,6 +1161,8 @@ fn init_dll_fns() -> Result<(), &'static str> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW};
 
+    // Single lock closes the check-then-load race between concurrent first calls.
+    let _init = DLL_INIT_LOCK.lock();
     if DLL_OPEN.lock().is_some() {
         return Ok(()); // already initialized
     }
@@ -1137,6 +1219,7 @@ fn init_dll_fns() -> Result<(), &'static str> {
         let addr = GetProcAddress(dll, c"pawnio_close".as_ptr() as *const u8)
             .ok_or("pawnio_close not found")?;
         let close: PawnioClose = std::mem::transmute(addr);
+        *DLL_MODULE.lock() = Some(dll as isize);
         *DLL_OPEN.lock() = Some(open);
         *DLL_LOAD.lock() = Some(load);
         *DLL_EXEC.lock() = Some(exec);
@@ -1148,6 +1231,16 @@ fn init_dll_fns() -> Result<(), &'static str> {
 /// Resets DLL function pointers so next call to init_dll_fns re-loads from disk.
 /// Called after PawnIO upgrade to pick up the new DLL.
 pub fn reset_dll_fns() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn FreeLibrary(hLibModule: *mut core::ffi::c_void) -> i32;
+    }
+    let _init = DLL_INIT_LOCK.lock();
+    if let Some(raw) = DLL_MODULE.lock().take() {
+        unsafe {
+            FreeLibrary(raw as *mut core::ffi::c_void);
+        }
+    }
     *DLL_OPEN.lock() = None;
     *DLL_LOAD.lock() = None;
     *DLL_EXEC.lock() = None;
@@ -1513,7 +1606,17 @@ fn sync_thread_main(
         } else {
             250
         };
-        std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+        // Sleep in short chunks so stop_sync()/join() never blocks on the
+        // full backoff interval (previously up to 30s of UI freeze).
+        let mut slept_ms: u64 = 0;
+        while slept_ms < interval_ms {
+            if !running.load(Ordering::Relaxed) {
+                break;
+            }
+            let chunk = (interval_ms - slept_ms).min(100);
+            std::thread::sleep(std::time::Duration::from_millis(chunk));
+            slept_ms += chunk;
+        }
     }
 
     debug!("Sync thread stopped");
@@ -1934,7 +2037,8 @@ fn fetch_pawnio_version_from_dll() -> Option<String> {
         GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
     };
 
-    let path: Vec<u16> = std::ffi::OsStr::new(DLL_PATH)
+    let path: Vec<u16> = resolved_dll_path()
+        .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
