@@ -69,6 +69,8 @@ impl ThermalHistory {
         }
         // Force next snapshot to republish so the new window is reflected
         // immediately without waiting for the next push_sample.
+        // Unconditional: a window switch with no prune must still republish.
+        self.draft_dirty = true;
         self.last_publish_ms = 0;
     }
 

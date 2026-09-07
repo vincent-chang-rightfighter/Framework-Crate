@@ -47,7 +47,10 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
     if let Some(ref limit) = cfg.battery.charge_limit_max_pct {
         let pct = if limit.enabled { limit.value } else { 100 };
         let ec_clone = ec.clone();
-        let _guard = crate::util::acquire_ec_write().await;
+        let Some(_guard) = crate::util::acquire_ec_write().await else {
+            warn!("EC write lock contended, deferring charge limit apply");
+            return false;
+        };
         if state.lifecycle.shutdown.load(Ordering::Acquire) {
             return false;
         }

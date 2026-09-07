@@ -1724,9 +1724,29 @@ fn persist_bios_defaults(defaults: &BiosDefaults) -> Result<(), String> {
     }
     let content = toml::to_string_pretty(defaults).map_err(|e| e.to_string())?;
     // Atomic write via temp file to avoid corruption.
-    let tmp = path.with_extension(format!("tmp.{}", crate::util::current_time_ms()));
-    std::fs::write(&tmp, content.as_bytes())
-        .map_err(|e| format!("write tmp bios_defaults failed: {}", e))?;
+    let tmp = path.with_extension(format!(
+        "tmp.{}.{}",
+        crate::util::current_time_ms(),
+        std::process::id()
+    ));
+    if let Ok(meta) = std::fs::symlink_metadata(&tmp)
+        && meta.file_type().is_symlink()
+    {
+        return Err(format!(
+            "refusing to write through symlink: {}",
+            tmp.display()
+        ));
+    }
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)
+            .map_err(|e| format!("write tmp bios_defaults failed: {}", e))?;
+        f.write_all(content.as_bytes())
+            .map_err(|e| format!("write tmp bios_defaults failed: {}", e))?;
+    }
     // Use MoveFileExW for atomic replace; fallback to rename.
     #[cfg(windows)]
     {

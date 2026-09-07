@@ -130,19 +130,30 @@ fn push_pd_ports_history(
 
 /// Marks ports ever seen as Sink as USB-C (persists beyond history window).
 fn mark_pd_usb_c_seen(ports: &[cli::ec_wrapper::UsbCPort], seen_ref: &Arc<RwLock<Arc<Vec<bool>>>>) {
-    if !ports.iter().any(|p| p.power_role == Some("Sink")) {
+    /// Corrupt EC data must not drive a huge allocation.
+    const MAX_PD_PORTS: usize = 8;
+    if !ports
+        .iter()
+        .any(|p| p.power_role == Some("Sink") && (p.port as usize) < MAX_PD_PORTS)
+    {
         return;
     }
     with_write_lock(seen_ref, |guard| {
         let mut seen = (**guard).clone();
         // Size vec for highest port index; EC skips failed ports so indices are sparse.
-        let need = ports.iter().map(|p| p.port as usize + 1).max().unwrap_or(0);
+        let need = ports
+            .iter()
+            .filter(|p| (p.port as usize) < MAX_PD_PORTS)
+            .map(|p| p.port as usize + 1)
+            .max()
+            .unwrap_or(0);
         if seen.len() < need {
             seen.resize(need, false);
         }
         for p in ports {
-            if p.power_role == Some("Sink") {
-                seen[p.port as usize] = true;
+            let idx = p.port as usize;
+            if p.power_role == Some("Sink") && idx < seen.len() {
+                seen[idx] = true;
             }
         }
         *guard = Arc::new(seen);
@@ -915,7 +926,11 @@ pub fn spawn(state: AppState) {
                                 }
                                 let mut backoff_ec = false;
                                 {
-                                    let _ec_guard = crate::util::acquire_ec_write().await;
+                                    let Some(_ec_guard) = crate::util::acquire_ec_write().await
+                                    else {
+                                        warn!("EC write lock contended, skipping this cycle");
+                                        continue 'poll_loop;
+                                    };
                                     let ec_clone = Arc::clone(&ec);
                                     match crate::util::spawn_blocking_with_timeout(
                                         crate::util::EC_IO_TIMEOUT,
@@ -983,7 +998,14 @@ pub fn spawn(state: AppState) {
                                         }
                                         let mut backoff_ec = false;
                                         {
-                                            let _ec_guard = crate::util::acquire_ec_write().await;
+                                            let Some(_ec_guard) =
+                                                crate::util::acquire_ec_write().await
+                                            else {
+                                                warn!(
+                                                    "EC write lock contended, skipping this cycle"
+                                                );
+                                                continue 'poll_loop;
+                                            };
                                             let ec_clone = Arc::clone(&ec);
                                             match crate::util::spawn_blocking_with_timeout(
                                                 crate::util::EC_IO_TIMEOUT,
@@ -1103,7 +1125,14 @@ pub fn spawn(state: AppState) {
                                         }
                                         let mut write_backoff = false;
                                         {
-                                            let _ec_guard = crate::util::acquire_ec_write().await;
+                                            let Some(_ec_guard) =
+                                                crate::util::acquire_ec_write().await
+                                            else {
+                                                warn!(
+                                                    "EC write lock contended, skipping this cycle"
+                                                );
+                                                continue 'poll_loop;
+                                            };
                                             let ec_clone = Arc::clone(&ec);
                                             let fan_idx = idx as u32;
                                             match crate::util::spawn_blocking_with_timeout(
@@ -1188,7 +1217,10 @@ pub fn spawn(state: AppState) {
                                 if shutdown_requested(&bg_state2) {
                                     return;
                                 }
-                                let _ec_guard = crate::util::acquire_ec_write().await;
+                                let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
+                                    warn!("EC write lock contended, skipping this cycle");
+                                    continue 'poll_loop;
+                                };
                                 let ec_clone = Arc::clone(&ec);
                                 match crate::util::spawn_blocking_with_timeout(
                                     crate::util::EC_IO_TIMEOUT,
@@ -1232,7 +1264,10 @@ pub fn spawn(state: AppState) {
                                 if shutdown_requested(&bg_state2) {
                                     return;
                                 }
-                                let _ec_guard = crate::util::acquire_ec_write().await;
+                                let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
+                                    warn!("EC write lock contended, skipping this cycle");
+                                    continue 'poll_loop;
+                                };
                                 let ec_clone = Arc::clone(&ec);
                                 let _ = crate::util::spawn_blocking_with_timeout(
                                     crate::util::EC_IO_TIMEOUT,
@@ -1247,7 +1282,11 @@ pub fn spawn(state: AppState) {
                                     "Curve mode with missing hysteresis, handing back to firmware"
                                 );
                                 if !shutdown_requested(&bg_state2) {
-                                    let _ec_guard = crate::util::acquire_ec_write().await;
+                                    let Some(_ec_guard) = crate::util::acquire_ec_write().await
+                                    else {
+                                        warn!("EC write lock contended, skipping this cycle");
+                                        continue 'poll_loop;
+                                    };
                                     let ec_clone = Arc::clone(&ec);
                                     let _ = crate::util::spawn_blocking_with_timeout(
                                         crate::util::EC_IO_TIMEOUT,
@@ -1262,7 +1301,11 @@ pub fn spawn(state: AppState) {
                                     "Curve mode with missing rate_limit, handing back to firmware"
                                 );
                                 if !shutdown_requested(&bg_state2) {
-                                    let _ec_guard = crate::util::acquire_ec_write().await;
+                                    let Some(_ec_guard) = crate::util::acquire_ec_write().await
+                                    else {
+                                        warn!("EC write lock contended, skipping this cycle");
+                                        continue 'poll_loop;
+                                    };
                                     let ec_clone = Arc::clone(&ec);
                                     let _ = crate::util::spawn_blocking_with_timeout(
                                         crate::util::EC_IO_TIMEOUT,
@@ -1289,7 +1332,11 @@ pub fn spawn(state: AppState) {
                                     if shutdown_requested(&bg_state2) {
                                         return;
                                     }
-                                    let _ec_guard = crate::util::acquire_ec_write().await;
+                                    let Some(_ec_guard) = crate::util::acquire_ec_write().await
+                                    else {
+                                        warn!("EC write lock contended, skipping this cycle");
+                                        continue 'poll_loop;
+                                    };
                                     let ec_clone = Arc::clone(&ec);
                                     match crate::util::spawn_blocking_with_timeout(
                                         crate::util::EC_IO_TIMEOUT,
@@ -1377,7 +1424,11 @@ pub fn spawn(state: AppState) {
                                             all_fans_applied = false;
                                             break;
                                         }
-                                        let _ec_guard = crate::util::acquire_ec_write().await;
+                                        let Some(_ec_guard) = crate::util::acquire_ec_write().await
+                                        else {
+                                            warn!("EC write lock contended, skipping this cycle");
+                                            continue 'poll_loop;
+                                        };
                                         let ec_clone = Arc::clone(&ec);
                                         match crate::util::spawn_blocking_with_timeout(
                                             crate::util::EC_IO_TIMEOUT,
@@ -1444,7 +1495,11 @@ pub fn spawn(state: AppState) {
                                     if shutdown_requested(&bg_state2) {
                                         return;
                                     }
-                                    let _ec_guard = crate::util::acquire_ec_write().await;
+                                    let Some(_ec_guard) = crate::util::acquire_ec_write().await
+                                    else {
+                                        warn!("EC write lock contended, skipping this cycle");
+                                        continue 'poll_loop;
+                                    };
                                     let ec_clone = Arc::clone(&ec);
                                     match crate::util::spawn_blocking_with_timeout(
                                         crate::util::EC_IO_TIMEOUT,

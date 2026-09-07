@@ -296,8 +296,21 @@ fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
     );
     use std::io::Write;
     let result = (|| {
-        let mut f =
-            std::fs::File::create(&tmp_path).map_err(|e| format!("create tmp failed: {}", e))?;
+        // create_new (O_EXCL) + symlink reject: a pre-planted symlink at the
+        // tmp path must not redirect our write to an arbitrary file.
+        if let Ok(meta) = std::fs::symlink_metadata(&tmp_path)
+            && meta.file_type().is_symlink()
+        {
+            return Err(format!(
+                "refusing to write through symlink: {}",
+                tmp_path.display()
+            ));
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("create tmp failed: {}", e))?;
         f.write_all(content.as_bytes())
             .map_err(|e| format!("write tmp failed: {}", e))?;
         if sync {

@@ -32,30 +32,16 @@ pub fn ec_write_mutex() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// Acquires EC write lock with contention logging; avoids silent 1.5s stall.
-/// Tries 500ms, logs if contended, then waits.
-pub async fn acquire_ec_write() -> tokio::sync::MutexGuard<'static, ()> {
-    match tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        ec_write_mutex().lock(),
-    )
-    .await
-    {
-        Ok(g) => g,
-        Err(_) => {
-            tracing::warn!("EC write contended >500ms, waiting");
-            ec_write_mutex().lock().await
-        }
+/// Acquires EC write lock with bounded wait: 500ms fast path, then up to
+/// 5s total. Returns None on persistent contention so callers skip the
+/// cycle instead of piling up waiters behind a stuck holder.
+pub async fn acquire_ec_write() -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    use std::time::Duration;
+    if let Ok(g) = tokio::time::timeout(Duration::from_millis(500), ec_write_mutex().lock()).await {
+        return Some(g);
     }
-}
-
-/// Tries to acquire EC write lock with timeout; avoids holding 1.5s blocking across all writers.
-/// Returns `None` if contended, caller should retry after short delay.
-#[allow(dead_code)]
-pub async fn try_acquire_ec_write_timeout(
-    timeout: std::time::Duration,
-) -> Option<tokio::sync::MutexGuard<'static, ()>> {
-    tokio::time::timeout(timeout, ec_write_mutex().lock())
+    tracing::warn!("EC write contended >500ms, waiting up to 5s");
+    tokio::time::timeout(Duration::from_secs(5), ec_write_mutex().lock())
         .await
         .ok()
 }

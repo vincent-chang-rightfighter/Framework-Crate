@@ -126,6 +126,7 @@ pub enum Message {
     OpenProjectUrl,
     ToggleExpansionCardDebug,
     StartupLaunchToggled(bool),
+    StartupLaunchSet(bool, Result<(), String>),
     InstallPawnIO,
     PawnIOInstalled(Result<(), String>),
     DownloadPawnIOModules,

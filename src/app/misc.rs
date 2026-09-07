@@ -124,7 +124,18 @@ impl App {
             }
             Message::StartupLaunchToggled(enabled) => {
                 self.startup_launch_error = None;
-                match crate::system_info::set_startup_launch(*enabled) {
+                self.mark_dirty();
+                let enabled = *enabled;
+                Some(Task::perform(
+                    async move {
+                        let res = crate::system_info::set_startup_launch(enabled);
+                        Message::StartupLaunchSet(enabled, res)
+                    },
+                    |msg| msg,
+                ))
+            }
+            Message::StartupLaunchSet(enabled, result) => {
+                match result {
                     Ok(()) => self.startup_launch_enabled = *enabled,
                     Err(e) => {
                         warn!(
@@ -132,9 +143,10 @@ impl App {
                             if *enabled { "enable" } else { "disable" },
                             e
                         );
-                        self.startup_launch_error = Some(e);
+                        self.startup_launch_error = Some(e.clone());
                     }
                 }
+                self.mark_dirty();
                 Some(Task::none())
             }
             Message::DismissConfigWarning => {

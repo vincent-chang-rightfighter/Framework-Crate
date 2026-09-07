@@ -586,12 +586,35 @@ impl SingleInstanceGuard {
 
 /// Whether app is registered to launch at startup via scheduled task.
 pub fn startup_launch_enabled() -> bool {
-    std::process::Command::new("schtasks")
-        .args(["/Query", "/TN", STARTUP_TASK_NAME])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
+    schtasks_output(&["/Query", "/TN", STARTUP_TASK_NAME], None, &[])
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Runs schtasks with a 5s timeout so a hung Task Scheduler service cannot
+/// freeze the UI thread (toggle handler) or delay startup.
+/// `raw_tr` is inserted immediately after `before` args (used for /TR value).
+fn schtasks_output(
+    before: &[&str],
+    raw_tr: Option<String>,
+    after: &[&str],
+) -> Result<std::process::Output, String> {
+    let before: Vec<String> = before.iter().map(|s| s.to_string()).collect();
+    let after: Vec<String> = after.iter().map(|s| s.to_string()).collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut cmd = std::process::Command::new("schtasks");
+        cmd.args(&before);
+        if let Some(tr) = raw_tr {
+            cmd.raw_arg(tr);
+        }
+        cmd.args(&after);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let _ = tx.send(cmd.output());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "schtasks timed out after 5s".to_string())?
+        .map_err(|e| format!("failed to run schtasks: {e}"))
 }
 
 /// Registers or removes Windows startup scheduled task (requires elevation for HIGHEST).
@@ -646,21 +669,19 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
         if exe_str.ends_with('\\') {
             return Err("exe path must not end with backslash".to_string());
         }
-        let mut cmd = std::process::Command::new("schtasks");
-        cmd.args(["/Create", "/TN", STARTUP_TASK_NAME, "/TR"]);
         // Use raw_arg to pass the /TR value exactly as "\"<exe>\" --minimized"
         // without Command's extra quoting; exe is already validated to contain
         // no double quotes, so wrapping in quotes is safe.
-        cmd.raw_arg(format!("\"{}\" --minimized", exe_str));
-        cmd.args(["/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]);
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        cmd.output()
-            .map_err(|e| format!("failed to run schtasks: {e}"))?
+        // Bounded by schtasks_output timeout so a hung Task Scheduler cannot freeze the UI.
+        let tr = format!("\"{}\" --minimized", exe_str);
+        schtasks_output(
+            &["/Create", "/TN", STARTUP_TASK_NAME, "/TR"],
+            Some(tr),
+            &["/SC", "ONLOGON", "/RL", "HIGHEST", "/F"],
+        )
+        .map_err(|e| format!("failed to run schtasks: {e}"))?
     } else {
-        std::process::Command::new("schtasks")
-            .args(["/Delete", "/TN", STARTUP_TASK_NAME, "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
+        schtasks_output(&["/Delete", "/TN", STARTUP_TASK_NAME, "/F"], None, &[])
             .map_err(|e| format!("failed to run schtasks: {e}"))?
     };
     if output.status.success() {
