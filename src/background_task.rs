@@ -337,17 +337,18 @@ pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<cli::
     let pd_history_ref = Arc::clone(&state.peripherals.pd_ports_history);
     let exp_ref = Arc::clone(&state.peripherals.expansion_cards);
     let ec_clone = Arc::clone(ec);
-    // Single blocking task for all EC reads to reduce wakes.
-    let batch = crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
-        (
-            ec_clone.thermal(),
-            ec_clone.power(),
-            ec_clone.kblight_get(),
-            ec_clone.pd_ports(),
-            ec_clone.expansion_cards(),
-        )
-    })
-    .await;
+    // Batch of 5 sequential EC reads needs more than the single-op 1.5s budget.
+    let batch =
+        crate::util::spawn_blocking_with_timeout(std::time::Duration::from_secs(5), move || {
+            (
+                ec_clone.thermal(),
+                ec_clone.power(),
+                ec_clone.kblight_get(),
+                ec_clone.pd_ports(),
+                ec_clone.expansion_cards(),
+            )
+        })
+        .await;
     let (thermal_result, power_result, kb_result, pd_ports, exp_cards) = match batch {
         Ok((t, p, kb, pd, exp)) => (t, p, kb, pd, exp),
         Err(join_err) => {

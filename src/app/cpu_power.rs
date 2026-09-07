@@ -192,21 +192,25 @@ impl App {
             }
             Message::CpuPowerPl1EnabledToggled(v) => {
                 self.pl1_enabled = *v;
+                self.pl_fields_dirty = true;
                 self.mark_dirty();
                 Some(Task::none())
             }
             Message::CpuPowerPl2EnabledToggled(v) => {
                 self.pl2_enabled = *v;
+                self.pl_fields_dirty = true;
                 self.mark_dirty();
                 Some(Task::none())
             }
             Message::CpuPowerPl1ClampedToggled(v) => {
                 self.pl1_clamped = *v;
+                self.pl_fields_dirty = true;
                 self.mark_dirty();
                 Some(Task::none())
             }
             Message::CpuPowerPl2ClampedToggled(v) => {
                 self.pl2_clamped = *v;
+                self.pl_fields_dirty = true;
                 self.mark_dirty();
                 Some(Task::none())
             }
@@ -468,8 +472,21 @@ impl App {
         if pl2 <= 0.0 {
             return Err("PL2 must be greater than 0W".to_string());
         }
+        // Upper bounds: beyond the 15-bit RAPL field the encoder silently
+        // clamps, which then surfaces as a confusing read-back mismatch.
+        const PL_MAX_WATTS: f64 = 1024.0;
+        if pl1 > PL_MAX_WATTS {
+            return Err(format!("PL1 must not exceed {:.0}W", PL_MAX_WATTS));
+        }
+        if pl2 > PL_MAX_WATTS {
+            return Err(format!("PL2 must not exceed {:.0}W", PL_MAX_WATTS));
+        }
         if pl1_time <= 0.0 {
             return Err("PL1 time must be greater than 0s".to_string());
+        }
+        const PL_TIME_MAX_S: f64 = 120.0;
+        if pl1_time > PL_TIME_MAX_S {
+            return Err(format!("PL1 time must not exceed {:.0}s", PL_TIME_MAX_S));
         }
         if pl1 > pl2 {
             return Err(format!(

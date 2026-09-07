@@ -323,13 +323,19 @@ fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
     if result.is_ok() {
         harden_file_acl(&path);
     }
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
+    if result.is_err()
+        && let Err(e) = std::fs::remove_file(&tmp_path)
+    {
+        tracing::debug!("Failed to remove tmp config {}: {}", tmp_path.display(), e);
     }
     result
 }
 
-fn atomic_replace(tmp: &std::path::Path, dest: &std::path::Path, sync: bool) -> Result<(), String> {
+pub(crate) fn atomic_replace(
+    tmp: &std::path::Path,
+    dest: &std::path::Path,
+    sync: bool,
+) -> Result<(), String> {
     // Windows rename fails if dest exists; use MoveFileExW for atomic replace.
     #[cfg(windows)]
     {

@@ -342,9 +342,13 @@ pub fn download_and_extract_modules() -> Result<(), String> {
         let _ = std::fs::remove_file(&zip_path);
     }
 
-    // Write PowerShell script to unique temp file to avoid collisions and symlink races.
-    // Use create_new (O_EXCL) so we fail if an attacker pre-created a symlink at this path.
-    let script_path = std::env::temp_dir().join(format!(
+    // Write PowerShell script into our own per-user dir (not shared %TEMP%)
+    // with create_new (O_EXCL) so a pre-created symlink fails instead of executing.
+    let script_dir = crate::config::config_path()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(std::env::temp_dir);
+    let script_path = script_dir.join(format!(
         "pawnio_download_{}_{}_{}.ps1",
         std::process::id(),
         crate::util::monotonic_ms(),
@@ -972,15 +976,39 @@ static DLL_INIT_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 const DLL_PATH: &str = r"C:\Program Files\PawnIO\PawnIOLib.dll";
 
+fn known_program_files() -> Option<std::path::PathBuf> {
+    // Query the OS instead of trusting %ProgramFiles% env (a malicious
+    // launcher can override env vars for the child process).
+    use windows_sys::Win32::UI::Shell::SHGetFolderPathW;
+    const CSIDL_PROGRAM_FILES: i32 = 0x0026;
+    const MAX_PATH: usize = 260;
+    let mut buf = [0u16; MAX_PATH];
+    let ok = unsafe {
+        SHGetFolderPathW(
+            std::ptr::null_mut(),
+            CSIDL_PROGRAM_FILES,
+            std::ptr::null_mut(),
+            0,
+            buf.as_mut_ptr(),
+        )
+    };
+    if ok != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(MAX_PATH);
+    String::from_utf16(&buf[..len])
+        .ok()
+        .map(std::path::PathBuf::from)
+}
+
 fn resolved_dll_path() -> std::path::PathBuf {
-    if let Ok(pf) = std::env::var("ProgramFiles") {
-        let cand = std::path::PathBuf::from(pf)
-            .join("PawnIO")
-            .join("PawnIOLib.dll");
+    if let Some(pf) = known_program_files() {
+        let cand = pf.join("PawnIO").join("PawnIOLib.dll");
         if cand.exists() {
             return cand;
         }
     }
+    // Fallback for non-standard layouts; verify_dll_path still enforces prefix.
     if let Ok(pf) = std::env::var("ProgramW6432") {
         let cand = std::path::PathBuf::from(pf)
             .join("PawnIO")
@@ -1105,10 +1133,20 @@ fn verify_dll_path() -> Result<(), &'static str> {
         warn!("PawnIO DLL is a symlink, refusing to load: {}", p.display());
         return Err("DLL is symlink");
     }
-    // Canonicalize and ensure it stays under Program Files\PawnIO
+    // Canonicalize and require the exact <ProgramFiles>\PawnIO\PawnIOLib.dll
+    // suffix instead of a loose substring match.
     if let Ok(canon) = std::fs::canonicalize(&p) {
-        let canon_str = canon.to_string_lossy().to_lowercase();
-        if !canon_str.contains(r"pawnio") {
+        let canon_str = canon.to_string_lossy().to_lowercase().replace('/', "\\");
+        let suffix = "\\pawnio\\pwniolib.dll";
+        // Reconstruct expected prefix from the OS-known Program Files when available.
+        let prefix_ok = known_program_files().map(|pf| {
+            let mut pre = pf.to_string_lossy().to_lowercase().replace('/', "\\");
+            if !pre.ends_with('\\') {
+                pre.push('\\');
+            }
+            canon_str.starts_with(&pre)
+        });
+        if !canon_str.ends_with(suffix) || prefix_ok == Some(false) {
             warn!("PawnIO DLL canonical path unexpected: {}", canon.display());
             return Err("DLL path mismatch");
         }
@@ -1141,8 +1179,12 @@ fn verify_dll_path() -> Result<(), &'static str> {
         }
     });
     if !AUTHENTICODE_OK.load(std::sync::atomic::Ordering::Acquire) {
-        #[cfg(not(debug_assertions))]
-        return Err("DLL authenticode not valid");
+        // Enforced in all profiles; developers with a self-signed test DLL
+        // must set FRAMEWORK_ALLOW_UNSIGNED_PAWNIO=1 explicitly.
+        if std::env::var_os("FRAMEWORK_ALLOW_UNSIGNED_PAWNIO").is_none() {
+            return Err("DLL authenticode not valid");
+        }
+        warn!("FRAMEWORK_ALLOW_UNSIGNED_PAWNIO set; loading unsigned DLL");
     }
     // Hash pin: ensure DLL is not zero/truncated and log hash for audit
     if let Ok(bytes) = std::fs::read(&p) {
@@ -1484,22 +1526,26 @@ impl SyncThread {
         Ok(())
     }
 
-    /// Stops sync thread.
-    fn stop(&mut self) {
+    /// Stops sync thread (single shutdown helper; Drop reuses it).
+    /// The worker wakes within ~100ms (interruptible sleep), so joining
+    /// under the outer `sync_thread` lock cannot stall the UI.
+    fn shutdown(&mut self) {
         self.running.store(false, Ordering::Release);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
         self.alive.store(false, Ordering::Release);
     }
+
+    /// Stops sync thread.
+    fn stop(&mut self) {
+        self.shutdown();
+    }
 }
 
 impl Drop for SyncThread {
     fn drop(&mut self) {
-        self.running.store(false, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        self.shutdown();
     }
 }
 
@@ -1747,50 +1793,16 @@ fn persist_bios_defaults(defaults: &BiosDefaults) -> Result<(), String> {
         f.write_all(content.as_bytes())
             .map_err(|e| format!("write tmp bios_defaults failed: {}", e))?;
     }
-    // Use MoveFileExW for atomic replace; fallback to rename.
-    #[cfg(windows)]
-    {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
-        const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-        let tmp_w: Vec<u16> = OsStr::new(&tmp)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let dst_w: Vec<u16> = OsStr::new(&path)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let ok = unsafe {
-            MoveFileExW(
-                tmp_w.as_ptr(),
-                dst_w.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if ok != 0 {
-            crate::config::harden_file_acl(&path);
-            Ok(())
-        } else {
-            let _ = std::fs::remove_file(&path);
-            std::fs::rename(&tmp, &path).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                format!("rename bios_defaults failed: {}", e)
-            })?;
+    // Reuse the shared atomic replace (MoveFileExW + rename-first fallback).
+    match crate::config::atomic_replace(&tmp, &path, true) {
+        Ok(()) => {
             crate::config::harden_file_acl(&path);
             Ok(())
         }
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::rename(&tmp, &path).map_err(|e| {
+        Err(e) => {
             let _ = std::fs::remove_file(&tmp);
-            format!("rename bios_defaults failed: {}", e)
-        })?;
-        crate::config::harden_file_acl(&path);
-        Ok(())
+            Err(format!("replace bios_defaults failed: {}", e))
+        }
     }
 }
 

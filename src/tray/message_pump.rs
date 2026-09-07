@@ -109,8 +109,12 @@ unsafe extern "system" fn tray_wnd_proc(
             });
             EVENT_TX.with(|tx| {
                 if let Some(sender) = tx.borrow().as_ref() {
-                    let _ = sender.send(TrayEvent::Show);
-                    let _ = sender.send(TrayEvent::Restored);
+                    if let Err(e) = sender.send(TrayEvent::Show) {
+                        tracing::debug!("Tray Show event send failed: {}", e);
+                    }
+                    if let Err(e) = sender.send(TrayEvent::Restored) {
+                        tracing::debug!("Tray Restored event send failed: {}", e);
+                    }
                 }
             });
         } else if lparam_u32 == WM_RBUTTONUP {
@@ -126,17 +130,21 @@ unsafe extern "system" fn tray_wnd_proc(
             // PostThreadMessageW (fails if queue not primed).
             let hwnd = TRAY_HWND.with(|h| h.get());
             if hwnd != 0 {
-                let _ =
-                    unsafe { PostMessageW(hwnd as *mut core::ffi::c_void, WM_COMMAND_READY, 0, 0) };
-            } else {
-                let _ = unsafe {
-                    PostThreadMessageW(
-                        TRAY_THREAD_ID.load(Ordering::Acquire),
-                        WM_COMMAND_READY,
-                        0,
-                        0,
-                    )
-                };
+                if unsafe { PostMessageW(hwnd as *mut core::ffi::c_void, WM_COMMAND_READY, 0, 0) }
+                    == 0
+                {
+                    tracing::debug!("Tray menu re-post PostMessageW failed");
+                }
+            } else if unsafe {
+                PostThreadMessageW(
+                    TRAY_THREAD_ID.load(Ordering::Acquire),
+                    WM_COMMAND_READY,
+                    0,
+                    0,
+                )
+            } == 0
+            {
+                tracing::debug!("Tray menu re-post PostThreadMessageW failed");
             }
         }
         return 0;

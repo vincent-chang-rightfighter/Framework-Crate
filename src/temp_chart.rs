@@ -139,7 +139,7 @@ struct TempChartState {
     cached_key: Cell<(*const (), usize, *const (), *const (), i64, i64)>,
     /// Reused line-point buffer to avoid per-frame allocation.
     points_buf: std::cell::RefCell<Vec<(f32, f32)>>,
-    last_theme: std::cell::RefCell<Option<String>>,
+    last_theme: Cell<Option<std::mem::Discriminant<iced::Theme>>>,
 }
 
 impl Default for TempChartState {
@@ -154,7 +154,7 @@ impl Default for TempChartState {
                 0,
                 0,
             )),
-            last_theme: std::cell::RefCell::new(None),
+            last_theme: Cell::new(None),
             points_buf: std::cell::RefCell::new(Vec::new()),
         }
     }
@@ -192,12 +192,12 @@ impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
             self.window_seconds,
             last_ts,
         );
-        // theme change should invalidate cache (previously ignored)
-        let theme_str = format!("{:?}", _theme);
-        let theme_changed = state.last_theme.borrow().as_deref() != Some(&theme_str);
+        // theme change should invalidate cache (discriminant compare, no alloc)
+        let theme_tag = std::mem::discriminant(_theme);
+        let theme_changed = state.last_theme.get() != Some(theme_tag);
         if state.cached_key.get() != key || theme_changed {
             state.cached_key.set(key);
-            *state.last_theme.borrow_mut() = Some(theme_str);
+            state.last_theme.set(Some(theme_tag));
             if let Some(cache) = state.cache.get() {
                 cache.clear();
             }

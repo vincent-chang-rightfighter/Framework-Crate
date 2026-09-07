@@ -22,6 +22,8 @@ pub struct TrayManager {
     thread_handle: Option<JoinHandle<()>>,
     /// Pending HWND for two-phase reinit after old pump exits.
     pending_reinit_hwnd: Option<isize>,
+    /// When the current reinit was requested; bounds waiting for a stuck pump.
+    reinit_requested_at: Option<std::time::Instant>,
     /// Last WM_COMMAND_READY wake time for retry until icon creation.
     last_notify_at: Option<std::time::Instant>,
     pub(crate) just_restored_at: Option<std::time::Instant>,
@@ -29,6 +31,8 @@ pub struct TrayManager {
 
 /// Retry interval for WM_COMMAND_READY wake-ups while icon creation is pending.
 const NOTIFY_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+/// Max time to wait for the old pump thread before detaching it and respawning.
+const REINIT_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Default for TrayManager {
     fn default() -> Self {
@@ -51,6 +55,7 @@ impl TrayManager {
             icon_loaded: false,
             thread_handle: None,
             pending_reinit_hwnd: None,
+            reinit_requested_at: None,
             last_notify_at: None,
             just_restored_at: None,
         }
@@ -109,8 +114,10 @@ impl TrayManager {
                 if due {
                     self.last_notify_at = Some(std::time::Instant::now());
                     // NOTE: Duplicate CreateIcon is idempotent; re-post is lost-wakeup recovery.
-                    if let Some(tx) = &self.command_tx {
-                        let _ = tx.send(TrayCommand::CreateIcon);
+                    if let Some(tx) = &self.command_tx
+                        && let Err(e) = tx.send(TrayCommand::CreateIcon)
+                    {
+                        tracing::debug!("Tray CreateIcon re-post failed: {}", e);
                     }
                     notify_tray_thread();
                 }
@@ -143,8 +150,10 @@ impl TrayManager {
         if let Some(rx) = &self.icon_ready_rx {
             while rx.try_recv().is_ok() {}
         }
-        if let Some(tx) = &self.command_tx {
-            let _ = tx.send(TrayCommand::CreateIcon);
+        if let Some(tx) = &self.command_tx
+            && let Err(e) = tx.send(TrayCommand::CreateIcon)
+        {
+            tracing::debug!("Tray initial CreateIcon post failed: {}", e);
         }
         self.last_notify_at = Some(std::time::Instant::now());
         notify_tray_thread();
@@ -264,6 +273,7 @@ impl TrayManager {
         self.thread_ready = false;
         self.icon_requested = false;
         self.pending_reinit_hwnd = Some(hwnd);
+        self.reinit_requested_at = Some(std::time::Instant::now());
     }
 
     /// Phase 2 of two-phase reinit: spawns fresh pump once old thread exits.
@@ -273,9 +283,19 @@ impl TrayManager {
         };
         let finished = self.thread_handle.as_ref().is_none_or(|h| h.is_finished());
         if !finished {
-            return false;
+            // A pump stuck in a modal menu loop would block reinit forever;
+            // detach it after timeout and respawn (it exits with the process).
+            let timed_out = self
+                .reinit_requested_at
+                .is_some_and(|t| t.elapsed() >= REINIT_JOIN_TIMEOUT);
+            if !timed_out {
+                return false;
+            }
+            tracing::warn!("Old tray pump did not exit in time, detaching");
+            self.thread_handle = None;
         }
         self.pending_reinit_hwnd = None;
+        self.reinit_requested_at = None;
         self.thread_handle = None;
         self.spawn_pump(hwnd);
         tracing::info!("TrayManager reinit complete, new HWND: {}", hwnd);

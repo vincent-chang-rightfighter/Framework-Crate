@@ -80,9 +80,10 @@ fn main() {
 
     // Decode app.png to RGBA bytes for iced window icon (avoids pulling in the
     // full `image` crate with its ~60 transitive dependencies).
+    // Anchored at CARGO_MANIFEST_DIR so --manifest-path builds from elsewhere work.
     println!("cargo:rerun-if-changed=assets/app.png");
-    let decoder =
-        png::Decoder::new(File::open("assets/app.png").expect("Failed to open assets/app.png"));
+    let png_path = Path::new(&manifest_dir).join("assets/app.png");
+    let decoder = png::Decoder::new(File::open(&png_path).expect("Failed to open assets/app.png"));
     let mut reader = decoder.read_info().expect("Failed to read PNG info");
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader
