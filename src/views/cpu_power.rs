@@ -80,7 +80,7 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     .style(btn_style),
             );
             content = content.push(
-                text("Manual: download latest release_*.zip from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into %APPDATA%\\framework-crate\\modules\\")
+                text("Manual: download latest release_*.zip from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into the modules folder (Open Modules Folder)")
                     .size(FONT_SMALL)
                     .style(|_theme| iced::widget::text::Style {
                         color: Some(COLOR_GRAY),

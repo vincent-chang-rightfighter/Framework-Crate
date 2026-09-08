@@ -50,30 +50,41 @@ fn next_config_version() -> u64 {
     CONFIG_VERSION.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-/// Prunes oldest `framework_crate_debug_*.txt` files in `dir` to keep at most `keep`.
+/// Prunes oldest `framework_crate_debug_*.txt` files in `dir` to keep at most
+/// `keep` files and 5MB total. Best-effort maintenance, not security-critical.
 fn prune_debug_reports(dir: std::path::PathBuf, keep: usize) {
+    const MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024;
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return;
     };
-    let mut reports: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+    let mut reports: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = entries
         .filter_map(|e| {
             let e = e.ok()?;
+            // Skip symlinks so pruning never follows a planted link.
+            if e.file_type().ok()?.is_symlink() {
+                return None;
+            }
             let name = e.file_name();
             let name = name.to_string_lossy();
             name.starts_with("framework_crate_debug_")
                 .then(|| {
                     e.metadata()
                         .ok()
-                        .and_then(|m| m.modified().ok())
-                        .map(|t| (t, e.path()))
+                        .and_then(|m| m.modified().ok().map(|t| (t, m.len(), e.path())))
                 })
                 .flatten()
         })
         .collect();
-    reports.sort_by_key(|(t, _)| *t);
-    while reports.len() > keep {
-        if let Some((_, oldest)) = reports.first() {
-            let _ = std::fs::remove_file(oldest);
+    reports.sort_by_key(|(t, _, _)| *t);
+    let mut total: u64 = reports.iter().map(|(_, len, _)| len).sum();
+    while reports.len() > keep || total > MAX_TOTAL_BYTES {
+        if let Some((_, len, oldest)) = reports.first() {
+            let len = *len;
+            if let Err(e) = std::fs::remove_file(oldest) {
+                tracing::debug!("Failed to prune debug report {}: {}", oldest.display(), e);
+                break;
+            }
+            total = total.saturating_sub(len);
             reports.remove(0);
         } else {
             break;

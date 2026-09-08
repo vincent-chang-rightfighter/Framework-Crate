@@ -22,42 +22,53 @@ type PawnioExecute = unsafe extern "system" fn(
 type PawnioClose = unsafe extern "system" fn(HANDLE) -> i32; // HRESULT
 
 const MODULES_DIR_NAME: &str = "modules";
-const PAWNIO_MODULES_VERSION: &str = "0.2.11";
-const PAWNIO_MODULES_VERSION_FALLBACK: &str = PAWNIO_MODULES_VERSION;
+/// Marker file recording which upstream tag the local bins came from.
+const MODULES_VERSION_FILE: &str = ".version";
+/// Last-known-good PawnIO.Modules upstream release tag, used ONLY as a
+/// fallback download URL when the GitHub API is unreachable. The primary
+/// path always queries the latest release; hashes stay advisory.
+const LAST_KNOWN_MODULES_VERSION: &str = "0.2.11";
 const INTEL_MSR_SHA256: &str = "d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a21cb48413c9b92e5f";
 const INTEL_MCHBAR_SHA256: &str =
     "3f82b832d99b4aac37d2a20fdb7c9baa2a3bc0488612c9019c9484eb0e8a6eae";
 
-/// Tries to fetch latest PawnIO.Modules tag via GitHub API, fallback to pinned version.
-/// Used by pawnio_modules_version() for display; download uses latest_modules_download_url().
-fn latest_modules_version() -> String {
-    // Try curl for latest tag, 3s timeout, fallback to pinned
-    let out = std::process::Command::new("curl.exe")
-        .args([
-            "-s",
-            "-L",
-            "--max-time",
-            "3",
-            "https://api.github.com/repos/namazso/PawnIO.Modules/releases/latest",
-        ])
-        .creation_flags(0x08000000)
-        .output();
-    if let Ok(o) = out {
-        let body = String::from_utf8_lossy(&o.stdout);
-        // Extract "tag_name":"0.2.11" from JSON
-        if let Some(start) = body.find("\"tag_name\":\"") {
-            let rest = &body[start + 12..];
-            if let Some(end) = rest.find('"') {
-                let tag = rest[..end].trim();
-                let ver = tag.trim_start_matches('v');
-                if !ver.is_empty() && ver.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
-                    tracing::info!("PawnIO Modules latest version: {}", ver);
-                    return ver.to_string();
-                }
-            }
-        }
+/// Reads the locally installed modules tag recorded at download time.
+fn local_modules_version() -> Option<String> {
+    let dir = modules_dir();
+    let raw = std::fs::read_to_string(dir.join(MODULES_VERSION_FILE)).ok()?;
+    let ver = raw.trim().trim_start_matches('v').to_string();
+    if ver.is_empty() || !ver.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+        return None;
     }
-    PAWNIO_MODULES_VERSION_FALLBACK.to_string()
+    Some(ver)
+}
+
+/// Extracts the release tag from a `.../download/{tag}/...` asset URL.
+fn tag_from_modules_url(url: &str) -> Option<String> {
+    let marker = "/download/";
+    let start = url.find(marker)? + marker.len();
+    let rest = &url[start..];
+    let end = rest.find('/')?;
+    let tag = rest[..end].trim().trim_start_matches('v').to_string();
+    if tag.is_empty() || !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+        return None;
+    }
+    Some(tag)
+}
+
+/// Records which upstream tag the local bins came from.
+fn persist_local_modules_version(dir: &std::path::Path, tag: &str) {
+    let path = dir.join(MODULES_VERSION_FILE);
+    let _ = std::fs::remove_file(&path);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", tag);
+    }
+    invalidate_modules_version();
 }
 
 /// Tries to fetch latest release asset download URL directly via GitHub API.
@@ -68,7 +79,11 @@ fn latest_modules_download_url() -> Option<String> {
             "-s",
             "-L",
             "--max-time",
-            "3",
+            "15",
+            "--retry",
+            "1",
+            "--retry-delay",
+            "2",
             "https://api.github.com/repos/namazso/PawnIO.Modules/releases/latest",
         ])
         .creation_flags(0x08000000)
@@ -97,7 +112,9 @@ fn latest_modules_download_url() -> Option<String> {
 
 static PS_SCRIPT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Returns local modules directory (%APPDATA%/framework-crate/modules/).
+/// Local modules directory (%APPDATA%/framework-crate/modules/).
+/// Per-user on purpose: downloads and reads stay in the user profile and
+/// never touch machine-wide locations.
 fn modules_dir() -> std::path::PathBuf {
     let base = dirs::config_dir()
         .or_else(dirs::data_local_dir)
@@ -142,15 +159,9 @@ fn read_verified_module(path: &std::path::Path, expected: &str) -> Result<Vec<u8
     Ok(bytes)
 }
 
-fn verify_cached_modules(dir: &std::path::Path) -> Result<(), &'static str> {
-    verify_module_hash(&dir.join("IntelMSR.bin"), INTEL_MSR_SHA256)?;
-    verify_module_hash(&dir.join("IntelMCHBAR.bin"), INTEL_MCHBAR_SHA256)?;
-    Ok(())
-}
-
 static MODULES_CACHE: parking_lot::RwLock<Option<bool>> = parking_lot::RwLock::new(None);
 
-/// Checks if module blobs are cached and hash-verified (cached).
+/// Checks if module blobs are present in any candidate dir (cached).
 pub fn modules_downloaded() -> bool {
     {
         let guard = MODULES_CACHE.read();
@@ -158,9 +169,10 @@ pub fn modules_downloaded() -> bool {
             return cached;
         }
     }
-    let verified = verify_cached_modules(&modules_dir()).is_ok();
-    *MODULES_CACHE.write() = Some(verified);
-    verified
+    let present = modules_dir().join("IntelMSR.bin").is_file()
+        && modules_dir().join("IntelMCHBAR.bin").is_file();
+    *MODULES_CACHE.write() = Some(present);
+    present
 }
 
 fn invalidate_modules_cache() {
@@ -299,6 +311,7 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
     }
     cleanup(&staging, zip_tmp);
     invalidate_blob_cache();
+    invalidate_modules_version();
     Ok(())
 }
 
@@ -308,10 +321,16 @@ pub fn download_and_extract_modules() -> Result<(), String> {
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("failed to create modules directory: {}", e))?;
 
-    // Always fetch latest release asset URL directly; no pinned version fallback
-    let url = latest_modules_download_url().ok_or_else(|| {
-        "failed to fetch latest release URL — check internet or download manually from https://github.com/namazso/PawnIO.Modules/releases/latest".to_string()
-    })?;
+    // Primary: latest release asset URL. Fallback: last-known release so a
+    // flaky GitHub API degrades to a slightly old download instead of an error.
+    let url = latest_modules_download_url().unwrap_or_else(|| {
+        warn!("GitHub API unreachable, falling back to last-known release");
+        format!(
+            "https://github.com/namazso/PawnIO.Modules/releases/download/{0}/release_{1}.zip",
+            LAST_KNOWN_MODULES_VERSION,
+            LAST_KNOWN_MODULES_VERSION.replace('.', "_")
+        )
+    });
     let zip_path = dir.join("pawnio_modules_latest.zip");
     // Primary ZIP is deterministic and vulnerable to pre-created symlink; also use unique tmp
     if let Ok(meta) = std::fs::symlink_metadata(&zip_path)
@@ -342,53 +361,27 @@ pub fn download_and_extract_modules() -> Result<(), String> {
         let _ = std::fs::remove_file(&zip_path);
     }
 
-    // Write PowerShell script into our own per-user dir (not shared %TEMP%)
-    // with create_new (O_EXCL) so a pre-created symlink fails instead of executing.
-    let script_dir = crate::config::config_path()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(std::env::temp_dir);
-    let script_path = script_dir.join(format!(
-        "pawnio_download_{}_{}_{}.ps1",
-        std::process::id(),
-        crate::util::monotonic_ms(),
-        PS_SCRIPT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-    ));
+    // Download via inline -Command (no script file, no script-path race).
     // Escape single quotes for PowerShell single-quoted strings.
     let esc = |s: &str| s.replace('\'', "''");
-    // Download only; extraction goes through staged validation (ZIP-slip safe).
-    let script = format!(
-        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n\
+    let ps_command = format!(
+        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
          Invoke-WebRequest -Uri '{url}' -OutFile '{zip}' -UseBasicParsing -ErrorAction Stop",
         url = esc(&url),
         zip = esc(&zip_tmp.display().to_string()),
     );
-    {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&script_path)
-            .map_err(|e| format!("failed to create script (possible symlink race): {}", e))?;
-        f.write_all(script.as_bytes())
-            .map_err(|e| format!("failed to write script: {}", e))?;
-    }
 
-    let script_str = script_path
-        .to_str()
-        .ok_or_else(|| "temp path is not valid UTF-8".to_string())?;
     let output = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
-            "-File",
-            script_str,
+            "-Command",
+            &ps_command,
         ])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .output()
         .map_err(|e| format!("failed to run powershell: {}", e))?;
-    let _ = std::fs::remove_file(&script_path);
 
     // PowerShell only downloads; extraction always goes through staged validation.
     let _ = std::fs::remove_file(&zip_path);
@@ -415,7 +408,7 @@ pub fn download_and_extract_modules() -> Result<(), String> {
         }
         warn!("curl fallback also failed");
         return Err(format!(
-            "download/extraction failed: {} — check internet or download latest release_*.zip manually from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into %APPDATA%\\framework-crate\\modules\\ (use Open Modules Folder)",
+            "download/extraction failed: {} — check internet or download latest release_*.zip manually from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into the modules folder (use Open Modules Folder)",
             detail
         ));
     }
@@ -437,9 +430,12 @@ pub fn download_and_extract_modules() -> Result<(), String> {
             return Ok(());
         }
         return Err(format!(
-            "{} — check internet or download latest release_*.zip manually from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into %APPDATA%\\framework-crate\\modules\\ (use Open Modules Folder)",
+            "{} — check internet or download latest release_*.zip manually from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into the modules folder (use Open Modules Folder)",
             e
         ));
+    }
+    if let Some(tag) = tag_from_modules_url(&url) {
+        persist_local_modules_version(&dir, &tag);
     }
 
     debug!("PawnIO modules extracted successfully to {}", dir.display());
@@ -470,6 +466,10 @@ fn try_curl_download(url: &str, dir: &std::path::Path) -> Result<(), String> {
             "=https",
             "--max-time",
             "30",
+            "--retry",
+            "1",
+            "--retry-delay",
+            "2",
             "-o",
             &zip_tmp.display().to_string(),
             url,
@@ -488,7 +488,13 @@ fn try_curl_download(url: &str, dir: &std::path::Path) -> Result<(), String> {
         let _ = std::fs::remove_file(&zip_tmp);
         return Err("downloaded zip too small".to_string());
     }
-    extract_staged_zip(&zip_tmp, dir)
+    let res = extract_staged_zip(&zip_tmp, dir);
+    if res.is_ok()
+        && let Some(tag) = tag_from_modules_url(url)
+    {
+        persist_local_modules_version(dir, &tag);
+    }
+    res
 }
 
 static MSR_BLOB_CACHE: parking_lot::Mutex<Option<Arc<Vec<u8>>>> = parking_lot::Mutex::new(None);
@@ -500,7 +506,7 @@ fn invalidate_blob_cache() {
     invalidate_modules_cache();
 }
 
-/// Opens modules directory in Explorer.
+/// Opens modules directory in Explorer (the dir actually in use, else target).
 pub fn open_modules_dir() -> Result<(), String> {
     let dir = modules_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -514,6 +520,7 @@ pub fn open_modules_dir() -> Result<(), String> {
 /// Re-validates modules after manual placement; clears caches.
 pub fn redetect_modules() -> bool {
     invalidate_blob_cache();
+    invalidate_modules_version();
     modules_downloaded()
 }
 
@@ -1135,9 +1142,20 @@ fn verify_dll_path() -> Result<(), &'static str> {
     }
     // Canonicalize and require the exact <ProgramFiles>\PawnIO\PawnIOLib.dll
     // suffix instead of a loose substring match.
+    // NOTE: canonicalize returns verbatim \\?\ paths; strip the prefix first
+    // or the prefix comparison below always fails.
+    fn strip_verbatim(s: &str) -> String {
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+        s.to_string()
+    }
     if let Ok(canon) = std::fs::canonicalize(&p) {
-        let canon_str = canon.to_string_lossy().to_lowercase().replace('/', "\\");
-        let suffix = "\\pawnio\\pwniolib.dll";
+        let canon_str = strip_verbatim(&canon.to_string_lossy().to_lowercase()).replace('/', "\\");
+        let suffix = "\\pawnio\\pawniolib.dll";
         // Reconstruct expected prefix from the OS-known Program Files when available.
         let prefix_ok = known_program_files().map(|pf| {
             let mut pre = pf.to_string_lossy().to_lowercase().replace('/', "\\");
@@ -2145,10 +2163,43 @@ pub fn invalidate_pawnio_version() {
     *PAWNIO_VERSION.write() = None;
 }
 
-/// Returns latest PawnIO Modules version (fetched from GitHub API, cached).
-pub fn pawnio_modules_version() -> &'static str {
-    static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    CACHED.get_or_init(latest_modules_version)
+/// Cached Modules version display string; cleared after successful download.
+static MODULES_VERSION: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
+
+pub fn invalidate_modules_version() {
+    *MODULES_VERSION.write() = None;
+}
+
+/// Returns the locally installed PawnIO Modules version for display:
+/// recorded tag, hash-inferred tag for unmarked bins, `unknown` for
+/// unrecognized manual installs, `not installed` when absent.
+pub fn pawnio_modules_version() -> String {
+    if let Some(v) = MODULES_VERSION.read().clone() {
+        return v;
+    }
+    let dir = modules_dir();
+    let v = if let Some(local) = local_modules_version() {
+        local
+    } else if dir.join("IntelMSR.bin").is_file() && dir.join("IntelMCHBAR.bin").is_file() {
+        // Self-heal: bins match the known release hashes but carry no marker
+        // (manual copy); record the inferred tag so the number shows up.
+        let msr = std::fs::read(dir.join("IntelMSR.bin"))
+            .map(|b| sha256_hex(&b))
+            .unwrap_or_default();
+        let mchbar = std::fs::read(dir.join("IntelMCHBAR.bin"))
+            .map(|b| sha256_hex(&b))
+            .unwrap_or_default();
+        if msr == INTEL_MSR_SHA256 && mchbar == INTEL_MCHBAR_SHA256 {
+            persist_local_modules_version(&dir, LAST_KNOWN_MODULES_VERSION);
+            LAST_KNOWN_MODULES_VERSION.to_string()
+        } else {
+            "unknown (manual install?)".to_string()
+        }
+    } else {
+        "not installed".to_string()
+    };
+    *MODULES_VERSION.write() = Some(v.clone());
+    v
 }
 
 #[cfg(test)]

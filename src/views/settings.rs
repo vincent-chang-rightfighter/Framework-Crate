@@ -64,7 +64,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     }
     sw_content = sw_content.push(info_row(
         "PawnIO Modules",
-        crate::cpu_power::pawnio_modules_version(),
+        &crate::cpu_power::pawnio_modules_version(),
     ));
     if !app.system_info.os.is_empty() {
         sw_content = sw_content.push(info_row("OS", &app.system_info.os));

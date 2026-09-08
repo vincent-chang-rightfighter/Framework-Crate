@@ -53,7 +53,9 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for Height
             return layout::Node::new(limits.loose().max());
         };
         let node = self.content.as_widget_mut().layout(child, renderer, limits);
-        let h = node.size().height;
+        // Quantize to whole logical px so DPI-rounding jitter cannot
+        // oscillate the autosize loop (tick only resizes beyond epsilon).
+        let h = node.size().height.round();
         // Avoid lock churn when height unchanged (every layout tick).
         {
             let mut guard = self.report.lock();
