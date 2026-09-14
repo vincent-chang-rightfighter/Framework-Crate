@@ -593,10 +593,51 @@ pub fn startup_launch_enabled() -> bool {
 
 /// Runs schtasks with a 5s timeout so a hung Task Scheduler service cannot
 /// freeze the UI thread (toggle handler) or delay startup.
-/// `raw_tr` is inserted immediately after `before` args (used for /TR value).
+/// Decodes console child-process output. schtasks errors on zh-TW systems
+/// are in the OEM codepage (cp950), not UTF-8 — from_utf8_lossy would
+/// render them as mojibake and hide the real cause.
+pub(crate) fn decode_console_bytes(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    use windows_sys::Win32::Globalization::{GetOEMCP, MultiByteToWideChar};
+    // SAFETY: GetOEMCP takes no args; MultiByteToWideChar with valid buffers.
+    unsafe {
+        let cp = GetOEMCP();
+        let len = MultiByteToWideChar(
+            cp,
+            0,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            std::ptr::null_mut(),
+            0,
+        );
+        if len <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut wide = vec![0u16; len as usize];
+        let written = MultiByteToWideChar(
+            cp,
+            0,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            wide.as_mut_ptr(),
+            len,
+        );
+        if written <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        String::from_utf16_lossy(&wide[..written as usize])
+    }
+}
+
+/// `tr_value` (the /TR command with its args) is passed as ONE argv element
+/// via normal quoting, so schtasks sees `"exe" --minimized` as a whole.
+/// A split raw_arg lets schtasks parse only the quoted exe and reject
+/// `--minimized` as an unknown switch.
 fn schtasks_output(
     before: &[&str],
-    raw_tr: Option<String>,
+    tr_value: Option<String>,
     after: &[&str],
 ) -> Result<std::process::Output, String> {
     let before: Vec<String> = before.iter().map(|s| s.to_string()).collect();
@@ -605,8 +646,8 @@ fn schtasks_output(
     std::thread::spawn(move || {
         let mut cmd = std::process::Command::new("schtasks");
         cmd.args(&before);
-        if let Some(tr) = raw_tr {
-            cmd.raw_arg(tr);
+        if let Some(tr) = tr_value {
+            cmd.arg(tr);
         }
         cmd.args(&after);
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -669,9 +710,9 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
         if exe_str.ends_with('\\') {
             return Err("exe path must not end with backslash".to_string());
         }
-        // Use raw_arg to pass the /TR value exactly as "\"<exe>\" --minimized"
-        // without Command's extra quoting; exe is already validated to contain
-        // no double quotes, so wrapping in quotes is safe.
+        // The /TR value (quoted exe + args) goes through normal arg quoting
+        // so schtasks receives it as a single value; exe is already validated
+        // to contain no double quotes, so wrapping in quotes is safe.
         // Bounded by schtasks_output timeout so a hung Task Scheduler cannot freeze the UI.
         let tr = format!("\"{}\" --minimized", exe_str);
         schtasks_output(
@@ -687,9 +728,10 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
-    // schtasks errors may be non-UTF8 (locale/OEM codepage); use lossy conversion.
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    // schtasks errors follow the OEM codepage (cp950 on zh-TW); decode
+    // accordingly so the message is readable instead of mojibake.
+    let stderr = decode_console_bytes(&output.stderr);
+    let stdout = decode_console_bytes(&output.stdout);
     let detail = if !stderr.trim().is_empty() {
         stderr.trim().to_string()
     } else if !stdout.trim().is_empty() {
