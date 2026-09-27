@@ -3,8 +3,68 @@
 use tracing::debug;
 
 use super::bios::BiosDefaults;
-use super::ffi::{PawnioHandle, exec_ioctl, open_handle};
+use super::ffi::{IoctlFailure, PawnioHandle, exec_ioctl, open_handle};
 use super::modules::{load_intel_mchbar_blob, load_intel_msr_blob};
+
+/// A register that CPU power limits are read from or written to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerRegister {
+    /// MSR 0x606, the RAPL power and time unit registers.
+    Units,
+    /// MSR 0x610, the static PL1/PL2 limits.
+    Limits,
+    /// MCHBAR+0x59A0, the package limit mirror.
+    LimitsMirror,
+}
+
+/// Why the CPU Power card has no live values.
+///
+/// Split by cause because the two need different follow-up: a setup failure
+/// means PawnIO, its DLL or a module blob is missing, while a read failure
+/// means everything is installed but the register would not answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuPowerUnavailable {
+    /// PawnIO could not be brought up. The payload is the underlying reason.
+    Setup(&'static str),
+    /// A register read did not produce a usable value.
+    Read {
+        register: PowerRegister,
+        reason: IoctlFailure,
+    },
+}
+
+impl CpuPowerUnavailable {
+    /// One line for the card, naming the register and why it would not answer.
+    ///
+    /// This deliberately does not tell the user what to do: the card already
+    /// offers Install PawnIO or Download Modules based on the installation
+    /// state, so the line only has to say what went wrong.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Setup(setup) => setup,
+            Self::Read { register, reason } => match (register, reason) {
+                (PowerRegister::Units, IoctlFailure::Failed) => {
+                    "PawnIO rejected the read of MSR 0x606 (RAPL units)"
+                }
+                (PowerRegister::Units, IoctlFailure::ShortRead) => {
+                    "MSR 0x606 read returned the wrong length, the IntelMSR module may be out of date"
+                }
+                (PowerRegister::Limits, IoctlFailure::Failed) => {
+                    "PawnIO rejected the read of MSR 0x610 (PL1/PL2)"
+                }
+                (PowerRegister::Limits, IoctlFailure::ShortRead) => {
+                    "MSR 0x610 read returned the wrong length, the IntelMSR module may be out of date"
+                }
+                (PowerRegister::LimitsMirror, IoctlFailure::Failed) => {
+                    "PawnIO rejected the read of MCHBAR+0x59A0 (PL1/PL2)"
+                }
+                (PowerRegister::LimitsMirror, IoctlFailure::ShortRead) => {
+                    "MCHBAR+0x59A0 read returned the wrong length, the IntelMCHBAR module may be out of date"
+                }
+            },
+        }
+    }
+}
 
 /// CPU power limit information.
 #[derive(Debug, Clone, Copy, Default)]
@@ -28,7 +88,8 @@ pub struct CpuPowerInfo {
     pub power_unit: f64,
     pub time_unit: f64,
     pub available: bool,
-    pub error_msg: Option<&'static str>,
+    /// Set whenever `available` is false; the UI renders `message()` from it.
+    pub unavailable: Option<CpuPowerUnavailable>,
 }
 
 impl CpuPowerInfo {
@@ -706,6 +767,103 @@ mod tests {
         // and time-window bits must not leak into the value.
         let enc = encode_power_limit(28.0, true, true, POWER_UNIT, 5, 2);
         assert!((encoded_watts(enc, POWER_UNIT) - 28.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unavailable_message_names_the_register_and_the_reason() {
+        use super::{IoctlFailure, PowerRegister};
+        for register in [
+            PowerRegister::Units,
+            PowerRegister::Limits,
+            PowerRegister::LimitsMirror,
+        ] {
+            let failed = CpuPowerUnavailable::Read {
+                register,
+                reason: IoctlFailure::Failed,
+            };
+            let short = CpuPowerUnavailable::Read {
+                register,
+                reason: IoctlFailure::ShortRead,
+            };
+            assert_ne!(
+                failed.message(),
+                short.message(),
+                "{register:?} must not report both failures the same way"
+            );
+            // A short read is a module-version problem, so the message has to
+            // say so rather than blaming the driver.
+            assert!(
+                short.message().contains("module"),
+                "short read for {register:?} should point at the module: {}",
+                short.message()
+            );
+            assert!(
+                !short.message().contains("rejected"),
+                "short read for {register:?} is not a rejection: {}",
+                short.message()
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_message_passes_a_setup_reason_through() {
+        assert_eq!(
+            CpuPowerUnavailable::Setup("IntelMSR module blob missing").message(),
+            "IntelMSR module blob missing"
+        );
+    }
+
+    #[test]
+    fn unavailable_messages_are_distinct() {
+        use super::{IoctlFailure, PowerRegister};
+        let all = [
+            CpuPowerUnavailable::Setup("a"),
+            CpuPowerUnavailable::Read {
+                register: PowerRegister::Units,
+                reason: IoctlFailure::Failed,
+            },
+            CpuPowerUnavailable::Read {
+                register: PowerRegister::Units,
+                reason: IoctlFailure::ShortRead,
+            },
+            CpuPowerUnavailable::Read {
+                register: PowerRegister::Limits,
+                reason: IoctlFailure::Failed,
+            },
+            CpuPowerUnavailable::Read {
+                register: PowerRegister::Limits,
+                reason: IoctlFailure::ShortRead,
+            },
+            CpuPowerUnavailable::Read {
+                register: PowerRegister::LimitsMirror,
+                reason: IoctlFailure::Failed,
+            },
+            CpuPowerUnavailable::Read {
+                register: PowerRegister::LimitsMirror,
+                reason: IoctlFailure::ShortRead,
+            },
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a.message(), b.message(), "cases {i} and {j} collide");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_always_carries_a_reason() {
+        // The card falls back to its own wording when this is None, so an
+        // unavailable result with no reason is a state the UI cannot explain.
+        // On a machine without PawnIO this is the path that runs.
+        let info = crate::cpu_power::read_cpu_power();
+        if !info.available {
+            assert!(
+                info.unavailable.is_some(),
+                "unavailable CPU power must carry a reason"
+            );
+        }
     }
 
     #[test]

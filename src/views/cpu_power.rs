@@ -46,7 +46,10 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     let info = &snap.cpu_power;
 
     if !info.available {
-        let msg = info.error_msg.unwrap_or("PawnIO driver not available");
+        let msg = info
+            .unavailable
+            .map(crate::cpu_power::CpuPowerUnavailable::message)
+            .unwrap_or("PawnIO driver not available");
         content =
             content.push(
                 text(msg)

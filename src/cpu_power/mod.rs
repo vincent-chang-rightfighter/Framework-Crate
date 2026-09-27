@@ -10,7 +10,9 @@ pub use ffi::{
     install_pawnio, invalidate_pawnio_version, is_pawnio_installed, pawnio_version, reset_dll_fns,
     update_pawnio, update_pawnio_modules,
 };
-pub use limits::{CpuPowerInfo, write_bios_defaults, write_msr_pl1_pl2_public};
+pub use limits::{
+    CpuPowerInfo, CpuPowerUnavailable, write_bios_defaults, write_msr_pl1_pl2_public,
+};
 pub use modules::{
     download_and_extract_modules, modules_downloaded, open_modules_dir, pawnio_modules_version,
     redetect_modules,

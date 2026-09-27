@@ -496,13 +496,29 @@ pub(super) fn open_handle(blob: &[u8]) -> Result<PawnioHandle, &'static str> {
 }
 
 /// Executes named IOCTL in loaded module.
+/// Why a PawnIO module call did not produce a value.
+///
+/// Kept as a type rather than a message string because the two cases call for
+/// different advice: a rejected call usually means the module or driver is not
+/// what the caller expected, while a short read means the module answered with
+/// a different buffer size than requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoctlFailure {
+    /// The module returned a non-zero HRESULT.
+    Failed,
+    /// The module succeeded but wrote fewer bytes than requested, so the output
+    /// buffer is stale and must not be used.
+    ShortRead,
+}
+
+/// Executes a PawnIO module function through the open handle.
 pub(super) fn exec_ioctl(
     handle: &PawnioHandle,
     name: &str,
     inputs: &[u64],
     outputs: &mut [u64],
-) -> Result<usize, &'static str> {
-    let name_c = CString::new(name).map_err(|_| "CString failed")?;
+) -> Result<usize, IoctlFailure> {
+    let name_c = CString::new(name).map_err(|_| IoctlFailure::Failed)?;
     let mut return_size: usize = 0;
 
     let hr = unsafe {
@@ -518,11 +534,11 @@ pub(super) fn exec_ioctl(
     };
 
     if hr != 0 {
-        return Err("ioctl failed");
+        return Err(IoctlFailure::Failed);
     }
     // Short write leaves buffer stale; must not be treated as valid.
     if return_size != outputs.len() {
-        return Err("ioctl short read");
+        return Err(IoctlFailure::ShortRead);
     }
     Ok(return_size)
 }
