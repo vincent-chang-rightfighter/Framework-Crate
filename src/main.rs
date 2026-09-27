@@ -59,20 +59,49 @@ impl iced::Executor for SmallTokioExecutor {
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const LOG_KEEP: usize = 3;
 
+/// Log writes to wait before the first reopen retry, and the base for the
+/// doubling backoff after that.
+const REOPEN_RETRY_BASE: u32 = 16;
+
+/// Writes to wait before retrying a reopen that has already failed
+/// `reopen_failures` times.
+///
+/// Doubling keeps the cost bounded: a log that can never be reopened costs
+/// O(log n) filesystem calls over the process lifetime rather than three per
+/// log line.
+fn reopen_retry_threshold(reopen_failures: u32) -> u64 {
+    // Doubling with saturating_mul rather than a shift: `checked_shl` only
+    // rejects a shift of 64 or more, so `16u64.checked_shl(60)` still returns
+    // Some(0) because 2^64 truncates. That would turn a long outage into a
+    // busy retry loop, which is the exact failure this backoff exists to avoid.
+    let mut wait = REOPEN_RETRY_BASE as u64;
+    for _ in 0..reopen_failures.min(64) {
+        wait = wait.saturating_mul(2);
+    }
+    wait
+}
+
 /// Append-only log file that rotates itself once it grows past `MAX_LOG_BYTES`.
 ///
 /// The handle is reopened on rotation because Windows cannot rename a file that
 /// is still open, so a rename-based rotation would silently fail for as long as
-/// tracing holds the file.
+/// tracing holds the file. Dropping the handle first means a failure in between
+/// leaves the sink without one, so `push` retries the reopen with backoff
+/// instead of staying silent until the process exits.
 struct LogSink {
     path: std::path::PathBuf,
     state: std::sync::Mutex<LogState>,
 }
 
 struct LogState {
-    /// `None` while the handle is closed for rotation.
+    /// `None` while the handle is closed for rotation, and after a reopen that
+    /// failed.
     file: Option<std::fs::File>,
     written: u64,
+    /// Consecutive failed reopen attempts; drives the retry backoff.
+    reopen_failures: u32,
+    /// Log writes seen since the last failed reopen.
+    writes_since_failure: u32,
 }
 
 impl LogSink {
@@ -85,6 +114,8 @@ impl LogSink {
             state: std::sync::Mutex::new(LogState {
                 file: None,
                 written: 0,
+                reopen_failures: 0,
+                writes_since_failure: 0,
             }),
         };
         // Scoped so the guard is released before `sink` is moved.
@@ -108,6 +139,10 @@ impl LogSink {
         state.file = None;
         if state.written > MAX_LOG_BYTES {
             rotate_files(&self.path);
+            // The previous contents are now in app.log.1. Clearing the counter
+            // stops a reopen that keeps failing from rotating the same file
+            // again on every retry.
+            state.written = 0;
         }
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -122,6 +157,23 @@ impl LogSink {
     fn push(&self, buf: &[u8]) -> std::io::Result<usize> {
         use std::io::Write;
         let mut state = self.lock()?;
+        if state.file.is_none() {
+            // The handle is gone: either mid-rotation, or a previous reopen
+            // failed because the disk filled up or something held the file. A
+            // logon-scheduled run is exactly when that is worth recovering,
+            // because stderr is discarded and there is nowhere else to look.
+            state.writes_since_failure = state.writes_since_failure.saturating_add(1);
+            if u64::from(state.writes_since_failure) < reopen_retry_threshold(state.reopen_failures)
+            {
+                return Err(std::io::Error::other("log file unavailable"));
+            }
+            state.writes_since_failure = 0;
+            if let Err(e) = self.reopen(&mut state) {
+                state.reopen_failures = state.reopen_failures.saturating_add(1);
+                return Err(e);
+            }
+            state.reopen_failures = 0;
+        }
         let file = state
             .file
             .as_mut()
@@ -417,6 +469,212 @@ mod tests {
                 .expect("read")
                 .contains("after rotation"),
             "sink must keep writing to the reopened file"
+        );
+    }
+
+    #[test]
+    fn reopen_retry_threshold_doubles_per_failure() {
+        let base = REOPEN_RETRY_BASE as u64;
+        assert_eq!(reopen_retry_threshold(0), base);
+        assert_eq!(reopen_retry_threshold(1), base * 2);
+        assert_eq!(reopen_retry_threshold(2), base * 4);
+        assert_eq!(reopen_retry_threshold(5), base * 32);
+    }
+
+    #[test]
+    fn reopen_retry_threshold_never_shrinks_or_wraps() {
+        // A shift that would overflow must saturate rather than wrap to a small
+        // value, which would turn a long outage into a busy retry loop.
+        assert!(reopen_retry_threshold(31) > reopen_retry_threshold(30));
+        assert!(reopen_retry_threshold(32) > reopen_retry_threshold(31));
+        assert_eq!(reopen_retry_threshold(u32::MAX), u64::MAX);
+        for n in 0..64 {
+            assert!(
+                reopen_retry_threshold(n) >= REOPEN_RETRY_BASE as u64,
+                "threshold dropped below the base at {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn sink_recovers_after_a_failed_reopen() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("app.log");
+        let sink = LogSink::open(path.clone()).expect("open sink");
+
+        writeln!(&sink, "before").expect("write");
+        // Simulate the reopen that rotation depends on failing: the handle is
+        // dropped and the reopen cannot open the file back up.
+        {
+            let mut state = sink.lock().expect("lock");
+            state.file = None;
+            state.written = 0;
+            state.reopen_failures = 0;
+            state.writes_since_failure = 0;
+        }
+
+        // Writes 1..=REOPEN_RETRY_BASE-1 report the sink unavailable, and the
+        // REOPEN_RETRY_BASE'th one reopens, because the retry fires when the
+        // counter reaches the threshold rather than exceeds it.
+        let mut sink_ref = &sink;
+        for i in 0..REOPEN_RETRY_BASE - 1 {
+            let err = write!(sink_ref, "lost {i}").expect_err("should be unavailable");
+            assert_eq!(err.to_string(), "log file unavailable");
+        }
+        writeln!(sink_ref, "recovered").expect("write after backoff");
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("read")
+                .contains("recovered"),
+            "sink must recover once the reopen is retried"
+        );
+        // A successful reopen clears the failure history, so the next outage
+        // starts from the base window again rather than an ever-growing one.
+        assert_eq!(
+            sink.lock().expect("lock").reopen_failures,
+            0,
+            "success must reset the backoff"
+        );
+    }
+
+    #[test]
+    fn sink_backs_off_instead_of_retrying_every_write() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sink = LogSink::open(dir.path().join("app.log")).expect("open sink");
+        {
+            let mut state = sink.lock().expect("lock");
+            state.file = None;
+            // Pretend several reopen attempts have already failed.
+            state.reopen_failures = 3;
+            state.writes_since_failure = 0;
+        }
+        let threshold = reopen_retry_threshold(3);
+        let mut sink_ref = &sink;
+        for _ in 0..threshold - 1 {
+            write!(sink_ref, "x").expect_err("should still be backing off");
+        }
+        writeln!(sink_ref, "done").expect("retried on the threshold write");
+    }
+
+    #[test]
+    fn sink_backoff_grows_after_repeated_reopen_failures() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("app.log");
+        let sink = LogSink::open(path.clone()).expect("open sink");
+
+        // Drop the handle first: Windows opens with FILE_SHARE_DELETE, so
+        // removing the file would otherwise succeed while the sink keeps
+        // writing to the unlinked handle.
+        {
+            let mut state = sink.lock().expect("lock");
+            state.file = None;
+        }
+        // Replace the log with a directory: reopening the path now fails
+        // because the name is taken by something that is not a file.
+        std::fs::remove_file(&path).expect("remove log");
+        std::fs::create_dir(&path).expect("create dir in its place");
+
+        let mut sink_ref = &sink;
+        // First window: writes 1..=REOPEN_RETRY_BASE-1 are dropped, the
+        // REOPEN_RETRY_BASE'th attempts the reopen and fails.
+        for _ in 0..REOPEN_RETRY_BASE - 1 {
+            write!(sink_ref, "x").expect_err("backing off");
+        }
+        write!(sink_ref, "x").expect_err("first reopen attempt fails");
+        // The failure has to be counted, otherwise the next window would still
+        // be REOPEN_RETRY_BASE long. The error alone cannot show this: a
+        // retry that fires too early also returns Err.
+        assert_eq!(
+            sink.lock().expect("lock").reopen_failures,
+            1,
+            "a failed reopen must be counted"
+        );
+
+        // The next window must be twice as long, which only happens if the
+        // failure was counted. Otherwise the sink retries on every 16th write.
+        let second = reopen_retry_threshold(1);
+        assert_eq!(second, (REOPEN_RETRY_BASE as u64) * 2);
+        for _ in 0..second - 1 {
+            write!(sink_ref, "x").expect_err("still backing off after the first failure");
+        }
+        write!(sink_ref, "x").expect_err("second reopen attempt fails");
+        assert_eq!(
+            sink.lock().expect("lock").reopen_failures,
+            2,
+            "each failed reopen must be counted"
+        );
+
+        // And the window doubles again rather than resetting.
+        assert_eq!(reopen_retry_threshold(2), (REOPEN_RETRY_BASE as u64) * 4);
+    }
+
+    #[test]
+    fn reopen_clears_the_size_counter_after_rotating() {
+        // Point the sink at a log whose parent directory is then removed. Both
+        // the rotation and the reopen fail from there on, deterministically:
+        // creating a file needs its parent, and renaming needs the entry to go.
+        // reopen must still clear `written`, or every later retry would think
+        // the log is still oversized and shift the backups again.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parent = dir.path().join("gone");
+        std::fs::create_dir(&parent).expect("make parent");
+        let sink = LogSink::open(parent.join("app.log")).expect("open sink");
+        // Release the handle before removing the tree, otherwise Windows keeps
+        // the directory alive.
+        {
+            let mut state = sink.lock().expect("lock");
+            state.file = None;
+        }
+        std::fs::remove_dir_all(&parent).expect("remove parent");
+
+        let mut state = sink.lock().expect("lock");
+        state.written = MAX_LOG_BYTES + 1;
+
+        let err = sink.reopen(&mut state);
+        assert!(err.is_err(), "reopen must fail once the parent is gone");
+        assert_eq!(
+            state.written, 0,
+            "a rotated log must not look oversized again"
+        );
+        assert!(state.file.is_none(), "a failed reopen leaves no handle");
+    }
+
+    #[test]
+    fn sink_resets_the_backoff_after_a_reopen_eventually_succeeds() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("app.log");
+        let sink = LogSink::open(path.clone()).expect("open sink");
+        {
+            let mut state = sink.lock().expect("lock");
+            state.file = None;
+        }
+        // Occupy the name with a directory so the reopen cannot open it.
+        std::fs::remove_file(&path).expect("remove log");
+        std::fs::create_dir(&path).expect("create dir in its place");
+
+        let mut sink_ref = &sink;
+        for _ in 0..REOPEN_RETRY_BASE - 1 {
+            write!(sink_ref, "x").expect_err("backing off");
+        }
+        write!(sink_ref, "x").expect_err("reopen fails while blocked");
+        assert_eq!(sink.lock().expect("lock").reopen_failures, 1);
+
+        // Free the name. The next window is 32 writes because the failure was
+        // counted; the last of those retries reopens successfully and must
+        // clear the history so a later outage starts from the base window.
+        std::fs::remove_dir(&path).expect("remove dir");
+        for _ in 0..reopen_retry_threshold(1) - 1 {
+            write!(sink_ref, "x").expect_err("still backing off");
+        }
+        writeln!(sink_ref, "back").expect("reopen now succeeds");
+        assert_eq!(
+            sink.lock().expect("lock").reopen_failures,
+            0,
+            "a successful reopen must clear the failure history"
         );
     }
 
