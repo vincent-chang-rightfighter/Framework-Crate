@@ -55,6 +55,9 @@ impl iced::Executor for SmallTokioExecutor {
     }
 }
 
+/// Lifecycle log for events that happen outside the tracing subscriber.
+/// Task Scheduler discards stderr, so anything printed there is lost exactly
+/// when a logon launch misbehaves; this is the only record of such failures.
 fn fallback_log(msg: &str) {
     // windows_subsystem hides stderr when double-clicked; also write to file with rotation
     eprintln!("{}", msg);
@@ -149,7 +152,10 @@ fn acquire_single_instance(minimized: bool) -> Option<system_info::SingleInstanc
     match system_info::SingleInstanceGuard::acquire("FrameworkCrateSingleInstance") {
         Ok(guard) => Some(guard),
         Err(()) => {
-            fallback_log("Framework Crate is already running.");
+            fallback_log(&format!(
+                "startup: another instance holds the single-instance mutex, exiting (pid {})",
+                std::process::id()
+            ));
             // Only foreground existing window on manual launch; schtasks fires on unlock so stay silent.
             if !minimized {
                 // Signal running instance to restore; second process cannot restore parked window itself.
@@ -162,6 +168,14 @@ fn acquire_single_instance(minimized: bool) -> Option<system_info::SingleInstanc
 
 fn main() {
     let minimized = std::env::args().any(|a| a == "--minimized");
+    // Log the launch itself: this is the first thing a user checks when a
+    // Task Scheduler start seems to have done nothing.
+    fallback_log(&format!(
+        "startup: pid={} minimized={} cwd={:?}",
+        std::process::id(),
+        minimized,
+        std::env::current_dir().ok()
+    ));
     // Hold guard for process lifetime.
     let _single_instance = acquire_single_instance(minimized);
 
@@ -182,6 +196,7 @@ fn main() {
             Err(e) => {
                 // Run without icon instead of panicking before UI shows.
                 tracing::error!("Failed to load window icon: {}", e);
+                fallback_log(&format!("startup: failed to load window icon: {e}"));
                 None
             }
         };
@@ -194,7 +209,7 @@ fn main() {
         iced::Theme::Dark
     }
 
-    iced::application(move || App::new(minimized), App::update, App::view)
+    let run_result = iced::application(move || App::new(minimized), App::update, App::view)
         .title(app_title)
         .subscription(App::subscription)
         .theme(app_theme)
@@ -208,11 +223,16 @@ fn main() {
             exit_on_close_request: false,
             ..iced::window::Settings::default()
         })
-        .run()
-        .unwrap_or_else(|e| {
+        .run();
+
+    match run_result {
+        Ok(()) => fallback_log("shutdown: event loop returned normally"),
+        Err(e) => {
+            fallback_log(&format!("shutdown: event loop failed: {e}"));
             eprintln!("Failed to start application: {}", e);
             std::process::exit(1);
-        });
+        }
+    }
 }
 
 #[cfg(test)]

@@ -586,7 +586,7 @@ impl SingleInstanceGuard {
 
 /// Whether app is registered to launch at startup via scheduled task.
 pub fn startup_launch_enabled() -> bool {
-    schtasks_output(&["/Query", "/TN", STARTUP_TASK_NAME], None, &[])
+    schtasks_output(&["/Query", "/TN", STARTUP_TASK_NAME])
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -631,25 +631,18 @@ pub(crate) fn decode_console_bytes(bytes: &[u8]) -> String {
     }
 }
 
-/// `tr_value` (the /TR command with its args) is passed as ONE argv element
-/// via normal quoting, so schtasks sees `"exe" --minimized` as a whole.
-/// A split raw_arg lets schtasks parse only the quoted exe and reject
-/// `--minimized` as an unknown switch.
-fn schtasks_output(
-    before: &[&str],
-    tr_value: Option<String>,
-    after: &[&str],
-) -> Result<std::process::Output, String> {
-    let before: Vec<String> = before.iter().map(|s| s.to_string()).collect();
-    let after: Vec<String> = after.iter().map(|s| s.to_string()).collect();
+/// Runs schtasks with a 5s timeout so a hung Task Scheduler service cannot
+/// freeze the UI thread (toggle handler) or delay startup.
+/// The task action is registered through `/XML`, so no argument value has to
+/// survive schtasks' own command-line re-parsing.
+fn schtasks_output(args: &[&str]) -> Result<std::process::Output, String> {
+    // Own the arguments so the worker thread is not tied to the caller's
+    // borrow; the thread outlives this function on timeout.
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut cmd = std::process::Command::new("schtasks");
-        cmd.args(&before);
-        if let Some(tr) = tr_value {
-            cmd.arg(tr);
-        }
-        cmd.args(&after);
+        cmd.args(&args);
         cmd.creation_flags(CREATE_NO_WINDOW);
         let _ = tx.send(cmd.output());
     });
@@ -658,23 +651,126 @@ fn schtasks_output(
         .map_err(|e| format!("failed to run schtasks: {e}"))
 }
 
+/// Escapes text for inclusion in the startup task XML.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Task Scheduler's `/XML` importer only accepts UTF-16. A UTF-8 file is
+/// rejected with a parse error that points at the XML declaration, so the
+/// document is encoded to UTF-16LE with a BOM here.
+fn utf16le_with_bom(s: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(s.len() * 2 + 2);
+    bytes.extend_from_slice(&[0xFF, 0xFE]);
+    for unit in s.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
+/// Builds the logon startup task XML. `schtasks.exe` cannot express power or
+/// retry policy, so the task is registered from XML to apply them in one
+/// atomic operation, instead of a follow-up PowerShell call that can fail
+/// silently and leave the task refusing to start on battery.
+/// Settings that matter for a long-lived tray app:
+/// - battery conditions cleared: schtasks defaults them to true, which makes a
+///   laptop on battery silently skip the task.
+/// - `ExecutionTimeLimit` `PT0S`: schtasks defaults to `PT72H`, which stops the
+///   tray app three days after logon and never restarts it.
+/// - `RestartOnFailure`: retry a transient startup failure instead of giving up.
+///
+/// Child element order follows the schema; Task Scheduler rejects a document
+/// whose `Settings` children are out of order.
+fn build_task_xml(command: &str, args: &str, user_id: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>Framework Crate</Author>
+    <Description>Launch Framework Crate minimized to the notification area at logon.</Description>
+  </RegistrationInfo>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+  </Settings>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{command}</Command>
+      <Arguments>{args}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#,
+        user = xml_escape(user_id),
+        command = xml_escape(command),
+        args = xml_escape(args),
+    )
+}
+
+/// Account for the task principal. Task Scheduler resolves `DOMAIN\user` to a
+/// SID while registering, so a later account rename does not break the task.
+fn current_user_id() -> Result<String, String> {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    if user.is_empty() {
+        return Err("cannot determine current user for startup task".to_string());
+    }
+    match std::env::var("USERDOMAIN").ok().filter(|d| !d.is_empty()) {
+        Some(domain) => Ok(format!("{domain}\\{user}")),
+        None => Ok(user),
+    }
+}
+
 /// Registers or removes Windows startup scheduled task (requires elevation for HIGHEST).
 pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     let output = if enabled {
         let exe = std::env::current_exe().map_err(|e| format!("cannot resolve exe path: {e}"))?;
         let exe_str = exe.to_str().ok_or("exe path is not valid UTF-8")?;
-        // Reject characters that would break schtasks command line or allow injection.
-        // schtasks /TR is parsed as a single command line; we wrap the exe in
-        // double quotes via raw_arg, so any embedded " would break out.
-        // extend blocklist to cover PowerShell/cmd metachars and enforce MAX_PATH.
-        const MAX_TR_LEN: usize = 260;
-        if exe_str.len() > MAX_TR_LEN {
-            return Err(format!(
-                "exe path too long ({} > {} chars), schtasks /TR would truncate",
-                exe_str.len(),
-                MAX_TR_LEN
-            ));
-        }
+        // Reject characters that would break the task XML or allow injection.
+        // The path is embedded as XML text and wrapped in quotes for the
+        // action Command, so quotes, cmd metacharacters and control characters
+        // are all rejected up front.
         if exe_str.contains('"')
             || exe_str.contains('\'')
             || exe_str.contains('&')
@@ -705,24 +801,42 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
         {
             return Err("exe path contains invalid unicode".to_string());
         }
-        // A trailing backslash before the closing quote would escape it
-        // (e.g. "C:\path\" --minimized" → the \" becomes an escaped quote).
+        // A trailing backslash would escape the closing quote of the action
+        // Command (e.g. "C:\path\" --minimized" → the \" becomes an escaped quote).
         if exe_str.ends_with('\\') {
             return Err("exe path must not end with backslash".to_string());
         }
-        // The /TR value (quoted exe + args) goes through normal arg quoting
-        // so schtasks receives it as a single value; exe is already validated
-        // to contain no double quotes, so wrapping in quotes is safe.
+        // Command and Arguments are separate XML elements, so the exe path is
+        // never re-parsed as a command line and cannot split into extra
+        // arguments the way a schtasks /TR value did.
         // Bounded by schtasks_output timeout so a hung Task Scheduler cannot freeze the UI.
-        let tr = format!("\"{}\" --minimized", exe_str);
-        schtasks_output(
-            &["/Create", "/TN", STARTUP_TASK_NAME, "/TR"],
-            Some(tr),
-            &["/SC", "ONLOGON", "/RL", "HIGHEST", "/F"],
-        )
-        .map_err(|e| format!("failed to run schtasks: {e}"))?
+        let xml = build_task_xml(
+            &format!("\"{exe_str}\""),
+            "--minimized",
+            &current_user_id()?,
+        );
+        // Unique per process so a concurrent toggle cannot clobber the file
+        // another instance is importing.
+        let xml_path = std::env::temp_dir()
+            .join(format!("framework-crate-task-{}.xml", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(&xml_path, utf16le_with_bom(&xml))
+            .map_err(|e| format!("cannot write startup task xml: {e}"))?;
+        let created =
+            schtasks_output(&["/Create", "/TN", STARTUP_TASK_NAME, "/XML", &xml_path, "/F"]);
+        // Remove the temp document whether or not registration succeeded.
+        let _ = std::fs::remove_file(&xml_path);
+        let out = created.map_err(|e| format!("failed to run schtasks: {e}"))?;
+        if out.status.success() && !startup_launch_enabled() {
+            // Registration reported success but the task is not queryable, so
+            // startup would silently not happen. Surface it instead of
+            // returning a green toggle.
+            return Err("task was created but cannot be queried; startup may not work".to_string());
+        }
+        out
     } else {
-        schtasks_output(&["/Delete", "/TN", STARTUP_TASK_NAME, "/F"], None, &[])
+        schtasks_output(&["/Delete", "/TN", STARTUP_TASK_NAME, "/F"])
             .map_err(|e| format!("failed to run schtasks: {e}"))?
     };
     if output.status.success() {
@@ -1075,6 +1189,50 @@ mod tests {
     #[test]
     fn is_intel_cpu_does_not_panic() {
         let _ = super::is_intel_cpu();
+    }
+
+    #[test]
+    fn task_xml_sets_startup_critical_settings() {
+        let xml = build_task_xml("\"C:\\app\\framework-crate.exe\"", "--minimized", "DOM\\u");
+
+        // schtasks defaults would silently skip a battery-powered logon.
+        assert!(xml.contains("<DisallowStartIfOnBatteries>false<"));
+        assert!(xml.contains("<StopIfGoingOnBatteries>false<"));
+        // PT72H would stop the tray app three days after logon.
+        assert!(xml.contains("<ExecutionTimeLimit>PT0S<"));
+        assert!(xml.contains("<RestartOnFailure>"));
+        assert!(xml.contains("<RunLevel>HighestAvailable<"));
+        assert!(xml.contains("<LogonType>InteractiveToken<"));
+        // Command and Arguments stay separate so the path is never re-parsed.
+        assert!(xml.contains("<Command>&quot;C:\\app\\framework-crate.exe&quot;<"));
+        assert!(xml.contains("<Arguments>--minimized<"));
+        assert!(xml.contains("<UserId>DOM\\u<"));
+    }
+
+    #[test]
+    fn task_xml_escapes_metacharacters() {
+        assert_eq!(
+            xml_escape("a&b<c>d\"e'f"),
+            "a&amp;b&lt;c&gt;d&quot;e&apos;f"
+        );
+        let xml = build_task_xml("\"C:\\a&b\\app.exe\"", "--minimized", "D&u");
+        assert!(xml.contains("<UserId>D&amp;u<"));
+        assert!(!xml.contains("<UserId>D&u<"));
+    }
+
+    #[test]
+    fn task_xml_encoding_has_utf16le_bom() {
+        let bytes = utf16le_with_bom("<?xml version=\"1.0\" encoding=\"UTF-16\"?>");
+        // schtasks rejects a UTF-8 document with a parse error on the declaration.
+        assert_eq!(&bytes[..2], &[0xFF, 0xFE]);
+        let text = String::from_utf16(
+            &bytes[2..]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect::<Vec<u16>>(),
+        )
+        .expect("valid UTF-16");
+        assert_eq!(text, "<?xml version=\"1.0\" encoding=\"UTF-16\"?>");
     }
 
     #[test]
