@@ -350,7 +350,7 @@ pub fn write_msr_pl1_pl2_public(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn write_mmio_pl1_pl2_public(
+fn write_mmio_pl1_pl2_public(
     pl1_watts: f64,
     pl1_enabled: bool,
     pl1_clamped: bool,

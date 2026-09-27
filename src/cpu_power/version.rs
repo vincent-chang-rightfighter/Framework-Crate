@@ -96,7 +96,7 @@ pub fn invalidate_pawnio_version() {
 /// Cached Modules version display string; cleared after successful download.
 static MODULES_VERSION: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
 
-pub fn invalidate_modules_version() {
+pub(super) fn invalidate_modules_version() {
     *MODULES_VERSION.write() = None;
 }
 

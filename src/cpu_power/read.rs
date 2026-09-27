@@ -7,7 +7,7 @@ use super::modules::{load_intel_mchbar_blob, load_intel_msr_blob};
 use super::{exec_ioctl, open_handle};
 
 /// Reads all CPU power info via PawnIO modules.
-pub fn read_cpu_power() -> CpuPowerInfo {
+pub(super) fn read_cpu_power() -> CpuPowerInfo {
     let mut info = CpuPowerInfo::default();
 
     // Load handles independently; failure of one does not discard the other.

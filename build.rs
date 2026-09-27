@@ -89,6 +89,18 @@ fn main() {
     let info = reader
         .next_frame(&mut buf)
         .expect("Failed to decode PNG frame");
+    // Only 8-bit images are handled below. info.bit_depth is the *output* depth,
+    // and the png crate reports ColorType::Rgb for 16-bit RGB too, where a pixel
+    // is 6 bytes rather than 3. The expansion below would then run at double the
+    // pixel count and emit a garbled icon instead of failing the build.
+    // Interlaced input needs no check: next_frame loops every Adam7 pass and
+    // expands them into the buffer itself.
+    assert_eq!(
+        info.bit_depth,
+        png::BitDepth::Eight,
+        "app.png must be 8-bit, got {:?}",
+        info.bit_depth
+    );
     // gracefully handle non-RGBA (e.g. RGB) by expanding to RGBA instead of assert-failing build
     let buf = if info.color_type != png::ColorType::Rgba {
         if info.color_type == png::ColorType::Rgb {
@@ -108,6 +120,14 @@ fn main() {
     } else {
         buf
     };
+    // Catches any mismatch between the decoded layout and the width/height that
+    // gets written into the generated constants.
+    assert_eq!(
+        buf.len(),
+        (info.width * info.height * 4) as usize,
+        "app.png decoded to {} bytes, expected width*height*4",
+        buf.len()
+    );
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("icon_rgba.rs");

@@ -10,23 +10,16 @@ pub use bios::{BiosDefaults, publish_ac_snapshot, read_ac_present};
 pub use ffi::{
     install_pawnio, is_pawnio_installed, reset_dll_fns, update_pawnio, update_pawnio_modules,
 };
-// write_mmio_pl1_pl2_public was already unreferenced before the split; it is
-// re-exported to keep the module surface unchanged rather than dropped.
-#[allow(unused_imports)]
-pub use limits::{
-    CpuPowerInfo, write_bios_defaults, write_mmio_pl1_pl2_public, write_msr_pl1_pl2_public,
-};
+pub use limits::{CpuPowerInfo, write_bios_defaults, write_msr_pl1_pl2_public};
 pub use modules::{
     download_and_extract_modules, modules_downloaded, open_modules_dir, redetect_modules,
 };
-pub use read::read_cpu_power;
-pub use version::{
-    invalidate_modules_version, invalidate_pawnio_version, pawnio_modules_version, pawnio_version,
-};
+pub use version::{invalidate_pawnio_version, pawnio_modules_version, pawnio_version};
 
 use bios::{bios_defaults_file_exists, load_persisted_bios_defaults, persist_bios_defaults};
 use ffi::{PawnioHandle, exec_ioctl, open_handle, resolved_dll_path};
 use limits::PowerLimitParams;
+use read::read_cpu_power;
 use sync::SyncThread;
 
 use std::sync::Arc;
@@ -280,22 +273,27 @@ impl CpuPowerState {
     pub(crate) fn desired_sync_params(&self) -> Option<PowerLimitParams> {
         *self.desired_sync.read()
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn clear_desired_sync(&self) {
-        *self.desired_sync.write() = None;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // Exercises the start_sync/stop_sync locking path: the calls must serialize
+    // cleanly with no panic and no duplicate live threads.
+    //
+    // Ignored by default because it is not hermetic. With PawnIO installed,
+    // start_sync opens a real MSR handle and the sync thread re-asserts
+    // PL1/PL2 against the host CPU every 250ms until stop_sync, so a plain
+    // `cargo test` would rewrite the machine's power limits as a side effect.
+    //
+    // The assertions only carry weight on a machine where start_sync actually
+    // succeeds; without PawnIO every call returns Err and the state stays at
+    // its default, so they hold trivially. Run it deliberately with:
+    //     cargo test -- --ignored concurrent_start_stop_sync_is_safe
     #[test]
+    #[ignore = "writes real PL1/PL2 to the host CPU through PawnIO"]
     fn concurrent_start_stop_sync_is_safe() {
-        // Exercises the start_sync/stop_sync locking path reworked for #1.
-        // Without PawnIO present the sync cannot actually initialize, but the
-        // calls must serialize cleanly: no panic and no duplicate live threads.
         let state = CpuPowerState::default();
         let p = PowerLimitParams {
             pl1_watts: 15.0,

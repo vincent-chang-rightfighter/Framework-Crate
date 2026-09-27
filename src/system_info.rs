@@ -917,16 +917,14 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     } else if !stdout.trim().is_empty() {
         stdout.trim().to_string()
     } else {
-        format!("exit code {}", output.status.code().unwrap_or(-1))
-    };
-    if detail.is_empty() {
-        Err(format!(
-            "schtasks failed (exit code {})",
+        // schtasks reported nothing at all, so name the command and the code
+        // rather than surfacing a bare "exit code 1" with no context.
+        format!(
+            "schtasks failed with no output (exit code {})",
             output.status.code().unwrap_or(-1)
-        ))
-    } else {
-        Err(detail)
-    }
+        )
+    };
+    Err(detail)
 }
 
 // Tray icon functions: SAFETY hwnd is valid handle from FindWindowW/CreateWindowExW.

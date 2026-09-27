@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 
-use super::invalidate_modules_version;
+use super::version::invalidate_modules_version;
 
 pub(super) const MODULES_DIR_NAME: &str = "modules";
 /// Marker file recording which upstream tag the local bins came from.
