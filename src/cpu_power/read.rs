@@ -2,9 +2,9 @@
 
 use tracing::debug;
 
+use super::ffi::{exec_ioctl, open_handle};
 use super::limits::{CpuPowerInfo, decode_power_limit, decode_time_window};
 use super::modules::{load_intel_mchbar_blob, load_intel_msr_blob};
-use super::{exec_ioctl, open_handle};
 
 /// Reads all CPU power info via PawnIO modules.
 pub(super) fn read_cpu_power() -> CpuPowerInfo {

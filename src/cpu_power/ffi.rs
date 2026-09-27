@@ -8,7 +8,6 @@ use tracing::warn;
 use windows_sys::Win32::Foundation::HANDLE;
 
 use super::modules::{download_and_extract_modules, sha256_hex};
-use super::version::invalidate_pawnio_version;
 
 // PawnIOLib.dll function signatures (STDMETHODCALLTYPE / WINAPI - same on x64).
 type PawnioOpen = unsafe extern "system" fn(*mut HANDLE) -> i32; // HRESULT
@@ -147,6 +146,97 @@ pub fn install_pawnio() -> Result<(), String> {
 /// Checks if PawnIO DLL is installed.
 pub fn is_pawnio_installed() -> bool {
     resolved_dll_path().exists()
+}
+
+/// Cached PawnIO version, read from the DLL's version resource.
+static PAWNIO_VERSION: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
+
+/// Reads the PawnIO version from the DLL's VS_FIXEDFILEINFO resource.
+fn fetch_pawnio_version_from_dll() -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
+
+    let path: Vec<u16> = resolved_dll_path()
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mut dummy: u32 = 0;
+        let size = GetFileVersionInfoSizeW(path.as_ptr(), &mut dummy);
+        if size == 0 {
+            return None;
+        }
+
+        let mut buf: Vec<u8> = vec![0; size as usize];
+        if GetFileVersionInfoW(path.as_ptr(), 0, size, buf.as_mut_ptr() as *mut _) == 0 {
+            return None;
+        }
+
+        // Query root block for fixed file info.
+        let mut ffi_ptr: *mut std::ffi::c_void = ptr::null_mut();
+        let mut ffi_len: u32 = 0;
+        let root: Vec<u16> = std::ffi::OsStr::new("\\")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        if VerQueryValueW(
+            buf.as_ptr() as *const _,
+            root.as_ptr(),
+            &mut ffi_ptr,
+            &mut ffi_len,
+        ) == 0
+            || ffi_ptr.is_null()
+        {
+            return None;
+        }
+
+        // VS_FIXEDFILEINFO: need 24 bytes for product version at offsets 16/20.
+        if ffi_len < 24 {
+            return None;
+        }
+
+        // VS_FIXEDFILEINFO: product version at offsets 16 and 20.
+        let ffi = ffi_ptr as *const u8;
+        let ms = ptr::read_unaligned(ffi.add(16) as *const u32);
+        let ls = ptr::read_unaligned(ffi.add(20) as *const u32);
+
+        let major = (ms >> 16) & 0xFFFF;
+        let minor = ms & 0xFFFF;
+        let build = (ls >> 16) & 0xFFFF;
+        let patch = ls & 0xFFFF;
+        Some(format!("{}.{}.{}.{}", major, minor, build, patch))
+    }
+}
+
+/// Returns the installed PawnIO version, cached for the process lifetime.
+///
+/// `None` when PawnIO is not installed. A negative result is cached too, so
+/// that a machine without PawnIO does not re-resolve the DLL path on every
+/// view rebuild.
+pub fn pawnio_version() -> Option<String> {
+    {
+        let guard = PAWNIO_VERSION.read();
+        if let Some(ref v) = *guard {
+            return Some(v.clone());
+        }
+    }
+    let ver = if is_pawnio_installed() {
+        fetch_pawnio_version_from_dll().or_else(|| Some("installed".to_string()))
+    } else {
+        None
+    };
+    *PAWNIO_VERSION.write() = ver.clone();
+    ver
+}
+
+/// Clears the cached PawnIO version so the next call re-reads DLL metadata.
+pub fn invalidate_pawnio_version() {
+    *PAWNIO_VERSION.write() = None;
 }
 
 /// Updates PawnIO via winget upgrade, fallback to install.

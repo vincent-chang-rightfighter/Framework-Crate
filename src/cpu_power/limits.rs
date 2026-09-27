@@ -3,8 +3,8 @@
 use tracing::debug;
 
 use super::bios::BiosDefaults;
+use super::ffi::{PawnioHandle, exec_ioctl, open_handle};
 use super::modules::{load_intel_mchbar_blob, load_intel_msr_blob};
-use super::{PawnioHandle, exec_ioctl, open_handle};
 
 /// CPU power limit information.
 #[derive(Debug, Clone, Copy, Default)]

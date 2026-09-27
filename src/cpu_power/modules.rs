@@ -6,8 +6,6 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 
-use super::version::invalidate_modules_version;
-
 pub(super) const MODULES_DIR_NAME: &str = "modules";
 /// Marker file recording which upstream tag the local bins came from.
 pub(super) const MODULES_VERSION_FILE: &str = ".version";
@@ -45,6 +43,11 @@ fn tag_from_modules_url(url: &str) -> Option<String> {
 }
 
 /// Records which upstream tag the local bins came from.
+///
+/// Only the cached version display string is dropped. The blobs themselves
+/// are untouched, because this is also called from the self-heal path inside
+/// `pawnio_modules_version`, and forcing a re-read plus SHA-256 re-verification
+/// of both files from a getter would be a needless cost.
 pub(super) fn persist_local_modules_version(dir: &std::path::Path, tag: &str) {
     let path = dir.join(MODULES_VERSION_FILE);
     let _ = std::fs::remove_file(&path);
@@ -57,6 +60,11 @@ pub(super) fn persist_local_modules_version(dir: &std::path::Path, tag: &str) {
         let _ = writeln!(f, "{}", tag);
     }
     invalidate_modules_version();
+}
+
+/// Drops the cached Modules version display string.
+fn invalidate_modules_version() {
+    *MODULES_VERSION.write() = None;
 }
 
 /// Tries to fetch latest release asset download URL directly via GitHub API.
@@ -306,7 +314,6 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
     }
     cleanup(&staging, zip_tmp);
     invalidate_blob_cache();
-    invalidate_modules_version();
     Ok(())
 }
 
@@ -497,10 +504,55 @@ pub(super) static MSR_BLOB_CACHE: parking_lot::Mutex<Option<Arc<Vec<u8>>>> =
 pub(super) static MCHBAR_BLOB_CACHE: parking_lot::Mutex<Option<Arc<Vec<u8>>>> =
     parking_lot::Mutex::new(None);
 
+/// Cached Modules version display string. Lives next to the blob caches so
+/// that invalidating one invalidates all of them.
+static MODULES_VERSION: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
+
+/// Drops every cache derived from the modules directory.
+///
+/// The version string is derived from the same files as the blobs, so it is
+/// cleared here too. Callers used to have to remember a second call, and a
+/// fourth one would have silently missed it.
 pub(super) fn invalidate_blob_cache() {
     *MSR_BLOB_CACHE.lock() = None;
     *MCHBAR_BLOB_CACHE.lock() = None;
+    invalidate_modules_version();
     invalidate_modules_cache();
+}
+
+/// Returns the locally installed PawnIO Modules version for display:
+/// recorded tag, hash-inferred tag for unmarked bins, `unknown` for
+/// unrecognized manual installs, `not installed` when absent.
+///
+/// Self-heals: when the blobs match a known release hash but carry no version
+/// marker (a manual copy), the inferred tag is recorded so the number shows
+/// up next time. That is a write to the modules directory from a getter, which
+/// is why it happens at most once per process.
+pub fn pawnio_modules_version() -> String {
+    if let Some(v) = MODULES_VERSION.read().clone() {
+        return v;
+    }
+    let dir = modules_dir();
+    let v = if let Some(local) = local_modules_version() {
+        local
+    } else if dir.join("IntelMSR.bin").is_file() && dir.join("IntelMCHBAR.bin").is_file() {
+        let msr = std::fs::read(dir.join("IntelMSR.bin"))
+            .map(|b| sha256_hex(&b))
+            .unwrap_or_default();
+        let mchbar = std::fs::read(dir.join("IntelMCHBAR.bin"))
+            .map(|b| sha256_hex(&b))
+            .unwrap_or_default();
+        if msr == INTEL_MSR_SHA256 && mchbar == INTEL_MCHBAR_SHA256 {
+            persist_local_modules_version(&dir, LAST_KNOWN_MODULES_VERSION);
+            LAST_KNOWN_MODULES_VERSION.to_string()
+        } else {
+            "unknown (manual install?)".to_string()
+        }
+    } else {
+        "not installed".to_string()
+    };
+    *MODULES_VERSION.write() = Some(v.clone());
+    v
 }
 
 /// Opens modules directory in Explorer (the dir actually in use, else target).
@@ -517,7 +569,6 @@ pub fn open_modules_dir() -> Result<(), String> {
 /// Re-validates modules after manual placement; clears caches.
 pub fn redetect_modules() -> bool {
     invalidate_blob_cache();
-    invalidate_modules_version();
     modules_downloaded()
 }
 

@@ -4,20 +4,19 @@ mod limits;
 mod modules;
 mod read;
 mod sync;
-mod version;
 
 pub use bios::{BiosDefaults, publish_ac_snapshot, read_ac_present};
 pub use ffi::{
-    install_pawnio, is_pawnio_installed, reset_dll_fns, update_pawnio, update_pawnio_modules,
+    install_pawnio, invalidate_pawnio_version, is_pawnio_installed, pawnio_version, reset_dll_fns,
+    update_pawnio, update_pawnio_modules,
 };
 pub use limits::{CpuPowerInfo, write_bios_defaults, write_msr_pl1_pl2_public};
 pub use modules::{
-    download_and_extract_modules, modules_downloaded, open_modules_dir, redetect_modules,
+    download_and_extract_modules, modules_downloaded, open_modules_dir, pawnio_modules_version,
+    redetect_modules,
 };
-pub use version::{invalidate_pawnio_version, pawnio_modules_version, pawnio_version};
 
 use bios::{bios_defaults_file_exists, load_persisted_bios_defaults, persist_bios_defaults};
-use ffi::{PawnioHandle, exec_ioctl, open_handle, resolved_dll_path};
 use limits::PowerLimitParams;
 use read::read_cpu_power;
 use sync::SyncThread;
