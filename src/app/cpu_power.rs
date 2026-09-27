@@ -228,25 +228,27 @@ impl App {
                 };
                 self.pl_fields_dirty = false;
                 self.cpu_power_error = None;
-                let pl1_en = self.pl1_enabled;
-                let pl2_en = self.pl2_enabled;
-                let pl1_cl = self.pl1_clamped;
-                let pl2_cl = self.pl2_clamped;
                 let info = self.state.cpu_power.snapshot();
-                let power_unit = info.power_unit;
-                let time_unit = info.time_unit;
-                let pl2_time = info.pl2_time_s;
+                let params = crate::cpu_power::PowerLimitParams {
+                    pl1_watts: pl1,
+                    pl1_enabled: self.pl1_enabled,
+                    pl1_clamped: self.pl1_clamped,
+                    pl1_time_s: pl1_time,
+                    pl2_watts: pl2,
+                    pl2_enabled: self.pl2_enabled,
+                    pl2_clamped: self.pl2_clamped,
+                    pl2_time_s: info.pl2_time_s,
+                    power_unit: info.power_unit,
+                    time_unit: info.time_unit,
+                };
                 Some(Task::perform(
                     async move {
                         let _guard = crate::util::cpu_power_mutex().lock().await;
                         crate::util::spawn_blocking_with_timeout(
                             crate::util::PAWNIO_IO_TIMEOUT,
                             move || {
-                                crate::cpu_power::write_msr_pl1_pl2_public(
-                                    pl1, pl1_en, pl1_cl, pl1_time, pl2, pl2_en, pl2_cl, pl2_time,
-                                    power_unit, time_unit,
-                                )
-                                .map_err(|e| e.to_string())
+                                crate::cpu_power::write_msr_pl1_pl2_public(params)
+                                    .map_err(|e| e.to_string())
                             },
                         )
                         .await
@@ -271,18 +273,7 @@ impl App {
                                     return;
                                 }
                                 let info = cpu_power.snapshot();
-                                let _ = cpu_power.start_sync(
-                                    info.pl1_msr,
-                                    info.pl1_msr_enabled,
-                                    info.pl1_msr_clamped,
-                                    info.pl1_time_s,
-                                    info.pl2_msr,
-                                    info.pl2_msr_enabled,
-                                    info.pl2_msr_clamped,
-                                    info.pl2_time_s,
-                                    info.power_unit,
-                                    info.time_unit,
-                                );
+                                let _ = cpu_power.start_sync(info.msr_limit_params());
                             }
                         };
                         return Some(refresh_cpu_power_task(cpu_power, after));
@@ -309,28 +300,26 @@ impl App {
                 };
                 self.pl_fields_dirty = false;
                 self.cpu_power_error = None;
-                let pl1_en = self.pl1_enabled;
-                let pl2_en = self.pl2_enabled;
-                let pl1_cl = self.pl1_clamped;
-                let pl2_cl = self.pl2_clamped;
                 let info = self.state.cpu_power.snapshot();
-                let power_unit = info.power_unit;
-                let time_unit = info.time_unit;
-                let pl2_time = info.pl2_time_s;
+                let params = crate::cpu_power::PowerLimitParams {
+                    pl1_watts: pl1,
+                    pl1_enabled: self.pl1_enabled,
+                    pl1_clamped: self.pl1_clamped,
+                    pl1_time_s: pl1_time,
+                    pl2_watts: pl2,
+                    pl2_enabled: self.pl2_enabled,
+                    pl2_clamped: self.pl2_clamped,
+                    pl2_time_s: info.pl2_time_s,
+                    power_unit: info.power_unit,
+                    time_unit: info.time_unit,
+                };
                 let cpu_power = self.state.cpu_power.clone();
                 Some(Task::perform(
                     async move {
                         let _guard = crate::util::cpu_power_mutex().lock().await;
                         crate::util::spawn_blocking_with_timeout(
                             crate::util::PAWNIO_IO_TIMEOUT,
-                            move || {
-                                cpu_power
-                                    .start_sync(
-                                        pl1, pl1_en, pl1_cl, pl1_time, pl2, pl2_en, pl2_cl,
-                                        pl2_time, power_unit, time_unit,
-                                    )
-                                    .map_err(|e| e.to_string())
-                            },
+                            move || cpu_power.start_sync(params).map_err(|e| e.to_string()),
                         )
                         .await
                         .unwrap_or_else(Err)

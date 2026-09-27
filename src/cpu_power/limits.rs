@@ -113,6 +113,26 @@ impl CpuPowerInfo {
         )
     }
 
+    /// The MSR limits as write parameters, ready to re-assert.
+    ///
+    /// MSR is the primary path: it is the register the sync thread re-asserts,
+    /// so this is what callers pass back when they want to keep enforcing the
+    /// values that are currently in effect.
+    pub fn msr_limit_params(&self) -> PowerLimitParams {
+        PowerLimitParams {
+            pl1_watts: self.pl1_msr,
+            pl1_enabled: self.pl1_msr_enabled,
+            pl1_clamped: self.pl1_msr_clamped,
+            pl1_time_s: self.pl1_time_s,
+            pl2_watts: self.pl2_msr,
+            pl2_enabled: self.pl2_msr_enabled,
+            pl2_clamped: self.pl2_msr_clamped,
+            pl2_time_s: self.pl2_time_s,
+            power_unit: self.power_unit,
+            time_unit: self.time_unit,
+        }
+    }
+
     /// Pre-fills edit fields from current MSR values.
     pub fn init_edit_fields(&self) -> (String, String, bool, bool, bool, bool, String, String) {
         if self.available {
@@ -206,19 +226,23 @@ pub(super) fn encode_power_limit(
     val
 }
 
-/// Power limit parameters.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct PowerLimitParams {
-    pub(crate) pl1_watts: f64,
-    pub(crate) pl1_enabled: bool,
-    pub(crate) pl1_clamped: bool,
-    pub(crate) pl1_time_s: f64,
-    pub(crate) pl2_watts: f64,
-    pub(crate) pl2_enabled: bool,
-    pub(crate) pl2_clamped: bool,
-    pub(crate) pl2_time_s: f64,
-    pub(crate) power_unit: f64,
-    pub(crate) time_unit: f64,
+/// The PL1/PL2 limits and the RAPL units they are expressed in.
+///
+/// Passed as one value rather than ten positional arguments: the write path
+/// and the sync thread both need all ten, and a caller that has them as a
+/// `CpuPowerInfo` should not have to unpack and repack them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PowerLimitParams {
+    pub pl1_watts: f64,
+    pub pl1_enabled: bool,
+    pub pl1_clamped: bool,
+    pub pl1_time_s: f64,
+    pub pl2_watts: f64,
+    pub pl2_enabled: bool,
+    pub pl2_clamped: bool,
+    pub pl2_time_s: f64,
+    pub power_unit: f64,
+    pub time_unit: f64,
 }
 
 /// Scales an encoded limit half back to watts.
@@ -423,61 +447,13 @@ pub(super) fn write_mmio_pl1_pl2(
 }
 
 /// Writes MSR 0x610 (opens IntelMSR handle internally).
-#[allow(clippy::too_many_arguments)]
-pub fn write_msr_pl1_pl2_public(
-    pl1_watts: f64,
-    pl1_enabled: bool,
-    pl1_clamped: bool,
-    pl1_time_s: f64,
-    pl2_watts: f64,
-    pl2_enabled: bool,
-    pl2_clamped: bool,
-    pl2_time_s: f64,
-    power_unit: f64,
-    time_unit: f64,
-) -> Result<(), String> {
-    let params = PowerLimitParams {
-        pl1_watts,
-        pl1_enabled,
-        pl1_clamped,
-        pl1_time_s,
-        pl2_watts,
-        pl2_enabled,
-        pl2_clamped,
-        pl2_time_s,
-        power_unit,
-        time_unit,
-    };
+pub fn write_msr_pl1_pl2_public(params: PowerLimitParams) -> Result<(), String> {
     let msr_blob = load_intel_msr_blob()?;
     let msr_handle = open_handle(&msr_blob)?;
     write_msr_pl1_pl2(&msr_handle, &params)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_mmio_pl1_pl2_public(
-    pl1_watts: f64,
-    pl1_enabled: bool,
-    pl1_clamped: bool,
-    pl1_time_s: f64,
-    pl2_watts: f64,
-    pl2_enabled: bool,
-    pl2_clamped: bool,
-    pl2_time_s: f64,
-    power_unit: f64,
-    time_unit: f64,
-) -> Result<(), String> {
-    let params = PowerLimitParams {
-        pl1_watts,
-        pl1_enabled,
-        pl1_clamped,
-        pl1_time_s,
-        pl2_watts,
-        pl2_enabled,
-        pl2_clamped,
-        pl2_time_s,
-        power_unit,
-        time_unit,
-    };
+fn write_mmio_pl1_pl2_public(params: PowerLimitParams) -> Result<(), String> {
     let mchbar_blob = load_intel_mchbar_blob()?;
     let mchbar_handle = open_handle(&mchbar_blob)?;
     write_mmio_pl1_pl2(&mchbar_handle, &params)
@@ -485,32 +461,32 @@ fn write_mmio_pl1_pl2_public(
 
 /// Writes both MSR and MMIO from `BiosDefaults` to restore factory state.
 pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<(), String> {
-    write_msr_pl1_pl2_public(
-        bios.pl1_watts,
-        bios.pl1_enabled,
-        bios.pl1_clamped,
-        bios.pl1_time_s,
-        bios.pl2_watts,
-        bios.pl2_enabled,
-        bios.pl2_clamped,
-        bios.pl2_time_s,
-        bios.power_unit,
-        bios.time_unit,
-    )?;
+    write_msr_pl1_pl2_public(PowerLimitParams {
+        pl1_watts: bios.pl1_watts,
+        pl1_enabled: bios.pl1_enabled,
+        pl1_clamped: bios.pl1_clamped,
+        pl1_time_s: bios.pl1_time_s,
+        pl2_watts: bios.pl2_watts,
+        pl2_enabled: bios.pl2_enabled,
+        pl2_clamped: bios.pl2_clamped,
+        pl2_time_s: bios.pl2_time_s,
+        power_unit: bios.power_unit,
+        time_unit: bios.time_unit,
+    })?;
     // MMIO may be absent on older files; best-effort only.
     if bios.pl1_mmio_watts > 0.0 || bios.pl2_mmio_watts > 0.0 {
-        let _ = write_mmio_pl1_pl2_public(
-            bios.pl1_mmio_watts,
-            bios.pl1_mmio_enabled,
-            bios.pl1_mmio_clamped,
-            bios.pl1_mmio_time_s,
-            bios.pl2_mmio_watts,
-            bios.pl2_mmio_enabled,
-            bios.pl2_mmio_clamped,
-            bios.pl2_mmio_time_s,
-            bios.power_unit,
-            bios.time_unit,
-        );
+        let _ = write_mmio_pl1_pl2_public(PowerLimitParams {
+            pl1_watts: bios.pl1_mmio_watts,
+            pl1_enabled: bios.pl1_mmio_enabled,
+            pl1_clamped: bios.pl1_mmio_clamped,
+            pl1_time_s: bios.pl1_mmio_time_s,
+            pl2_watts: bios.pl2_mmio_watts,
+            pl2_enabled: bios.pl2_mmio_enabled,
+            pl2_clamped: bios.pl2_mmio_clamped,
+            pl2_time_s: bios.pl2_mmio_time_s,
+            power_unit: bios.power_unit,
+            time_unit: bios.time_unit,
+        });
     }
     Ok(())
 }
@@ -864,6 +840,57 @@ mod tests {
                 "unavailable CPU power must carry a reason"
             );
         }
+    }
+
+    #[test]
+    fn msr_limit_params_reads_the_msr_half_not_the_mmio_mirror() {
+        // The two halves carry different values in the field. Reading the wrong
+        // one writes limits the user never asked for, and the write path
+        // verifies them, so nothing downstream would complain.
+        let info = CpuPowerInfo {
+            pl1_msr: 15.0,
+            pl1_msr_enabled: true,
+            pl1_msr_clamped: true,
+            pl1_time_s: 28.0,
+            pl2_msr: 35.0,
+            pl2_msr_enabled: false,
+            pl2_msr_clamped: true,
+            pl2_time_s: 14.0,
+            pl1_mmio: 99.0,
+            pl1_mmio_enabled: true,
+            pl1_mmio_clamped: false,
+            pl1_mmio_time_s: 56.0,
+            pl2_mmio: 77.0,
+            pl2_mmio_enabled: true,
+            pl2_mmio_clamped: false,
+            pl2_mmio_time_s: 112.0,
+            power_unit: 0.125,
+            time_unit: 0.0009765625,
+            ..Default::default()
+        };
+        let params = info.msr_limit_params();
+        assert_eq!(params.pl1_watts, 15.0);
+        assert!(params.pl1_enabled);
+        assert!(params.pl1_clamped);
+        assert_eq!(params.pl1_time_s, 28.0);
+        assert_eq!(params.pl2_watts, 35.0);
+        assert!(!params.pl2_enabled, "PL2 disabled must survive");
+        assert!(params.pl2_clamped);
+        assert_eq!(params.pl2_time_s, 14.0);
+        assert_eq!(params.power_unit, 0.125);
+        assert_eq!(params.time_unit, 0.0009765625);
+    }
+
+    #[test]
+    fn msr_limit_params_of_an_unavailable_info_is_all_zero() {
+        // A card that never read anything yields zeroed params rather than
+        // stale ones; the write path rejects the zero unit, so this cannot
+        // silently write nonsense.
+        let info = CpuPowerInfo::default();
+        let params = info.msr_limit_params();
+        assert_eq!(params.pl1_watts, 0.0);
+        assert_eq!(params.power_unit, 0.0);
+        assert!(params.power_unit <= 0.0, "unit must not be faked");
     }
 
     #[test]

@@ -11,7 +11,8 @@ pub use ffi::{
     update_pawnio, update_pawnio_modules,
 };
 pub use limits::{
-    CpuPowerInfo, CpuPowerUnavailable, write_bios_defaults, write_msr_pl1_pl2_public,
+    CpuPowerInfo, CpuPowerUnavailable, PowerLimitParams, write_bios_defaults,
+    write_msr_pl1_pl2_public,
 };
 pub use modules::{
     download_and_extract_modules, modules_downloaded, open_modules_dir, pawnio_modules_version,
@@ -19,7 +20,6 @@ pub use modules::{
 };
 
 use bios::{bios_defaults_file_exists, load_persisted_bios_defaults, persist_bios_defaults};
-use limits::PowerLimitParams;
 use read::read_cpu_power;
 use sync::SyncThread;
 
@@ -154,43 +154,15 @@ impl CpuPowerState {
         crate::util::read_lock(&self.info).clone()
     }
 
-    /// Starts sync thread that continuously writes MSR 0x610.
-    #[allow(clippy::too_many_arguments)]
-    pub fn start_sync(
-        &self,
-        pl1_watts: f64,
-        pl1_enabled: bool,
-        pl1_clamped: bool,
-        pl1_time_s: f64,
-        pl2_watts: f64,
-        pl2_enabled: bool,
-        pl2_clamped: bool,
-        pl2_time_s: f64,
-        power_unit: f64,
-        time_unit: f64,
-    ) -> Result<(), &'static str> {
-        let params = PowerLimitParams {
-            pl1_watts,
-            pl1_enabled,
-            pl1_clamped,
-            pl1_time_s,
-            pl2_watts,
-            pl2_enabled,
-            pl2_clamped,
-            pl2_time_s,
-            power_unit,
-            time_unit,
-        };
-        self.start_sync_with_params(params)
-    }
-
-    /// Shared implementation. Holds the `sync_thread` lock across the entire
-    /// stop-old + join + start sequence so a concurrent `start_sync` (e.g.
-    /// `CpuPowerSyncStart` racing `CpuPowerApplied`, or a resume handler) cannot
-    /// slip into the gap between taking the old handle and starting a new one
-    /// and spawn two sync threads writing MSR/MMIO at once. The sync loop never
-    /// takes this lock, so joining under it cannot deadlock.
-    fn start_sync_with_params(&self, params: PowerLimitParams) -> Result<(), &'static str> {
+    /// Starts the sync thread that continuously re-asserts PL1/PL2.
+    ///
+    /// Holds the `sync_thread` lock across the entire stop-old + join + start
+    /// sequence so a concurrent start (e.g. `CpuPowerSyncStart` racing
+    /// `CpuPowerApplied`, or a resume handler) cannot slip into the gap between
+    /// taking the old handle and starting a new one and spawn two sync threads
+    /// writing MSR/MMIO at once. The sync loop never takes this lock, so
+    /// joining under it cannot deadlock.
+    pub fn start_sync(&self, params: PowerLimitParams) -> Result<(), &'static str> {
         let mut thread = self.sync_thread.lock();
         thread.running.store(false, Ordering::Release);
         if let Some(old) = thread.handle.take() {
@@ -243,7 +215,7 @@ impl CpuPowerState {
             Some(p) => p,
             None => return false,
         };
-        match self.start_sync_with_params(params) {
+        match self.start_sync(params) {
             Ok(()) => {
                 tracing::info!("Restarted dead CPU power sync thread");
                 true
@@ -312,18 +284,7 @@ mod tests {
         for _ in 0..4 {
             let s = state.clone();
             handles.push(std::thread::spawn(move || {
-                let _ = s.start_sync(
-                    p.pl1_watts,
-                    p.pl1_enabled,
-                    p.pl1_clamped,
-                    p.pl1_time_s,
-                    p.pl2_watts,
-                    p.pl2_enabled,
-                    p.pl2_clamped,
-                    p.pl2_time_s,
-                    p.power_unit,
-                    p.time_unit,
-                );
+                let _ = s.start_sync(p);
                 s.stop_sync();
             }));
         }

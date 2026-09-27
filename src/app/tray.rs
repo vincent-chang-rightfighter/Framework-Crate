@@ -152,36 +152,14 @@ impl App {
                                 if let Some(params) = desired {
                                     // Resume sync with user-desired params, not post-resume readback.
                                     if was_sync {
-                                        let _ = cpu_power.start_sync(
-                                            params.pl1_watts,
-                                            params.pl1_enabled,
-                                            params.pl1_clamped,
-                                            params.pl1_time_s,
-                                            params.pl2_watts,
-                                            params.pl2_enabled,
-                                            params.pl2_clamped,
-                                            params.pl2_time_s,
-                                            params.power_unit,
-                                            params.time_unit,
-                                        );
+                                        let _ = cpu_power.start_sync(params);
                                         return;
                                     }
                                 }
                                 // Fallback: no desired sync, check current flag.
                                 if cpu_power.sync_enabled.load(Ordering::Acquire) {
                                     let info = cpu_power.snapshot();
-                                    let _ = cpu_power.start_sync(
-                                        info.pl1_msr,
-                                        info.pl1_msr_enabled,
-                                        info.pl1_msr_clamped,
-                                        info.pl1_time_s,
-                                        info.pl2_msr,
-                                        info.pl2_msr_enabled,
-                                        info.pl2_msr_clamped,
-                                        info.pl2_time_s,
-                                        info.power_unit,
-                                        info.time_unit,
-                                    );
+                                    let _ = cpu_power.start_sync(info.msr_limit_params());
                                 } else if custom_applied.load(Ordering::Acquire) {
                                     cpu_power.stop_sync();
                                     if let Some(bios) = bios {
