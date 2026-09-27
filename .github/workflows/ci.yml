@@ -7,7 +7,17 @@ on:
   push:
     branches: [ master ]
     tags: [ 'v*' ]
+    # Docs and screenshots cannot break the build, so skip them. Tag pushes are
+    # not evaluated against path filters, so releases always run the full
+    # pipeline. assets/ is deliberately absent: app.png and app.ico are build
+    # inputs declared with cargo:rerun-if-changed.
+    paths-ignore:
+      - '**/*.md'
+      - 'images/**'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'images/**'
 
 jobs:
   build-and-test:

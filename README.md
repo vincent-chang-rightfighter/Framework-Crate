@@ -4,6 +4,12 @@ A native desktop GUI for Framework laptop fan control, battery charge limits, an
 
 Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-control).
 
+## Downloads
+
+Prebuilt Windows binaries are attached to each [GitHub Release](https://github.com/vincent-chang-rightfighter/Framework-Crate/releases) as `framework-crate.exe`. The release notes list what changed in that version.
+
+Download the `.exe`, then run it as administrator. PawnIO is optional and only needed for the CPU Power card; everything else works with the Framework EC driver alone.
+
 ## Screenshot
 
 ![Framework Crate v0.3.0](images/Framework-Crate-v0.3.0.png)
@@ -19,12 +25,14 @@ Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-c
 - **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download); original factory limits are saved on first run for `Reset`. AMD and other vendors are not supported.
 - **About Page** — Hardware info (CPU, RAM, display, BIOS), software settings (poll rate, refresh interval, launch at startup), GitHub link, and third-party license notices
 - **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit), icon restored automatically if Explorer restarts
+- **Launch at Startup** — Registers a per-user logon task so the tray app comes back after a reboot. The task document is generated in-process and handed to `schtasks /Create /XML`; the settings that matter (unlimited execution limit, battery conditions cleared, restart on failure) are asserted by tests without needing elevation
+- **File Logging** — Warnings and errors are written to `%APPDATA%/framework-crate/app.log` with size-based rotation, because a logon-launched process has no console to print them to
 
 ## Requirements
 
 - **Platform**: Intel Core Ultra Series 1 (Meteor Lake) — only tested and supported on this platform
 - Windows 10/11
-- Administrator privileges (required for EC access)
+- Administrator privileges — required for EC access, for writing CPU power limits, and for enabling launch at startup
 
 ## Build
 
@@ -64,7 +72,7 @@ cargo run --release
 
 ```
 src/
-  main.rs              — Iced 0.14 application entry point, boot function
+  main.rs              — Iced 0.14 application entry point, boot function, rotating file log sink
   app/                 — App struct, Message enum, dispatch, handler submodules
     mod.rs             — App/AppState/Message types, new()/subscription()/update()/view(), update_inner dispatcher
     config.rs          — Config-related message handlers + save/mutate_config helpers
@@ -90,7 +98,15 @@ src/
   config.rs            — TOML config load/save (atomic write via tmp+rename, write-through)
   config_save_task.rs  — Debounced config save (100ms) and applies battery settings
   background_task.rs   — EC polling loop, fan control, expansion/PD scans
-  cpu_power.rs         — PawnIO RAPL read/write (PL1/PL2) and sync thread
+  cpu_power/           — CPU power (PL1/PL2) via PawnIO, split by concern
+    mod.rs             — CpuPowerState and the public forwarding surface
+    modules.rs         — PawnIO Modules download, hashing, extraction, install
+    limits.rs          — PL1/PL2 encoding, writes, reset to BIOS defaults
+    ffi.rs             — PawnIOLib.dll binding and RAPL register access
+    sync.rs            — Background sync thread
+    bios.rs            — Factory default capture and persistence
+    version.rs         — PawnIO / Modules version reporting
+    read.rs            — PL1/PL2 reading
   temp_chart.rs        — Canvas-based temperature line chart (selectable history window)
   curve_canvas.rs      — Interactive canvas-based fan curve editor (drag points, sensor markers)
   fan_control.rs       — CurveStepper, rate limiting, duty calculation
@@ -180,6 +196,33 @@ ui_refresh_ms = 100
 selected_sensors = []
 ```
 
+## Launch at Startup
+
+Toggling **launch at startup** on the About page registers a Windows scheduled task that runs the app at logon. The task is created from a document built in-process and passed to `schtasks /Create /XML`, so every setting is applied atomically in a single call.
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `ExecutionTimeLimit` | `PT0S` | The `schtasks` default of `PT72H` silently stops the tray app three days after logon, and it never comes back |
+| `DisallowStartIfOnBatteries` / `StopIfGoingOnBatteries` | cleared | A laptop on battery power would otherwise skip or stop the task |
+| `RestartOnFailure` | 3 attempts, `PT1M` | The app returns if it crashes during logon |
+| Encoding | UTF-16LE with BOM | Task Scheduler rejects a UTF-8 document with a parse error on the XML declaration |
+| `Command` / `Arguments` | separate elements | Avoids the argument-splitting failure class of the older `/TR` form |
+| `RunLevel` | `HighestAvailable` | The app needs an elevated token for EC access |
+
+Notes:
+
+- **Enabling it requires an elevated process.** The task is registered with `RunLevel=HighestAvailable`, so the app reports a readable message instead of letting `schtasks` emit its localized access-denied text.
+- `schtasks` output is decoded using the OEM code page so non-English messages stay readable.
+- After creating the task the app queries it back, so success is only reported once the task is actually queryable.
+- The task document is written to `%TEMP%` as UTF-16LE and removed afterwards. Because the release profile uses `panic = "abort"`, a process killed mid-write never reaches the removal, so stale documents are cleaned up on the next run.
+- The executable path is validated before it is embedded: quotes, cmd metacharacters, control characters, bidi overrides, `DEL` and a trailing backslash are all rejected, since the path is embedded as XML text and wrapped in quotes for the action `Command`.
+
+## Logs
+
+`tracing` output is written to `%APPDATA%/framework-crate/app.log` instead of only stderr, because a logon-launched process has no console — with stderr-only logging every warning and error from an auto-started run was discarded.
+
+The file rotates once it grows past a size threshold, keeping `app.log.1` through `app.log.3`. If the log cannot be opened the app still starts and falls back to stderr.
+
 ## Known Limitations
 
 - **AMD CPU Power**: CPU Power (PL1/PL2 via PawnIO) is Intel-only. On AMD and other CPUs the card stays visible and shows **Not Supported**; no RAPL / PawnIO access is attempted.
@@ -204,7 +247,7 @@ The section reads and optionally writes PL1/PL2 via official PawnIO Modules. Tho
 
 1. Install the PawnIO driver: `winget install namazso.PawnIO` (or use **Install PawnIO** in the app).
 2. Open **CPU Power** and click **Download Modules**.
-3. The app fetches `IntelMSR.bin` and `IntelMCHBAR.bin` from [PawnIO Modules Releases](https://github.com/namazso/PawnIO.Modules/releases) (latest, currently 0.2.11, fallback 0.2.10), checks SHA-256 (advisory) and caches them in `%APPDATA%/framework-crate/modules/`.
+3. The app fetches `IntelMSR.bin` and `IntelMCHBAR.bin` from [PawnIO Modules Releases](https://github.com/namazso/PawnIO.Modules/releases) (latest, falling back to 0.2.11 when the GitHub API is unreachable), checks SHA-256 (advisory) and caches them in `%APPDATA%/framework-crate/modules/`.
 
 A missing file blocks CPU Power; a hash mismatch only warns and still allows use (to follow github latest without code change). Failed download shows manual instructions: download latest `release_*.zip` from the releases page and place `IntelMSR.bin` + `IntelMCHBAR.bin` into `%APPDATA%/framework-crate/modules/`. Use **Open Modules Folder** and **Redetect** in the UI to verify — no restart needed.
 
