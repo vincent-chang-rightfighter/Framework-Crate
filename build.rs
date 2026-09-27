@@ -94,7 +94,7 @@ fn main() {
         if info.color_type == png::ColorType::Rgb {
             // Expand RGB -> RGBA (alpha=0xFF)
             let mut rgba = Vec::with_capacity((info.width * info.height * 4) as usize);
-            for chunk in buf.chunks_exact(3) {
+            for chunk in buf.as_chunks::<3>().0 {
                 rgba.extend_from_slice(chunk);
                 rgba.push(0xFF);
             }
