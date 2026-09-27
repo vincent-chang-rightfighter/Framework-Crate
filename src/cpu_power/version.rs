@@ -1,10 +1,10 @@
 //! PawnIO driver and Modules version reporting for the ABOUT panel.
 
-use super::{
-    INTEL_MCHBAR_SHA256, INTEL_MSR_SHA256, LAST_KNOWN_MODULES_VERSION, is_pawnio_installed,
-    local_modules_version, modules_dir, persist_local_modules_version, resolved_dll_path,
-    sha256_hex,
+use super::modules::{
+    INTEL_MCHBAR_SHA256, INTEL_MSR_SHA256, LAST_KNOWN_MODULES_VERSION, local_modules_version,
+    modules_dir, persist_local_modules_version, sha256_hex,
 };
+use super::{is_pawnio_installed, resolved_dll_path};
 
 /// Cached PawnIO version.
 static PAWNIO_VERSION: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
