@@ -55,34 +55,161 @@ impl iced::Executor for SmallTokioExecutor {
     }
 }
 
-/// Lifecycle log for events that happen outside the tracing subscriber.
-/// Task Scheduler discards stderr, so anything printed there is lost exactly
-/// when a logon launch misbehaves; this is the only record of such failures.
-fn fallback_log(msg: &str) {
-    // windows_subsystem hides stderr when double-clicked; also write to file with rotation
-    eprintln!("{}", msg);
-    if let Some(base) = dirs::config_dir().or_else(dirs::data_local_dir) {
-        let path = base.join("framework-crate").join("app.log");
+/// Rotate once the log passes this size, keeping `app.log.1` .. `app.log.3`.
+const MAX_LOG_BYTES: u64 = 1024 * 1024;
+const LOG_KEEP: usize = 3;
+
+/// Append-only log file that rotates itself once it grows past `MAX_LOG_BYTES`.
+///
+/// The handle is reopened on rotation because Windows cannot rename a file that
+/// is still open, so a rename-based rotation would silently fail for as long as
+/// tracing holds the file.
+struct LogSink {
+    path: std::path::PathBuf,
+    state: std::sync::Mutex<LogState>,
+}
+
+struct LogState {
+    /// `None` while the handle is closed for rotation.
+    file: Option<std::fs::File>,
+    written: u64,
+}
+
+impl LogSink {
+    fn open(path: std::path::PathBuf) -> std::io::Result<Self> {
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)?;
         }
-        // rotate if >1MB, keep up to 3 backups
-        if let Ok(meta) = std::fs::metadata(&path)
-            && meta.len() > 1024 * 1024
+        let sink = Self {
+            path,
+            state: std::sync::Mutex::new(LogState {
+                file: None,
+                written: 0,
+            }),
+        };
+        // Scoped so the guard is released before `sink` is moved.
         {
-            let dir_path = base.join("framework-crate");
-            let _ = std::fs::rename(dir_path.join("app.log.2"), dir_path.join("app.log.3"));
-            let _ = std::fs::rename(dir_path.join("app.log.1"), dir_path.join("app.log.2"));
-            let _ = std::fs::rename(&path, dir_path.join("app.log.1"));
+            let mut state = sink.lock()?;
+            sink.reopen(&mut state)?;
         }
-        if let Ok(mut f) = std::fs::OpenOptions::new()
+        Ok(sink)
+    }
+
+    fn lock(&self) -> std::io::Result<std::sync::MutexGuard<'_, LogState>> {
+        self.state
+            .lock()
+            .map_err(|_| std::io::Error::other("log mutex poisoned"))
+    }
+
+    /// Reopens the log, rotating first when it has grown past the cap.
+    /// Must be called with the state lock held.
+    fn reopen(&self, state: &mut LogState) -> std::io::Result<()> {
+        // Drop the handle first so the rename below is not blocked on Windows.
+        state.file = None;
+        if state.written > MAX_LOG_BYTES {
+            rotate_files(&self.path);
+        }
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "[{}] {}", chrono_like_timestamp(), msg);
+            .open(&self.path)?;
+        state.written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        state.file = Some(file);
+        Ok(())
+    }
+
+    /// The real write path, shared by both `Write` impls.
+    fn push(&self, buf: &[u8]) -> std::io::Result<usize> {
+        use std::io::Write;
+        let mut state = self.lock()?;
+        let file = state
+            .file
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("log file unavailable"))?;
+        let n = file.write(buf)?;
+        state.written += n as u64;
+        if state.written > MAX_LOG_BYTES {
+            self.reopen(&mut state)?;
         }
+        Ok(n)
+    }
+
+    fn flush_inner(&self) -> std::io::Result<()> {
+        use std::io::Write;
+        if let Ok(mut state) = self.lock()
+            && let Some(file) = state.file.as_mut()
+        {
+            file.flush()?;
+        }
+        Ok(())
+    }
+}
+
+/// Shifts `app.log` to `app.log.1` and so on. The oldest backup is deleted first
+/// because `fs::rename` cannot overwrite an existing file.
+fn rotate_files(path: &std::path::Path) {
+    let numbered = |i: usize| {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".{i}"));
+        std::path::PathBuf::from(name)
+    };
+    let _ = std::fs::remove_file(numbered(LOG_KEEP));
+    for i in (1..LOG_KEEP).rev() {
+        let _ = std::fs::rename(numbered(i), numbered(i + 1));
+    }
+    let _ = std::fs::rename(path, numbered(1));
+}
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.push(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_inner()
+    }
+}
+
+/// `Arc<LogSink>` only implements `MakeWriter` when `&LogSink: Write`, since the
+/// sink is shared by every tracing thread.
+impl std::io::Write for &LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        (**self).push(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        (**self).flush_inner()
+    }
+}
+
+static LOG: std::sync::OnceLock<Option<std::sync::Arc<LogSink>>> = std::sync::OnceLock::new();
+
+/// Shared log sink, opened on first use. `None` when the file cannot be opened,
+/// in which case logging falls back to stderr only.
+fn log_sink() -> Option<&'static std::sync::Arc<LogSink>> {
+    LOG.get_or_init(|| {
+        let base = dirs::config_dir().or_else(dirs::data_local_dir)?;
+        let path = base.join("framework-crate").join("app.log");
+        match LogSink::open(path) {
+            Ok(sink) => Some(std::sync::Arc::new(sink)),
+            Err(e) => {
+                eprintln!("Failed to open log file: {e}");
+                None
+            }
+        }
+    })
+    .as_ref()
+}
+
+/// Lifecycle log for events outside the tracing subscriber, and the file sink
+/// for tracing itself. Task Scheduler discards stderr, so anything printed there
+/// is lost exactly when a logon launch misbehaves; this is the only record.
+fn fallback_log(msg: &str) {
+    // windows_subsystem hides stderr when double-clicked; also write to file
+    eprintln!("{}", msg);
+    use std::io::Write;
+    if let Some(sink) = log_sink()
+        && let Err(e) = writeln!(&**sink, "[{}] {}", chrono_like_timestamp(), msg)
+    {
+        eprintln!("Failed to write log: {e}");
     }
 }
 
@@ -150,8 +277,8 @@ fn chrono_like_timestamp() -> String {
 /// Single-instance guard; prevents parallel EC I/O and tray/config races from second process.
 fn acquire_single_instance(minimized: bool) -> Option<system_info::SingleInstanceGuard> {
     match system_info::SingleInstanceGuard::acquire("FrameworkCrateSingleInstance") {
-        Ok(guard) => Some(guard),
-        Err(()) => {
+        Ok(Some(guard)) => Some(guard),
+        Ok(None) => {
             fallback_log(&format!(
                 "startup: another instance holds the single-instance mutex, exiting (pid {})",
                 std::process::id()
@@ -162,6 +289,15 @@ fn acquire_single_instance(minimized: bool) -> Option<system_info::SingleInstanc
                 system_info::request_show_running_instance();
             }
             std::process::exit(0);
+        }
+        Err(e) => {
+            // The mutex could not be created. Starting anyway is safer than
+            // exiting: a silent exit here looks identical to a failed startup,
+            // which is what Task Scheduler launch reports to the user.
+            fallback_log(&format!(
+                "startup: single-instance mutex unavailable ({e}); starting without the guard"
+            ));
+            None
         }
     }
 }
@@ -181,13 +317,23 @@ fn main() {
 
     #[cfg(not(test))]
     {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .with_writer(std::io::stderr)
-            .init();
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        // Write to the same file as fallback_log. Task Scheduler gives a
+        // scheduled process no console, so stderr-only logging would drop
+        // every warning and error exactly when a logon launch needs diagnosis.
+        match log_sink() {
+            Some(sink) => {
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_ansi(false)
+                    .with_writer(sink.clone())
+                    .try_init();
+            }
+            None => {
+                let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+            }
+        }
     }
 
     let window_icon =
@@ -240,6 +386,39 @@ mod tests {
     use super::*;
     use crate::types::{FanControlMode, sorted_sensor_list};
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn log_sink_rotates_oversized_file_and_stays_writable() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("app.log");
+        let sink = LogSink::open(path.clone()).expect("open sink");
+
+        let line = "x".repeat(1000);
+        let mut sink_ref = &sink;
+        for _ in 0..(MAX_LOG_BYTES / line.len() as u64 + 4) {
+            writeln!(sink_ref, "{line}").expect("write");
+        }
+
+        // Rotation must actually happen even though the sink holds the file
+        // open; a rename-based rotation would silently fail on Windows.
+        assert!(
+            dir.path().join("app.log.1").exists(),
+            "oversized log should have rotated"
+        );
+        assert!(
+            std::fs::metadata(&path).expect("stat").len() <= MAX_LOG_BYTES,
+            "fresh log should be under the cap"
+        );
+
+        writeln!(sink_ref, "after rotation").expect("write after rotation");
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("read")
+                .contains("after rotation"),
+            "sink must keep writing to the reopened file"
+        );
+    }
 
     #[test]
     fn sorted_sensor_list_empty_selected_uses_all_keys() {

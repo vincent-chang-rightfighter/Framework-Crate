@@ -561,15 +561,21 @@ impl Drop for SingleInstanceGuard {
 }
 
 impl SingleInstanceGuard {
-    /// Tries to acquire named mutex; Err if another instance holds it.
-    pub fn acquire(name: &str) -> Result<Self, ()> {
+    /// Tries to acquire the named mutex.
+    ///
+    /// `Ok(Some(_))` acquired it, `Ok(None)` another instance already holds it.
+    /// `Err` means the mutex could not be created at all (e.g. handle
+    /// exhaustion), which is deliberately distinct from "already running": the
+    /// caller must not exit silently in that case, or a scheduled logon launch
+    /// looks like it did nothing.
+    pub fn acquire(name: &str) -> Result<Option<Self>, std::io::Error> {
         const ERROR_ALREADY_EXISTS: u32 = 183;
         let wide = to_wide(name);
         // SAFETY: Null-terminated UTF-16 name; non-null handle with ERROR_ALREADY_EXISTS means owned.
         let handle = unsafe { CreateMutexW(std::ptr::null(), 1, wide.as_ptr()) };
         if handle.is_null() {
-            tracing::warn!("CreateMutexW failed; failing single-instance check");
-            return Err(());
+            // SAFETY: null handle, nothing to close.
+            return Err(std::io::Error::last_os_error());
         }
         // SAFETY: GetLastError immediately after CreateMutexW.
         let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
@@ -578,9 +584,9 @@ impl SingleInstanceGuard {
             unsafe {
                 CloseHandle(handle);
             }
-            return Err(());
+            return Ok(None);
         }
-        Ok(Self { _handle: handle })
+        Ok(Some(Self { _handle: handle }))
     }
 }
 
