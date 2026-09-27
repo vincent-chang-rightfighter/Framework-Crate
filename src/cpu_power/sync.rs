@@ -4,10 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, warn};
 
-use super::{
-    PowerLimitParams, load_intel_mchbar_blob, load_intel_msr_blob, open_handle, write_mmio_pl1_pl2,
-    write_msr_pl1_pl2,
-};
+use super::limits::{PowerLimitParams, write_mmio_pl1_pl2, write_msr_pl1_pl2};
+use super::modules::{load_intel_mchbar_blob, load_intel_msr_blob};
+use super::open_handle;
 
 /// Sync thread that continuously writes MSR 0x610 and MMIO to counter
 /// firmware/EC overwrites. Runs until `external_alive` is dropped.
