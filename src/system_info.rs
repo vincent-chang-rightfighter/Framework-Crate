@@ -29,11 +29,12 @@ const TPM_RIGHTBUTTON: u32 = 0x0002;
 const TPM_RETURNCMD: u32 = 0x0100;
 use crate::tray::event::{ID_QUIT, ID_SHOW};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, RECT};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, RECT};
 use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC};
+use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TokenElevation};
 use windows_sys::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW};
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, FindWindowExW, FindWindowW, GetSystemMetrics,
@@ -755,6 +756,35 @@ fn build_task_xml(command: &str, args: &str, user_id: &str) -> String {
     )
 }
 
+/// Whether the process runs with an elevated (administrator) token.
+///
+/// The startup task is registered with `RunLevel=HighestAvailable`, so
+/// registering it requires elevation. Reported to the user as a readable
+/// message instead of the localized schtasks "access denied" text.
+pub fn is_elevated() -> bool {
+    const TOKEN_QUERY: u32 = 0x0008;
+    // SAFETY: pseudo-handle is always valid; the token handle is closed below.
+    let mut token: HANDLE = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return false;
+    }
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut returned: u32 = 0;
+    // SAFETY: token is a live handle and the buffer matches TOKEN_ELEVATION.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            std::ptr::from_mut(&mut elevation).cast(),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+    } != 0;
+    // SAFETY: token was opened above and is not used afterwards.
+    unsafe { CloseHandle(token) };
+    ok && elevation.TokenIsElevated != 0
+}
+
 /// Account for the task principal. Task Scheduler resolves `DOMAIN\user` to a
 /// SID while registering, so a later account rename does not break the task.
 fn current_user_id() -> Result<String, String> {
@@ -768,63 +798,84 @@ fn current_user_id() -> Result<String, String> {
     }
 }
 
+/// Prefix of the temporary task document written for `schtasks /Create /XML`.
+const TASK_XML_PREFIX: &str = "framework-crate-task-";
+
+/// Removes task documents left behind by a previous run.
+///
+/// The release profile uses `panic = "abort"`, so a process killed mid-write
+/// (or by Task Scheduler) never reaches the removal and the file would
+/// otherwise accumulate in the temp directory forever.
+fn cleanup_stale_task_xml() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with(TASK_XML_PREFIX) && name.ends_with(".xml") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Validates an executable path destined for the task action.
+///
+/// Rejects characters that would break the task XML or allow injection. The
+/// path is embedded as XML text and wrapped in quotes for the action Command,
+/// so quotes, cmd metacharacters and control characters are all refused here.
+fn validate_task_command_path(exe: &str) -> Result<(), String> {
+    const FORBIDDEN: &[char] = &[
+        '"', '\'', '&', '|', ';', '%', '^', '`', '$', '(', ')', '<', '>', '*', '?', '{', '}', '!',
+        '\n', '\r',
+    ];
+    if exe.contains(FORBIDDEN) {
+        return Err("exe path contains invalid characters".to_string());
+    }
+    // Block non-ASCII control/bidi override that could hide injection.
+    if exe
+        .chars()
+        .any(|c| c.is_control() || c == '\u{202E}' || c == '\u{202D}')
+    {
+        return Err("exe path contains invalid unicode".to_string());
+    }
+    // A trailing backslash would escape the closing quote of the action
+    // Command (e.g. "C:\path\" → the \" becomes an escaped quote).
+    if exe.ends_with('\\') {
+        return Err("exe path must not end with backslash".to_string());
+    }
+    Ok(())
+}
+
+/// Builds the startup task document for `exe`.
+///
+/// Pure: no I/O and no environment lookups, so the startup settings are
+/// verifiable by `cargo test` without administrator rights. The caller is
+/// responsible for writing the UTF-16 encoded document and invoking schtasks.
+pub(crate) fn build_startup_task(exe: &str, user_id: &str) -> Result<String, String> {
+    validate_task_command_path(exe)?;
+    // Command and Arguments are separate XML elements, so the exe path is never
+    // re-parsed as a command line and cannot split into extra arguments the way
+    // a schtasks /TR value did.
+    Ok(build_task_xml(
+        &format!("\"{exe}\""),
+        "--minimized",
+        user_id,
+    ))
+}
+
 /// Registers or removes Windows startup scheduled task (requires elevation for HIGHEST).
 pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     let output = if enabled {
+        cleanup_stale_task_xml();
         let exe = std::env::current_exe().map_err(|e| format!("cannot resolve exe path: {e}"))?;
         let exe_str = exe.to_str().ok_or("exe path is not valid UTF-8")?;
-        // Reject characters that would break the task XML or allow injection.
-        // The path is embedded as XML text and wrapped in quotes for the
-        // action Command, so quotes, cmd metacharacters and control characters
-        // are all rejected up front.
-        if exe_str.contains('"')
-            || exe_str.contains('\'')
-            || exe_str.contains('&')
-            || exe_str.contains('|')
-            || exe_str.contains(';')
-            || exe_str.contains('%')
-            || exe_str.contains('^')
-            || exe_str.contains('`')
-            || exe_str.contains('$')
-            || exe_str.contains('(')
-            || exe_str.contains(')')
-            || exe_str.contains('<')
-            || exe_str.contains('>')
-            || exe_str.contains('*')
-            || exe_str.contains('?')
-            || exe_str.contains('{')
-            || exe_str.contains('}')
-            || exe_str.contains('!')
-            || exe_str.contains('\n')
-            || exe_str.contains('\r')
-        {
-            return Err("exe path contains invalid characters".to_string());
-        }
-        // Block non-ASCII control/bidi override that could hide injection
-        if exe_str
-            .chars()
-            .any(|c| c.is_control() || c == '\u{202E}' || c == '\u{202D}')
-        {
-            return Err("exe path contains invalid unicode".to_string());
-        }
-        // A trailing backslash would escape the closing quote of the action
-        // Command (e.g. "C:\path\" --minimized" → the \" becomes an escaped quote).
-        if exe_str.ends_with('\\') {
-            return Err("exe path must not end with backslash".to_string());
-        }
-        // Command and Arguments are separate XML elements, so the exe path is
-        // never re-parsed as a command line and cannot split into extra
-        // arguments the way a schtasks /TR value did.
         // Bounded by schtasks_output timeout so a hung Task Scheduler cannot freeze the UI.
-        let xml = build_task_xml(
-            &format!("\"{exe_str}\""),
-            "--minimized",
-            &current_user_id()?,
-        );
+        let xml = build_startup_task(exe_str, &current_user_id()?)?;
         // Unique per process so a concurrent toggle cannot clobber the file
         // another instance is importing.
         let xml_path = std::env::temp_dir()
-            .join(format!("framework-crate-task-{}.xml", std::process::id()))
+            .join(format!("{TASK_XML_PREFIX}{}.xml", std::process::id()))
             .to_string_lossy()
             .into_owned();
         std::fs::write(&xml_path, utf16le_with_bom(&xml))
@@ -847,6 +898,15 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     };
     if output.status.success() {
         return Ok(());
+    }
+    // The task is registered with RunLevel=HighestAvailable, so a non-elevated
+    // process is the common cause. Report that directly instead of surfacing
+    // the localized schtasks text, which does not say what to do about it.
+    if enabled && !is_elevated() {
+        return Err(
+            "launch at startup needs administrator privileges; restart Framework Crate as administrator and try again"
+                .to_string(),
+        );
     }
     // schtasks errors follow the OEM codepage (cp950 on zh-TW); decode
     // accordingly so the message is readable instead of mojibake.
@@ -1213,6 +1273,63 @@ mod tests {
         assert!(xml.contains("<Command>&quot;C:\\app\\framework-crate.exe&quot;<"));
         assert!(xml.contains("<Arguments>--minimized<"));
         assert!(xml.contains("<UserId>DOM\\u<"));
+    }
+
+    #[test]
+    fn startup_task_rejects_dangerous_paths_offline() {
+        // Runs without elevation, unlike the schtasks round-trip test below.
+        let base = r"C:\app\framework-crate.exe";
+        assert!(
+            super::build_startup_task(base, r"DOM\u").is_ok(),
+            "a plain path must be accepted"
+        );
+
+        for bad in [
+            r#"C:\a"b.exe"#,
+            r"C:\a&b.exe",
+            r"C:\a|b.exe",
+            r"C:\a;b.exe",
+            r"C:\a%b.exe",
+            r"C:\a^b.exe",
+            r"C:\a`b.exe",
+            r"C:\a$b.exe",
+            r"C:\a(b).exe",
+            r"C:\a<b>.exe",
+            r"C:\a*b.exe",
+            r"C:\a?b.exe",
+            r"C:\a{b}.exe",
+            r"C:\a!b.exe",
+            r"C:\a'b.exe",
+            "C:\\a\nb.exe",
+            "C:\\a\rb.exe",
+            "C:\\a\u{202E}b.exe",
+            "C:\\a\u{7}b.exe",
+            r"C:\app\",
+        ] {
+            assert!(
+                super::build_startup_task(bad, r"DOM\u").is_err(),
+                "expected rejection for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_task_xml_is_verifiable_without_elevation() {
+        let xml =
+            super::build_startup_task(r"C:\app\framework-crate.exe", r"DOM\u").expect("valid path");
+
+        // schtasks defaults would silently skip a battery-powered logon.
+        assert!(xml.contains("<DisallowStartIfOnBatteries>false<"));
+        assert!(xml.contains("<StopIfGoingOnBatteries>false<"));
+        // PT72H would stop the tray app three days after logon.
+        assert!(xml.contains("<ExecutionTimeLimit>PT0S<"));
+        assert!(xml.contains("<RestartOnFailure>"));
+        assert!(xml.contains("<RunLevel>HighestAvailable<"));
+        assert!(xml.contains("<LogonType>InteractiveToken<"));
+        // Command and Arguments stay separate so the path is never re-parsed.
+        assert!(xml.contains(r"<Command>&quot;C:\app\framework-crate.exe&quot;<"));
+        assert!(xml.contains("<Arguments>--minimized<"));
+        assert!(xml.contains(r"<UserId>DOM\u<"));
     }
 
     #[test]
