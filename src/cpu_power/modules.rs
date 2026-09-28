@@ -18,6 +18,12 @@ pub(super) const INTEL_MSR_SHA256: &str =
 pub(super) const INTEL_MCHBAR_SHA256: &str =
     "3f82b832d99b4aac37d2a20fdb7c9baa2a3bc0488612c9019c9484eb0e8a6eae";
 
+/// Module blob file names. Named next to the hashes they belong to: a typo in
+/// a file name compiles either way and only shows up as a missing blob at
+/// runtime, next to a hash that is correct.
+pub(super) const INTEL_MSR_FILE: &str = "IntelMSR.bin";
+pub(super) const INTEL_MCHBAR_FILE: &str = "IntelMCHBAR.bin";
+
 /// Reads the locally installed modules tag recorded at download time.
 pub(super) fn local_modules_version() -> Option<String> {
     let dir = modules_dir();
@@ -172,8 +178,8 @@ pub fn modules_downloaded() -> bool {
             return cached;
         }
     }
-    let present = modules_dir().join("IntelMSR.bin").is_file()
-        && modules_dir().join("IntelMCHBAR.bin").is_file();
+    let present = modules_dir().join(INTEL_MSR_FILE).is_file()
+        && modules_dir().join(INTEL_MCHBAR_FILE).is_file();
     *MODULES_CACHE.write() = Some(present);
     present
 }
@@ -291,7 +297,7 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
         return Err(e);
     }
     // 4. Require the two expected bins as regular files, log advisory hashes.
-    for name in ["IntelMSR.bin", "IntelMCHBAR.bin"] {
+    for name in [INTEL_MSR_FILE, INTEL_MCHBAR_FILE] {
         let src = staging.join(name);
         let meta =
             std::fs::symlink_metadata(&src).map_err(|_| format!("archive missing {}", name))?;
@@ -300,10 +306,10 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
             return Err(format!("archive missing {}", name));
         }
     }
-    let _ = verify_module_hash(&staging.join("IntelMSR.bin"), INTEL_MSR_SHA256);
-    let _ = verify_module_hash(&staging.join("IntelMCHBAR.bin"), INTEL_MCHBAR_SHA256);
+    let _ = verify_module_hash(&staging.join(INTEL_MSR_FILE), INTEL_MSR_SHA256);
+    let _ = verify_module_hash(&staging.join(INTEL_MCHBAR_FILE), INTEL_MCHBAR_SHA256);
     // 5. Promote verified bins into modules dir; old bins stay until replaced.
-    for name in ["IntelMSR.bin", "IntelMCHBAR.bin"] {
+    for name in [INTEL_MSR_FILE, INTEL_MCHBAR_FILE] {
         let src = staging.join(name);
         let dst = dir.join(name);
         let _ = std::fs::remove_file(&dst);
@@ -535,11 +541,11 @@ pub fn pawnio_modules_version() -> String {
     let dir = modules_dir();
     let v = if let Some(local) = local_modules_version() {
         local
-    } else if dir.join("IntelMSR.bin").is_file() && dir.join("IntelMCHBAR.bin").is_file() {
-        let msr = std::fs::read(dir.join("IntelMSR.bin"))
+    } else if dir.join(INTEL_MSR_FILE).is_file() && dir.join(INTEL_MCHBAR_FILE).is_file() {
+        let msr = std::fs::read(dir.join(INTEL_MSR_FILE))
             .map(|b| sha256_hex(&b))
             .unwrap_or_default();
-        let mchbar = std::fs::read(dir.join("IntelMCHBAR.bin"))
+        let mchbar = std::fs::read(dir.join(INTEL_MCHBAR_FILE))
             .map(|b| sha256_hex(&b))
             .unwrap_or_default();
         if msr == INTEL_MSR_SHA256 && mchbar == INTEL_MCHBAR_SHA256 {
@@ -580,7 +586,7 @@ pub(super) fn load_intel_msr_blob() -> Result<Vec<u8>, &'static str> {
             return Ok((**cached).clone());
         }
     }
-    let blob = read_verified_module(&modules_dir().join("IntelMSR.bin"), INTEL_MSR_SHA256)?;
+    let blob = read_verified_module(&modules_dir().join(INTEL_MSR_FILE), INTEL_MSR_SHA256)?;
     let arc = Arc::new(blob.clone());
     *MSR_BLOB_CACHE.lock() = Some(arc);
     Ok(blob)
@@ -594,7 +600,7 @@ pub(super) fn load_intel_mchbar_blob() -> Result<Vec<u8>, &'static str> {
             return Ok((**cached).clone());
         }
     }
-    let blob = read_verified_module(&modules_dir().join("IntelMCHBAR.bin"), INTEL_MCHBAR_SHA256)?;
+    let blob = read_verified_module(&modules_dir().join(INTEL_MCHBAR_FILE), INTEL_MCHBAR_SHA256)?;
     let arc = Arc::new(blob.clone());
     *MCHBAR_BLOB_CACHE.lock() = Some(arc);
     Ok(blob)

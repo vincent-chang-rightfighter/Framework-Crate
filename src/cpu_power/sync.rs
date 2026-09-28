@@ -31,7 +31,9 @@ impl SyncThread {
         params: PowerLimitParams,
         external_alive: Arc<AtomicBool>,
     ) -> Result<(), &'static str> {
-        self.stop();
+        // The caller has already joined any previous worker while holding the
+        // lock, so there is nothing left to tear down here.
+        self.join_running();
 
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
@@ -64,20 +66,23 @@ impl SyncThread {
         Ok(())
     }
 
-    /// Stops sync thread (single shutdown helper; Drop reuses it).
-    /// The worker wakes within ~100ms (interruptible sleep), so joining
-    /// under the outer `sync_thread` lock cannot stall the UI.
-    fn shutdown(&mut self) {
+    /// Stops the running worker and joins it, leaving `alive` untouched.
+    ///
+    /// Used when a new worker is about to take its place: liveness belongs to
+    /// the new worker, so clearing it here would make a freshly started sync
+    /// look dead. The worker wakes within ~100ms (interruptible sleep), so
+    /// joining under the caller's lock cannot stall the UI.
+    pub(super) fn join_running(&mut self) {
         self.running.store(false, Ordering::Release);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        self.alive.store(false, Ordering::Release);
     }
 
-    /// Stops sync thread.
-    fn stop(&mut self) {
-        self.shutdown();
+    /// Stops the worker, joins it, and marks the thread not alive.
+    pub(super) fn shutdown(&mut self) {
+        self.join_running();
+        self.alive.store(false, Ordering::Release);
     }
 }
 

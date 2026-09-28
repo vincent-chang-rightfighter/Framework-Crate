@@ -48,10 +48,6 @@ fn bios_defaults_path() -> Result<std::path::PathBuf, String> {
         .join("bios_defaults.toml"))
 }
 
-pub(super) fn bios_defaults_file_exists() -> bool {
-    bios_defaults_path().map(|p| p.exists()).unwrap_or(false)
-}
-
 /// Reads current AC-present state from shared snapshot (defaults to AC).
 pub fn read_ac_present() -> bool {
     *BATTERY_AC_SNAPSHOT.read()
@@ -64,18 +60,39 @@ pub fn publish_ac_snapshot(ac_present: bool) {
     *BATTERY_AC_SNAPSHOT.write() = ac_present;
 }
 
-pub(super) fn load_persisted_bios_defaults() -> Option<BiosDefaults> {
-    let path = bios_defaults_path().ok()?;
+/// Outcome of looking for the persisted BIOS factory snapshot.
+///
+/// The three "no defaults" outcomes lead to different decisions: only `Missing`
+/// may be followed by capturing the live values. `Unusable` and `Unavailable`
+/// both mean the factory limits must not be written over.
+#[derive(Debug)]
+pub(super) enum PersistedBios {
+    /// Parsed successfully; the factory limits are here.
+    Loaded(BiosDefaults),
+    /// No file. First run, or the user deleted it to re-capture.
+    Missing,
+    /// Present but unparseable. Already copied aside, and must not be
+    /// overwritten, or the factory limits are gone for good.
+    Unusable,
+    /// The config directory could not be resolved, so the file can be neither
+    /// read nor written.
+    Unavailable,
+}
+
+pub(super) fn load_persisted_bios_defaults() -> PersistedBios {
+    let Ok(path) = bios_defaults_path() else {
+        return PersistedBios::Unavailable;
+    };
     if path.exists() {
         crate::config::warn_if_world_writable(&path);
     }
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         // Missing file: first run.
-        Err(_) => return None,
+        Err(_) => return PersistedBios::Missing,
     };
     match toml::from_str::<BiosDefaults>(&content) {
-        Ok(parsed) => Some(parsed),
+        Ok(parsed) => PersistedBios::Loaded(parsed),
         Err(e) => {
             // Corrupt file: back up and refuse to overwrite.
             let backup =
@@ -91,7 +108,7 @@ pub(super) fn load_persisted_bios_defaults() -> Option<BiosDefaults> {
                     e, be
                 ),
             }
-            None
+            PersistedBios::Unusable
         }
     }
 }
@@ -173,6 +190,40 @@ mod tests {
     }
 
     #[test]
+    fn missing_file_is_distinct_from_an_unusable_one() {
+        // The two cases both mean "no defaults in hand" but only the first may
+        // be followed by capturing live values. Collapsing them would let a
+        // corrupt file be overwritten, destroying the factory limits it still
+        // holds.
+        let _env_guard = crate::config::CONFIG_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR");
+        unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", dir.path()) };
+
+        // Nothing written yet.
+        assert!(
+            matches!(load_persisted_bios_defaults(), PersistedBios::Missing),
+            "an absent file must be Missing, not Unusable"
+        );
+
+        // A file that is not valid TOML for BiosDefaults.
+        let path = dir.path().join("bios_defaults.toml");
+        std::fs::write(&path, "this is not = valid = toml [[[").unwrap();
+        assert!(
+            matches!(load_persisted_bios_defaults(), PersistedBios::Unusable),
+            "an unparseable file must be Unusable, not Missing"
+        );
+        // It must still be there: the corrupt copy is a backup, not a move.
+        assert!(path.exists(), "the corrupt file must not be removed");
+
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", v) };
+        } else {
+            unsafe { std::env::remove_var("FRAMEWORK_CONTROL_CONFIG_DIR") };
+        }
+    }
+
+    #[test]
     fn bios_defaults_persist_and_load() {
         let _env_guard = crate::config::CONFIG_DIR_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -200,16 +251,20 @@ mod tests {
             captured_on_ac: false,
         };
         persist_bios_defaults(&defaults).unwrap();
-        let loaded = load_persisted_bios_defaults().expect("should load persisted");
-        assert_eq!(defaults, loaded);
+        match load_persisted_bios_defaults() {
+            PersistedBios::Loaded(loaded) => assert_eq!(defaults, loaded),
+            other => panic!("expected Loaded, got {other:?}"),
+        }
         // Second persist should overwrite (but init_bios_defaults would not call it if already loaded)
         let defaults2 = BiosDefaults {
             pl1_watts: 99.0,
             ..defaults
         };
         persist_bios_defaults(&defaults2).unwrap();
-        let loaded2 = load_persisted_bios_defaults().unwrap();
-        assert_eq!(loaded2.pl1_watts, 99.0);
+        match load_persisted_bios_defaults() {
+            PersistedBios::Loaded(loaded2) => assert_eq!(loaded2.pl1_watts, 99.0),
+            other => panic!("expected Loaded, got {other:?}"),
+        }
         unsafe {
             if let Some(v) = prev {
                 std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", v);

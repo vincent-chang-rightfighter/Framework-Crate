@@ -19,7 +19,7 @@ pub use modules::{
     redetect_modules,
 };
 
-use bios::{bios_defaults_file_exists, load_persisted_bios_defaults, persist_bios_defaults};
+use bios::{PersistedBios, load_persisted_bios_defaults, persist_bios_defaults};
 use read::read_cpu_power;
 use sync::SyncThread;
 
@@ -80,26 +80,39 @@ impl CpuPowerState {
         if self.bios_defaults().is_some() {
             return;
         }
-        // Try loading persisted originals.
-        if let Some(persisted) = load_persisted_bios_defaults() {
-            with_write_lock(&self.bios, |guard| {
-                *guard = Arc::new(Some(persisted));
-            });
-            info!(
-                "Loaded persisted BIOS defaults: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s)",
-                persisted.pl1_watts,
-                persisted.pl1_time_s,
-                persisted.pl2_watts,
-                persisted.pl2_time_s
-            );
-            return;
-        }
-        // If file exists but corrupt, do not overwrite; already backed up.
-        if bios_defaults_file_exists() {
-            warn!(
-                "bios_defaults.toml exists but could not be loaded; refusing to overwrite with live values"
-            );
-            return;
+        // Try loading persisted originals. Each outcome decides whether the
+        // live values below may be written over them, so they are not
+        // collapsed into "no file".
+        match load_persisted_bios_defaults() {
+            PersistedBios::Loaded(persisted) => {
+                with_write_lock(&self.bios, |guard| {
+                    *guard = Arc::new(Some(persisted));
+                });
+                info!(
+                    "Loaded persisted BIOS defaults: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s)",
+                    persisted.pl1_watts,
+                    persisted.pl1_time_s,
+                    persisted.pl2_watts,
+                    persisted.pl2_time_s
+                );
+                return;
+            }
+            // Corrupt, and already copied aside: overwriting would destroy the
+            // only remaining record of the factory limits.
+            PersistedBios::Unusable => {
+                warn!(
+                    "bios_defaults.toml exists but could not be loaded; refusing to overwrite with live values"
+                );
+                return;
+            }
+            // The file can be neither read nor written, so there is nothing to
+            // preserve and nothing to capture into.
+            PersistedBios::Unavailable => {
+                warn!("cannot resolve the config directory; skipping BIOS defaults capture");
+                return;
+            }
+            // First run, or the user deleted the file to re-capture.
+            PersistedBios::Missing => {}
         }
         let info = self.snapshot();
         if !info.available {
@@ -164,10 +177,7 @@ impl CpuPowerState {
     /// joining under it cannot deadlock.
     pub fn start_sync(&self, params: PowerLimitParams) -> Result<(), &'static str> {
         let mut thread = self.sync_thread.lock();
-        thread.running.store(false, Ordering::Release);
-        if let Some(old) = thread.handle.take() {
-            let _ = old.join();
-        }
+        thread.join_running();
         thread.start(params, Arc::clone(&self.sync_alive))?;
         self.sync_enabled.store(true, Ordering::Release);
         self.sync_start_ms
@@ -232,11 +242,7 @@ impl CpuPowerState {
     /// be incorrectly marked stopped (which would disable a freshly started sync).
     pub fn stop_sync(&self) {
         let mut thread = self.sync_thread.lock();
-        thread.running.store(false, Ordering::Release);
-        if let Some(old) = thread.handle.take() {
-            let _ = old.join();
-        }
-        thread.alive.store(false, Ordering::Release);
+        thread.shutdown();
         drop(thread);
         self.sync_alive.store(false, Ordering::Release);
         self.sync_enabled.store(false, Ordering::Release);
@@ -302,13 +308,29 @@ mod tests {
     #[test]
     fn try_restart_if_dead_safe_without_params() {
         let state = CpuPowerState::default();
-        // No desired params -> must not restart and must not panic.
+        // sync_enabled has to be set, or is_sync_dead() returns false and the
+        // missing-params guard below is never reached. sync_start_ms stays 0 so
+        // the startup grace period does not short-circuit either.
+        state
+            .sync_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(state.is_sync_dead(), "precondition: sync must look dead");
+        // Dead-looking but with nothing to restart from: must not restart, and
+        // must not panic.
         assert!(!state.try_restart_if_dead());
-        state.stop_sync();
         assert!(
-            !state
+            state
                 .sync_enabled
-                .load(std::sync::atomic::Ordering::Acquire)
+                .load(std::sync::atomic::Ordering::Acquire),
+            "a no-op restart must leave the flag alone"
         );
     }
+
+    // The 5s restart throttle has no test. Both guards compare against
+    // monotonic_ms(), which counts from the first call in the process, so
+    // reaching the window between the 1.5s liveness grace period and the 5s
+    // throttle would need the suite to still be running 1.5s in. It finishes in
+    // well under a second, and a saturating_sub on a clock that has not reached
+    // 2000ms yet yields 0, which trips the grace check instead. Covering this
+    // needs an injected clock, which is more machinery than the guard is worth.
 }
