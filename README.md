@@ -151,16 +151,23 @@ framework_lib (CrosEc) → background_task → Arc<RwLock> → UI (view reads)
 
 ### Resource Usage
 
-Measured on `target/release/framework-crate.exe` (Windows, `iced 0.14 + wgpu`, `cargo build --release` with `lto = "fat"` `strip = true`):
+Measured on `target/release/framework-crate.exe` (Windows, `iced 0.14 + wgpu`, `cargo build --release` with `lto = "fat"` `strip = true`), elevated, on Windows 11 / 31.5 GB RAM / Intel Arc. Mean of 3 launches, 60 s each, sampled once the window had appeared.
 
-| Metric | Before | After | Change |
-|--------|--------|-------|--------|
-| Private Memory | 166 MB | 114 MB | -52 MB (-31%) |
-| Working Set | 211 MB | 159 MB | -52 MB (-24%) |
-| CPU (idle) | <1% | <1% | fewer wakeups |
-| Binary Size | 9.3 MiB | 9.3 MiB | `framework_crate` 5% of `.text` |
+| Metric | Value |
+|--------|-------|
+| Working Set | ~159 MB |
+| Private (commit charge) | ~119 MB |
+| Binary Size | 9.51 MiB |
 
-Key changes: `SmallVec` for fan/PD port collections and `antialiasing: false` for `wgpu` to avoid multisample buffers, while capping thermal history to 300 samples.
+Working Set is what Task Manager's Processes **Memory** column shows. To reproduce:
+
+```powershell
+$p = Start-Process .\target\release\framework-crate.exe -PassThru
+1..20 | ForEach-Object { Start-Sleep 3; $p.Refresh()
+  "{0,3}s  workingSet={1,6} MB  private={2,6} MB" -f `
+    ($_*3), [math]::Round($p.WorkingSet64/1MB,1), [math]::Round($p.PrivateMemorySize64/1MB,1) }
+$p.Kill()
+```
 
 ## Configuration
 
