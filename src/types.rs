@@ -341,6 +341,11 @@ pub fn is_battery_sensor(name: &str) -> bool {
 }
 
 /// Temp driving fan curve: configured sensor or hottest non-battery fallback.
+///
+/// Deliberately prefers a real thermal sensor over Battery: battery
+/// temperature lags and can sit far below CPU temperature. Battery is only
+/// used when it is literally the only reading available, which beats leaving
+/// the fans at their last duty with no control input at all.
 pub fn curve_control_temp(temps: &BTreeMap<String, i32>, sensors: &[String]) -> i32 {
     let non_battery = || {
         temps

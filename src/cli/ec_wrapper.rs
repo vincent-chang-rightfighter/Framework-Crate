@@ -578,12 +578,13 @@ impl EcClient {
             .map_err(|e| format!("Failed to set charge limit: {:?}", e))
     }
 
-    #[allow(dead_code)]
-    pub fn get_charge_limit(&self) -> Result<(u8, u8), String> {
-        self.ec
-            .get_charge_limit()
-            .map_err(|e| format!("Failed to get charge limit: {:?}", e))
-    }
+    // C-cleanup: unused helper disabled; Windows-only.
+    // #[allow(dead_code)]
+    // pub fn get_charge_limit(&self) -> Result<(u8, u8), String> {
+    //     self.ec
+    //         .get_charge_limit()
+    //         .map_err(|e| format!("Failed to get charge limit: {:?}", e))
+    // }
 
     pub fn pd_ports(&self) -> SmallVec<[UsbCPort; 4]> {
         use framework_lib::chromium_ec::EcRequestRaw;

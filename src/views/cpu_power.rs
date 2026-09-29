@@ -291,7 +291,10 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             .spacing(4),
         );
 
-        // Editable PL1/PL2 writes to MSR 0x610.
+        // Editable PL1/PL2 writes to MSR 0x610. Only the PL1 time window is
+        // editable; the PL2 window follows the live register value instead of
+        // taking a second field, so an apply can never pair a PL2 wattage with
+        // a stale or zero tau.
         settings_content = settings_content.push(text("PL1/PL2 Control").size(FONT_BODY));
         settings_content = settings_content.push(
             row![

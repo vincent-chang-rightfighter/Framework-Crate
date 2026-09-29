@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
@@ -33,20 +33,16 @@ thread_local! {
 }
 
 static TRAY_THREAD_ID: AtomicU32 = AtomicU32::new(0);
-static TRAY_HWND_GLOBAL: AtomicU32 = AtomicU32::new(0);
-static TRAY_HWND_GLOBAL_HI: AtomicU32 = AtomicU32::new(0);
+/// Tray window handle shared with other threads. One 64-bit atomic: the old
+/// split LO/HI pair could tear if the pump recreated the window mid-read.
+static TRAY_HWND_GLOBAL: AtomicU64 = AtomicU64::new(0);
 
 fn store_global_hwnd(hwnd: isize) {
-    let lo = hwnd as u32;
-    let hi = ((hwnd as u64) >> 32) as u32;
-    TRAY_HWND_GLOBAL.store(lo, Ordering::Release);
-    TRAY_HWND_GLOBAL_HI.store(hi, Ordering::Release);
+    TRAY_HWND_GLOBAL.store(hwnd as u64, Ordering::Release);
 }
 
 fn load_global_hwnd() -> isize {
-    let lo = TRAY_HWND_GLOBAL.load(Ordering::Acquire) as u64;
-    let hi = TRAY_HWND_GLOBAL_HI.load(Ordering::Acquire) as u64;
-    ((hi << 32) | lo) as isize
+    TRAY_HWND_GLOBAL.load(Ordering::Acquire) as isize
 }
 
 /// Wakes tray thread to drain command queue; caller must retry on failure.

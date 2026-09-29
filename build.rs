@@ -5,8 +5,8 @@ use std::io::Write;
 use std::path::Path;
 
 fn main() {
-    // Expose the pinned framework_lib version so the UI (views.rs / app.rs)
-    // never shows a stale hardcoded version after a dependency bump.
+    // Expose the pinned framework_lib version so the UI (views/cpu_power.rs /
+    // app/cpu_power.rs) never shows a stale hardcoded version after a dependency bump.
     println!("cargo:rerun-if-changed=Cargo.lock");
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let lock_path = Path::new(&manifest_dir).join("Cargo.lock");

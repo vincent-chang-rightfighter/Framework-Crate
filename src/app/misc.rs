@@ -244,7 +244,11 @@ impl App {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                let path = std::env::temp_dir().join(format!("framework_crate_debug_{}.txt", ts));
+                let path = std::env::temp_dir().join(format!(
+                    "framework_crate_debug_{}_{}.txt",
+                    ts,
+                    std::process::id()
+                ));
                 if let Err(e) = std::fs::write(&path, &report) {
                     tracing::error!("Failed to write debug report {}: {}", path.display(), e);
                 }

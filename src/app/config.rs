@@ -83,7 +83,7 @@ impl App {
                     }
                 }
                 // Clamp temperature between neighbors to avoid duplicate temps collapsing control points.
-                // Editable range is 0..99; 100??10 is locked 100%.
+                // Editable range is 0..99; 100-110 is locked 100%.
                 let temp = {
                     let cfg = read_lock(&self.state.lifecycle.config);
                     let points = cfg
