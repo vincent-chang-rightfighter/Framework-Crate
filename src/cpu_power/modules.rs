@@ -11,7 +11,8 @@ pub(super) const MODULES_DIR_NAME: &str = "modules";
 pub(super) const MODULES_VERSION_FILE: &str = ".version";
 /// Last-known-good PawnIO.Modules upstream release tag, used ONLY as a
 /// fallback download URL when the GitHub API is unreachable. The primary
-/// path always queries the latest release; hashes stay advisory.
+/// path always queries the latest release. Hashes are enforced by default;
+/// set FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1 only after manual verification.
 pub(super) const LAST_KNOWN_MODULES_VERSION: &str = "0.2.11";
 pub(super) const INTEL_MSR_SHA256: &str =
     "d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a21cb48413c9b92e5f";
@@ -23,6 +24,13 @@ pub(super) const INTEL_MCHBAR_SHA256: &str =
 /// runtime, next to a hash that is correct.
 pub(super) const INTEL_MSR_FILE: &str = "IntelMSR.bin";
 pub(super) const INTEL_MCHBAR_FILE: &str = "IntelMCHBAR.bin";
+
+/// Upper bound for the downloaded Modules ZIP. Releases are a few hundred KB;
+/// anything larger is either the wrong file or a decompression-bomb attempt.
+const MAX_MODULES_ZIP_BYTES: u64 = 32 * 1024 * 1024;
+/// Upper bound for total extracted staging bytes and member count.
+const MAX_STAGING_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ARCHIVE_MEMBERS: usize = 1024;
 
 /// Reads the locally installed modules tag recorded at download time.
 pub(super) fn local_modules_version() -> Option<String> {
@@ -130,23 +138,47 @@ pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Explicit opt-in for loading module blobs whose hashes are not pinned.
+/// Default is fail-closed; only set this after manually verifying a newer
+/// upstream release.
+fn module_hash_override_enabled() -> bool {
+    std::env::var_os("FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH").is_some()
+}
+
+fn check_module_hash(
+    path: &std::path::Path,
+    expected: &str,
+    actual: &str,
+    allow_unknown: bool,
+) -> Result<(), &'static str> {
+    if actual == expected {
+        return Ok(());
+    }
+    if allow_unknown {
+        warn!(
+            "PawnIO module hash mismatch but continuing due to FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH: {} expected {} got {}",
+            path.display(),
+            expected,
+            actual
+        );
+        return Ok(());
+    }
+    warn!(
+        "PawnIO module hash mismatch, refusing to load: {} expected {} got {}",
+        path.display(),
+        expected,
+        actual
+    );
+    Err("module hash mismatch")
+}
+
 pub(super) fn verify_module_hash(
     path: &std::path::Path,
     expected: &str,
 ) -> Result<(), &'static str> {
     let bytes = std::fs::read(path).map_err(|_| "module blob missing")?;
     let actual = sha256_hex(&bytes);
-    if actual != expected {
-        // Advisory only: modules track upstream Latest, so a hash rotation
-        // must not brick CPU Power. Mismatch is logged for audit.
-        warn!(
-            "PawnIO module hash mismatch: {} expected {} got {}",
-            path.display(),
-            expected,
-            actual
-        );
-    }
-    Ok(())
+    check_module_hash(path, expected, &actual, module_hash_override_enabled())
 }
 
 /// Reads module blob and verifies hash on same bytes to prevent TOCTOU.
@@ -156,21 +188,14 @@ pub(super) fn read_verified_module(
 ) -> Result<Vec<u8>, &'static str> {
     let bytes = std::fs::read(path).map_err(|_| "module blob missing")?;
     let actual = sha256_hex(&bytes);
-    if actual != expected {
-        // Advisory only, see verify_module_hash.
-        warn!(
-            "PawnIO module hash mismatch: {} expected {} got {}",
-            path.display(),
-            expected,
-            actual
-        );
-    }
+    check_module_hash(path, expected, &actual, module_hash_override_enabled())?;
     Ok(bytes)
 }
 
 pub(super) static MODULES_CACHE: parking_lot::RwLock<Option<bool>> = parking_lot::RwLock::new(None);
 
-/// Checks if module blobs are present in any candidate dir (cached).
+/// Checks if usable module blobs are present (cached). Presence alone is not
+/// enough: hashes are enforced, so a mismatched manual copy counts as missing.
 pub fn modules_downloaded() -> bool {
     {
         let guard = MODULES_CACHE.read();
@@ -178,10 +203,13 @@ pub fn modules_downloaded() -> bool {
             return cached;
         }
     }
-    let present = modules_dir().join(INTEL_MSR_FILE).is_file()
-        && modules_dir().join(INTEL_MCHBAR_FILE).is_file();
-    *MODULES_CACHE.write() = Some(present);
-    present
+    let dir = modules_dir();
+    let present = dir.join(INTEL_MSR_FILE).is_file() && dir.join(INTEL_MCHBAR_FILE).is_file();
+    let ready = present
+        && verify_module_hash(&dir.join(INTEL_MSR_FILE), INTEL_MSR_SHA256).is_ok()
+        && verify_module_hash(&dir.join(INTEL_MCHBAR_FILE), INTEL_MCHBAR_SHA256).is_ok();
+    *MODULES_CACHE.write() = Some(ready);
+    ready
 }
 
 pub(super) fn invalidate_modules_cache() {
@@ -216,9 +244,11 @@ fn member_path_safe(name: &str) -> bool {
     true
 }
 
-/// Rejects symlinks/junctions inside staging (no symlink following).
-fn staging_has_no_links(staging: &std::path::Path) -> Result<(), String> {
+/// Rejects symlinks/junctions inside staging (no symlink following) and caps
+/// total extracted bytes, so a hostile archive cannot fill the disk.
+fn validate_staging(staging: &std::path::Path) -> Result<(), String> {
     let mut stack = vec![staging.to_path_buf()];
+    let mut total: u64 = 0;
     while let Some(p) = stack.pop() {
         let entries = std::fs::read_dir(&p).map_err(|e| format!("read staging failed: {}", e))?;
         for e in entries {
@@ -231,6 +261,18 @@ fn staging_has_no_links(staging: &std::path::Path) -> Result<(), String> {
             }
             if ft.is_dir() {
                 stack.push(e.path());
+            } else if ft.is_file() {
+                total = total.saturating_add(
+                    e.metadata()
+                        .map(|m| m.len())
+                        .map_err(|e| format!("staging metadata failed: {}", e))?,
+                );
+                if total > MAX_STAGING_BYTES {
+                    return Err(format!(
+                        "staging exceeds {} bytes, refusing to promote",
+                        MAX_STAGING_BYTES
+                    ));
+                }
             }
         }
     }
@@ -249,10 +291,18 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
     if !list_out.status.success() {
         return Err("failed to list archive contents".to_string());
     }
+    let mut member_count = 0usize;
     for member in String::from_utf8_lossy(&list_out.stdout).lines() {
         let m = member.trim().trim_end_matches('/');
         if m.is_empty() {
             continue;
+        }
+        member_count += 1;
+        if member_count > MAX_ARCHIVE_MEMBERS {
+            return Err(format!(
+                "archive has more than {} members, refusing to extract",
+                MAX_ARCHIVE_MEMBERS
+            ));
         }
         if !member_path_safe(m) {
             return Err(format!("archive contains unsafe path: {}", m));
@@ -291,12 +341,12 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
             return Err("extraction failed".to_string());
         }
     }
-    // 3. Reject symlinks planted inside staging.
-    if let Err(e) = staging_has_no_links(&staging) {
+    // 3. Reject symlinks planted inside staging and cap extracted bytes.
+    if let Err(e) = validate_staging(&staging) {
         cleanup(&staging, zip_tmp);
         return Err(e);
     }
-    // 4. Require the two expected bins as regular files, log advisory hashes.
+    // 4. Require the two expected bins as regular files, then enforce hashes.
     for name in [INTEL_MSR_FILE, INTEL_MCHBAR_FILE] {
         let src = staging.join(name);
         let meta =
@@ -306,8 +356,18 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
             return Err(format!("archive missing {}", name));
         }
     }
-    let _ = verify_module_hash(&staging.join(INTEL_MSR_FILE), INTEL_MSR_SHA256);
-    let _ = verify_module_hash(&staging.join(INTEL_MCHBAR_FILE), INTEL_MCHBAR_SHA256);
+    for (name, expected) in [
+        (INTEL_MSR_FILE, INTEL_MSR_SHA256),
+        (INTEL_MCHBAR_FILE, INTEL_MCHBAR_SHA256),
+    ] {
+        if let Err(e) = verify_module_hash(&staging.join(name), expected) {
+            cleanup(&staging, zip_tmp);
+            return Err(format!(
+                "{} {}; upstream may be newer than this app — update the app, or set FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1 only after manual verification",
+                name, e
+            ));
+        }
+    }
     // 5. Promote verified bins into modules dir; old bins stay until replaced.
     for name in [INTEL_MSR_FILE, INTEL_MCHBAR_FILE] {
         let src = staging.join(name);
@@ -320,6 +380,24 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
     }
     cleanup(&staging, zip_tmp);
     invalidate_blob_cache();
+    Ok(())
+}
+
+/// Size sanity check before extraction: rejects truncated downloads below and
+/// wrong-file/decompression-bomb candidates above.
+fn check_zip_size(zip_tmp: &std::path::Path) -> Result<(), String> {
+    let meta = std::fs::metadata(zip_tmp).map_err(|e| format!("stat zip failed: {}", e))?;
+    if meta.len() < 1000 {
+        let _ = std::fs::remove_file(zip_tmp);
+        return Err("downloaded zip too small".to_string());
+    }
+    if meta.len() > MAX_MODULES_ZIP_BYTES {
+        let _ = std::fs::remove_file(zip_tmp);
+        return Err(format!(
+            "downloaded zip exceeds {} bytes",
+            MAX_MODULES_ZIP_BYTES
+        ));
+    }
     Ok(())
 }
 
@@ -421,13 +499,8 @@ pub fn download_and_extract_modules() -> Result<(), String> {
         ));
     }
 
-    // Basic size sanity check before extraction.
-    if let Ok(meta) = std::fs::metadata(&zip_tmp)
-        && meta.len() < 1000
-    {
-        let _ = std::fs::remove_file(&zip_tmp);
-        return Err("downloaded zip too small".to_string());
-    }
+    // Size sanity check before extraction (too small or too large).
+    check_zip_size(&zip_tmp)?;
     if let Err(e) = extract_staged_zip(&zip_tmp, &dir) {
         warn!("Staged extraction failed: {}, trying curl fallback", e);
         if try_curl_download(&url, &dir).is_ok() {
@@ -466,6 +539,8 @@ fn try_curl_download(url: &str, dir: &std::path::Path) -> Result<(), String> {
             .open(&zip_tmp)
             .map_err(|e| format!("failed to create temp zip (possible race): {}", e))?;
     }
+    // Refuse oversized responses up front via Content-Length.
+    let max_size = MAX_MODULES_ZIP_BYTES.to_string();
     let curl_output = std::process::Command::new("curl.exe")
         .args([
             "-L",
@@ -474,6 +549,8 @@ fn try_curl_download(url: &str, dir: &std::path::Path) -> Result<(), String> {
             "=https",
             "--max-time",
             "30",
+            "--max-filesize",
+            &max_size,
             "--retry",
             "1",
             "--retry-delay",
@@ -489,13 +566,8 @@ fn try_curl_download(url: &str, dir: &std::path::Path) -> Result<(), String> {
         let _ = std::fs::remove_file(&zip_tmp);
         return Err("curl download failed".to_string());
     }
-    // Basic size sanity check before extraction
-    if let Ok(meta) = std::fs::metadata(&zip_tmp)
-        && meta.len() < 1000
-    {
-        let _ = std::fs::remove_file(&zip_tmp);
-        return Err("downloaded zip too small".to_string());
-    }
+    // Size sanity check before extraction (too small or too large).
+    check_zip_size(&zip_tmp)?;
     let res = extract_staged_zip(&zip_tmp, dir);
     if res.is_ok()
         && let Some(tag) = tag_from_modules_url(url)
@@ -624,8 +696,10 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("bad.bin");
         std::fs::write(&path, b"not-a-module").unwrap();
-        // hash mismatch is advisory (warn + allow) to follow github latest without code change
-        assert!(verify_module_hash(&path, INTEL_MSR_SHA256).is_ok());
+        let actual = sha256_hex(b"not-a-module");
+        // Fail-closed by default; explicit override is the only bypass.
+        assert!(check_module_hash(&path, INTEL_MSR_SHA256, &actual, false).is_err());
+        assert!(check_module_hash(&path, INTEL_MSR_SHA256, &actual, true).is_ok());
         let _ = std::fs::remove_file(&path);
     }
 }

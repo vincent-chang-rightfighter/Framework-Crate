@@ -93,6 +93,52 @@ pub(super) fn resolved_dll_path() -> std::path::PathBuf {
     std::path::PathBuf::from(DLL_PATH)
 }
 
+/// Outcome of a winget invocation, classified from process output.
+///
+/// Exit status decides first: winget's human-readable text is localized, so
+/// text matching is only a fallback for the known non-zero up-to-date
+/// reports. Unknown output is a failure with the raw detail preserved, never
+/// silently treated as success.
+#[derive(Debug, PartialEq)]
+enum WingetOutcome {
+    Success,
+    UpToDate,
+    NotInstalled,
+    Failed(String),
+}
+
+fn classify_winget_output(output: &std::process::Output) -> WingetOutcome {
+    if output.status.success() {
+        return WingetOutcome::Success;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stderr} {stdout}");
+    // Best-effort English signals; other locales fall through to Failed with
+    // the raw detail preserved for the error message.
+    if combined.contains("already installed")
+        || combined.contains("No available upgrade")
+        || combined.contains("No newer package")
+    {
+        return WingetOutcome::UpToDate;
+    }
+    if combined.contains("not recognized")
+        || combined.contains("not found")
+        || combined.contains("No installed package found")
+        || combined.contains("No package found")
+    {
+        return WingetOutcome::NotInstalled;
+    }
+    let detail = if !stderr.trim().is_empty() {
+        stderr.trim().to_string()
+    } else if !stdout.trim().is_empty() {
+        stdout.trim().to_string()
+    } else {
+        format!("exit code {}", output.status.code().unwrap_or(-1))
+    };
+    WingetOutcome::Failed(detail)
+}
+
 /// Installs PawnIO via winget.
 pub fn install_pawnio() -> Result<(), String> {
     use std::process::Command;
@@ -109,37 +155,30 @@ pub fn install_pawnio() -> Result<(), String> {
         .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("failed to run winget: {}", e))?;
-    if output.status.success() {
-        tracing::info!("PawnIO installed successfully");
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let combined = format!("{} {}", stderr, stdout);
-        let detail = if !stderr.trim().is_empty() {
-            stderr.trim().to_string()
-        } else if !stdout.trim().is_empty() {
-            stdout.trim().to_string()
-        } else {
-            format!("exit code {}", output.status.code().unwrap_or(-1))
-        };
-        // winget reports "already installed" / "No newer" as non-zero but is actually success (up to date)
-        if combined.contains("already installed")
-            || combined.contains("No available upgrade")
-            || combined.contains("No newer package")
-        {
-            tracing::info!("PawnIO already installed and up to date");
-            return Ok(());
+    match classify_winget_output(&output) {
+        WingetOutcome::Success => {
+            tracing::info!("PawnIO installed successfully");
+            Ok(())
         }
-        // Common causes: winget not installed, not in PATH, or not elevated
-        let hint = if detail.contains("not recognized") || detail.contains("not found") {
-            " (winget not found — install App Installer from Microsoft Store or download PawnIO from https://github.com/namazso/PawnIO/releases)"
-        } else if detail.to_lowercase().contains("elevation") || detail.contains("0x800704C7") {
-            " (requires elevation — run as administrator)"
-        } else {
-            " — you can also download PawnIO manually from https://github.com/namazso/PawnIO/releases"
-        };
-        Err(format!("winget install failed: {}{}", detail, hint))
+        WingetOutcome::UpToDate => {
+            tracing::info!("PawnIO already installed and up to date");
+            Ok(())
+        }
+        WingetOutcome::NotInstalled => Err(
+            "winget install failed: package or source not found — install App Installer from Microsoft Store or download PawnIO from https://github.com/namazso/PawnIO/releases"
+                .to_string(),
+        ),
+        WingetOutcome::Failed(detail) => {
+            // Common causes: winget not installed, not in PATH, or not elevated
+            let hint = if detail.contains("not recognized") || detail.contains("not found") {
+                " (winget not found — install App Installer from Microsoft Store or download PawnIO from https://github.com/namazso/PawnIO/releases)"
+            } else if detail.to_lowercase().contains("elevation") || detail.contains("0x800704C7") {
+                " (requires elevation — run as administrator)"
+            } else {
+                " — you can also download PawnIO manually from https://github.com/namazso/PawnIO/releases"
+            };
+            Err(format!("winget install failed: {}{}", detail, hint))
+        }
     }
 }
 
@@ -254,33 +293,35 @@ pub fn update_pawnio() -> Result<(), String> {
         ])
         .creation_flags(0x08000000)
         .output();
-    if let Ok(ref out) = output
-        && out.status.success()
-    {
-        tracing::info!("PawnIO upgraded successfully");
-        invalidate_pawnio_version();
-        return Ok(());
-    }
-    if let Ok(ref out) = output {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let combined = format!("{} {}", stderr, stdout);
-        if combined.contains("No available upgrade") || combined.contains("No newer package") {
+    // winget itself unrunnable (missing/not in PATH): fall back to install,
+    // which reports the cause with a manual-download hint.
+    let output = match output {
+        Ok(out) => out,
+        Err(_) => return install_pawnio(),
+    };
+    match classify_winget_output(&output) {
+        WingetOutcome::Success => {
+            tracing::info!("PawnIO upgraded successfully");
+            invalidate_pawnio_version();
+            Ok(())
+        }
+        WingetOutcome::UpToDate => {
             tracing::info!("PawnIO already up to date");
             invalidate_pawnio_version();
-            return Ok(());
+            Ok(())
         }
-        let detail = if !stderr.trim().is_empty() {
-            stderr.trim()
-        } else if !stdout.trim().is_empty() {
-            stdout.trim()
-        } else {
-            ""
-        };
-        tracing::warn!("winget upgrade output: {}", detail);
+        // Upgrade of a package winget does not know is just an install.
+        WingetOutcome::NotInstalled => {
+            tracing::info!("winget upgrade found no installed package, falling back to install");
+            install_pawnio()
+        }
+        // Transient failures (network, UAC, source errors) must not trigger
+        // a full reinstall with its own UAC prompt and download.
+        WingetOutcome::Failed(detail) => {
+            tracing::warn!("winget upgrade output: {}", detail);
+            Err(format!("winget upgrade failed: {}", detail))
+        }
     }
-    tracing::info!("winget upgrade failed or not available, falling back to install");
-    install_pawnio()
 }
 
 /// Forces redownload of PawnIO Modules (update).
@@ -326,12 +367,13 @@ pub(super) fn verify_dll_path() -> Result<(), &'static str> {
             return Err("DLL path mismatch");
         }
     }
-    // Authenticode check via PowerShell Get-AuthenticodeSignature (cached per process)
-    static AUTHENTICODE_RESULT: parking_lot::Once = parking_lot::Once::new();
-    static AUTHENTICODE_OK: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(true);
-    AUTHENTICODE_RESULT.call_once(|| {
-        if let Ok(out) = std::process::Command::new("powershell")
+    // Authenticode check via PowerShell Get-AuthenticodeSignature (cached per process).
+    // Fail-closed: PowerShell missing, command failure, or unexpected output
+    // all refuse the DLL. Developers with a self-signed test DLL must set
+    // FRAMEWORK_ALLOW_UNSIGNED_PAWNIO=1 explicitly.
+    static AUTHENTICODE: std::sync::OnceLock<Result<(), &'static str>> = std::sync::OnceLock::new();
+    let authenticode = *AUTHENTICODE.get_or_init(|| {
+        let out = std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
@@ -341,25 +383,38 @@ pub(super) fn verify_dll_path() -> Result<(), &'static str> {
                 ),
             ])
             .creation_flags(0x08000000)
-            .output()
-        {
-            let txt = String::from_utf8_lossy(&out.stdout).to_lowercase();
-            if txt.contains("false") {
-                warn!(
-                    "PawnIO DLL authenticode not Valid (may be unsigned/test-signed): {}",
-                    p.display()
-                );
-                AUTHENTICODE_OK.store(false, std::sync::atomic::Ordering::Release);
-            }
+            .output();
+        let out = match out {
+            Ok(out) => out,
+            Err(_) => return Err("authenticode check failed"),
+        };
+        if !out.status.success() {
+            return Err("authenticode check failed");
+        }
+        let txt = String::from_utf8_lossy(&out.stdout);
+        if txt.trim().eq_ignore_ascii_case("true") {
+            Ok(())
+        } else {
+            Err("DLL authenticode not valid")
         }
     });
-    if !AUTHENTICODE_OK.load(std::sync::atomic::Ordering::Acquire) {
-        // Enforced in all profiles; developers with a self-signed test DLL
-        // must set FRAMEWORK_ALLOW_UNSIGNED_PAWNIO=1 explicitly.
-        if std::env::var_os("FRAMEWORK_ALLOW_UNSIGNED_PAWNIO").is_none() {
-            return Err("DLL authenticode not valid");
+    match authenticode {
+        Ok(()) => {}
+        Err(e) => {
+            if std::env::var_os("FRAMEWORK_ALLOW_UNSIGNED_PAWNIO").is_none() {
+                warn!(
+                    "PawnIO DLL authenticode check failed ({}): {}",
+                    e,
+                    p.display()
+                );
+                return Err(e);
+            }
+            warn!(
+                "FRAMEWORK_ALLOW_UNSIGNED_PAWNIO set; loading DLL despite authenticode failure ({}): {}",
+                e,
+                p.display()
+            );
         }
-        warn!("FRAMEWORK_ALLOW_UNSIGNED_PAWNIO set; loading unsigned DLL");
     }
     // Hash pin: ensure DLL is not zero/truncated and log hash for audit
     if let Ok(bytes) = std::fs::read(&p) {
@@ -541,4 +596,65 @@ pub(super) fn exec_ioctl(
         return Err(IoctlFailure::ShortRead);
     }
     Ok(return_size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::windows::process::ExitStatusExt;
+
+    fn test_output(code: u32, stdout: &str, stderr: &str) -> std::process::Output {
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn winget_success_wins_over_text() {
+        // Exit status decides first: even confusing text cannot flip success.
+        assert_eq!(
+            classify_winget_output(&test_output(0, "No package found", "")),
+            WingetOutcome::Success
+        );
+    }
+
+    #[test]
+    fn winget_up_to_date_signals() {
+        assert_eq!(
+            classify_winget_output(&test_output(1, "No available upgrade found", "")),
+            WingetOutcome::UpToDate
+        );
+        assert_eq!(
+            classify_winget_output(&test_output(1, "", "already installed")),
+            WingetOutcome::UpToDate
+        );
+    }
+
+    #[test]
+    fn winget_missing_package_signals() {
+        assert_eq!(
+            classify_winget_output(&test_output(1, "No installed package found", "")),
+            WingetOutcome::NotInstalled
+        );
+        assert_eq!(
+            classify_winget_output(&test_output(1, "", "not recognized as an internal command")),
+            WingetOutcome::NotInstalled
+        );
+    }
+
+    #[test]
+    fn winget_unknown_output_is_failure_with_detail() {
+        // Localized or unexpected text must not be mistaken for success; the
+        // raw detail is preserved for the error message.
+        match classify_winget_output(&test_output(1, "既に最新です", "")) {
+            WingetOutcome::Failed(detail) => assert!(detail.contains("既に最新です")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        match classify_winget_output(&test_output(1, "", "")) {
+            WingetOutcome::Failed(detail) => assert!(detail.contains("exit code")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
 }
