@@ -100,44 +100,145 @@ fn default_config_dir() -> PathBuf {
     }
 }
 
+/// Checks the file DACL for an allow-ACE granting write-like rights to the
+/// Everyone SID (S-1-1-0). Returns false on any query failure (fail-open:
+/// inspection errors must not block saves).
+#[cfg(windows)]
+fn file_has_world_write_ace(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{GENERIC_WRITE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION, PSID,
+        SECURITY_MAX_SID_SIZE, WinWorldSid,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_APPEND_DATA, FILE_WRITE_DATA, WRITE_DAC, WRITE_OWNER,
+    };
+    use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+    use windows_sys::core::PCWSTR;
+
+    // Write-like rights: writing/appending data, taking ownership, or changing
+    // the DACL all let Everyone rewrite or re-permission the file.
+    const WORLD_WRITE_MASK: u32 =
+        FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | WRITE_DAC | WRITE_OWNER;
+
+    // Everyone SID for comparison.
+    let mut everyone = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut everyone_len = everyone.len() as u32;
+    // SAFETY: buffer is SECURITY_MAX_SID_SIZE bytes, the documented maximum.
+    let ok = unsafe {
+        CreateWellKnownSid(
+            WinWorldSid,
+            std::ptr::null_mut(),
+            everyone.as_mut_ptr() as PSID,
+            &mut everyone_len,
+        )
+    };
+    if ok == 0 {
+        return false;
+    }
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut sd: *mut core::ffi::c_void = std::ptr::null_mut();
+    // SAFETY: null-terminated path; DACL and SD outputs are freed below.
+    let err = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr() as PCWSTR,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if err != 0 || dacl.is_null() {
+        if !sd.is_null() {
+            // SAFETY: SD was allocated by the call above.
+            unsafe { LocalFree(sd) };
+        }
+        return false;
+    }
+    // Walk ACEs manually: the first ACE follows the 8-byte ACL header and each
+    // ACE carries its own size. Bounds-checked against AclSize throughout.
+    // SAFETY: dacl points to a valid ACL; sd is freed at the end.
+    unsafe {
+        let acl_size = (*dacl).AclSize as usize;
+        let ace_count = (*dacl).AceCount as usize;
+        let mut offset = std::mem::size_of::<ACL>();
+        let mut hit = false;
+        for _ in 0..ace_count {
+            if offset + std::mem::size_of::<ACE_HEADER>() > acl_size {
+                break;
+            }
+            let header = &*((dacl as *const u8).add(offset) as *const ACE_HEADER);
+            let size = header.AceSize as usize;
+            if size < std::mem::size_of::<ACE_HEADER>() || offset + size > acl_size {
+                break;
+            }
+            if header.AceType as u32 == ACCESS_ALLOWED_ACE_TYPE {
+                let ace = &*((dacl as *const u8).add(offset) as *const ACCESS_ALLOWED_ACE);
+                let sid = &ace.SidStart as *const u32 as *const u8;
+                // SID length is 8 header bytes plus 4 per sub-authority.
+                let sid_len = 8 + 4 * (*sid.add(1) as usize);
+                if sid_len == everyone_len as usize
+                    && core::slice::from_raw_parts(sid, sid_len)
+                        == &everyone[..everyone_len as usize]
+                    && ace.Mask & WORLD_WRITE_MASK != 0
+                {
+                    hit = true;
+                    break;
+                }
+            }
+            offset += size;
+        }
+        LocalFree(sd);
+        hit
+    }
+}
+
 /// Warns if the config file at `path` may be world-writable.
 /// On Windows, %APPDATA% is per-user (user+SYSTEM+Admins only) so inherited ACL
-/// is already restrictive; we warn if the file has explicit permissive ACEs.
-/// On Unix, checks mode bits. Fail-open: inspection errors are silently ignored.
+/// is already restrictive; we warn if the DACL holds an explicit allow-ACE
+/// granting write-like rights to Everyone. Fail-open: inspection errors are
+/// silently ignored and never block a save.
 pub(crate) fn warn_if_world_writable(path: &std::path::Path) {
     #[cfg(windows)]
     {
-        // Best-effort: check if file has an explicit permissive DACL via SDDL.
-        // Full DACL inspection requires Win32_Security_Authorization which is
-        // not enabled by default; rely on %APPDATA% inherited ACL being per-user.
-        // If the file was created with default inheritance, it is already
-        // restricted to the current user. Warn only if we detect non-inherited
-        // permissive ACEs (follow-up: enable Win32_Security_Authorization for deep check).
         if !path.exists() {
             return;
         }
-        tracing::debug!(
-            "Config file {} relies on inherited %APPDATA% ACL (per-user, user+SYSTEM+Admins only)",
-            path.display()
-        );
-        // Follow-up: for explicit world-writable detection, enable
-        // `Win32_Security_Authorization` and inspect SDDL for WD/BU/AU with W.
-        let _ = path;
-    }
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path) {
-            let mode = meta.permissions().mode();
-            if mode & 0o022 != 0 {
-                tracing::warn!(
-                    "Config file {} is group/other-writable (mode {:o}) — consider chmod 600",
-                    path.display(),
-                    mode & 0o777
-                );
-            }
+        if file_has_world_write_ace(path) {
+            tracing::warn!(
+                "Config file {} grants write access to Everyone — consider removing the permissive ACE",
+                path.display()
+            );
+        } else {
+            tracing::debug!("Config file {} has no world-writable ACE", path.display());
         }
     }
+    // C1: non-Windows branch disabled; Windows-only.
+    // #[cfg(not(windows))]
+    // {
+    //     use std::os::unix::fs::PermissionsExt;
+    //     if let Ok(meta) = std::fs::metadata(path) {
+    //         let mode = meta.permissions().mode();
+    //         if mode & 0o022 != 0 {
+    //             tracing::warn!(
+    //                 "Config file {} is group/other-writable (mode {:o}) — consider chmod 600",
+    //                 path.display(),
+    //                 mode & 0o777
+    //             );
+    //         }
+    //     }
+    // }
 }
 
 /// Best-effort hardening: ensure the config file inherits restrictive ACL from
@@ -163,23 +264,24 @@ pub(crate) fn harden_file_acl(path: &std::path::Path) {
         let _ = path;
         warn_if_world_writable(path);
     }
-    #[cfg(not(windows))]
-    {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = std::fs::metadata(path) {
-                let mode = meta.permissions().mode();
-                if mode & 0o077 != 0 {
-                    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-                }
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-        }
-    }
+    // C1: non-Windows branch disabled; Windows-only.
+    // #[cfg(not(windows))]
+    // {
+    //     #[cfg(unix)]
+    //     {
+    //         use std::os::unix::fs::PermissionsExt;
+    //         if let Ok(meta) = std::fs::metadata(path) {
+    //             let mode = meta.permissions().mode();
+    //             if mode & 0o077 != 0 {
+    //                 let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    //             }
+    //         }
+    //     }
+    //     #[cfg(not(unix))]
+    //     {
+    //         let _ = path;
+    //     }
+    // }
 }
 
 /// Backs up corrupt config before next save overwrites it.
@@ -397,12 +499,13 @@ pub(crate) fn atomic_replace(
             }
         }
     }
-    #[cfg(not(windows))]
-    {
-        let _ = sync;
-        // Unix rename atomically replaces dest.
-        std::fs::rename(tmp, dest).map_err(|e| format!("rename failed: {}", e))
-    }
+    // C1: non-Windows branch disabled; Windows-only.
+    // #[cfg(not(windows))]
+    // {
+    //     let _ = sync;
+    //     // Unix rename atomically replaces dest.
+    //     std::fs::rename(tmp, dest).map_err(|e| format!("rename failed: {}", e))
+    // }
 }
 
 #[cfg(test)]

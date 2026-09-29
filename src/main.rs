@@ -1,6 +1,9 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+#[cfg(not(target_os = "windows"))]
+compile_error!("Framework Crate is Windows-only");
+
 mod app;
 mod background_task;
 mod cli;
