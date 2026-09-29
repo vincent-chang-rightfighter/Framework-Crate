@@ -107,11 +107,6 @@ fn verify_affinity(expected_id: usize) {
             }
         );
     }
-    // C1: non-Windows branch disabled; Windows-only.
-    // #[cfg(not(target_os = "windows"))]
-    // {
-    //     let _ = expected_id;
-    // }
 }
 
 fn push_pd_ports_history(

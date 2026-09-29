@@ -224,21 +224,6 @@ pub(crate) fn warn_if_world_writable(path: &std::path::Path) {
             tracing::debug!("Config file {} has no world-writable ACE", path.display());
         }
     }
-    // C1: non-Windows branch disabled; Windows-only.
-    // #[cfg(not(windows))]
-    // {
-    //     use std::os::unix::fs::PermissionsExt;
-    //     if let Ok(meta) = std::fs::metadata(path) {
-    //         let mode = meta.permissions().mode();
-    //         if mode & 0o022 != 0 {
-    //             tracing::warn!(
-    //                 "Config file {} is group/other-writable (mode {:o}) — consider chmod 600",
-    //                 path.display(),
-    //                 mode & 0o777
-    //             );
-    //         }
-    //     }
-    // }
 }
 
 /// Best-effort hardening: ensure the config file inherits restrictive ACL from
@@ -264,24 +249,6 @@ pub(crate) fn harden_file_acl(path: &std::path::Path) {
         let _ = path;
         warn_if_world_writable(path);
     }
-    // C1: non-Windows branch disabled; Windows-only.
-    // #[cfg(not(windows))]
-    // {
-    //     #[cfg(unix)]
-    //     {
-    //         use std::os::unix::fs::PermissionsExt;
-    //         if let Ok(meta) = std::fs::metadata(path) {
-    //             let mode = meta.permissions().mode();
-    //             if mode & 0o077 != 0 {
-    //                 let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    //             }
-    //         }
-    //     }
-    //     #[cfg(not(unix))]
-    //     {
-    //         let _ = path;
-    //     }
-    // }
 }
 
 /// Backs up corrupt config before next save overwrites it.
@@ -499,13 +466,6 @@ pub(crate) fn atomic_replace(
             }
         }
     }
-    // C1: non-Windows branch disabled; Windows-only.
-    // #[cfg(not(windows))]
-    // {
-    //     let _ = sync;
-    //     // Unix rename atomically replaces dest.
-    //     std::fs::rename(tmp, dest).map_err(|e| format!("rename failed: {}", e))
-    // }
 }
 
 #[cfg(test)]
