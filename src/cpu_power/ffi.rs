@@ -329,6 +329,57 @@ pub fn update_pawnio_modules() -> Result<(), String> {
     download_and_extract_modules()
 }
 
+/// Cached Authenticode verdict for the loaded DLL. Clearable on purpose:
+/// `reset_dll_fns` drops it so an upgraded DLL is re-verified instead of
+/// inheriting the previous file's result.
+static AUTHENTICODE: parking_lot::Mutex<Option<Result<(), &'static str>>> =
+    parking_lot::Mutex::new(None);
+
+/// Drops the cached Authenticode verdict. Called with the DLL pointers so an
+/// upgraded DLL is re-verified on next load.
+pub(super) fn invalidate_authenticode() {
+    *AUTHENTICODE.lock() = None;
+}
+
+fn cached_authenticode_status(p: &std::path::Path) -> Result<(), &'static str> {
+    {
+        let guard = AUTHENTICODE.lock();
+        if let Some(cached) = *guard {
+            return cached;
+        }
+    }
+    let result = check_authenticode(p);
+    *AUTHENTICODE.lock() = Some(result);
+    result
+}
+
+fn check_authenticode(p: &std::path::Path) -> Result<(), &'static str> {
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "(Get-AuthenticodeSignature '{}').Status -eq 'Valid'",
+                p.display().to_string().replace('\'', "''")
+            ),
+        ])
+        .creation_flags(0x08000000)
+        .output();
+    let out = match out {
+        Ok(out) => out,
+        Err(_) => return Err("authenticode check failed"),
+    };
+    if !out.status.success() {
+        return Err("authenticode check failed");
+    }
+    let txt = String::from_utf8_lossy(&out.stdout);
+    if txt.trim().eq_ignore_ascii_case("true") {
+        Ok(())
+    } else {
+        Err("DLL authenticode not valid")
+    }
+}
+
 /// Verifies DLL is at expected location and not a symlink/reparse point before loading.
 pub(super) fn verify_dll_path() -> Result<(), &'static str> {
     let p = resolved_dll_path();
@@ -367,37 +418,12 @@ pub(super) fn verify_dll_path() -> Result<(), &'static str> {
             return Err("DLL path mismatch");
         }
     }
-    // Authenticode check via PowerShell Get-AuthenticodeSignature (cached per process).
+    // Authenticode check via PowerShell Get-AuthenticodeSignature (cached until
+    // the next DLL reset).
     // Fail-closed: PowerShell missing, command failure, or unexpected output
     // all refuse the DLL. Developers with a self-signed test DLL must set
     // FRAMEWORK_ALLOW_UNSIGNED_PAWNIO=1 explicitly.
-    static AUTHENTICODE: std::sync::OnceLock<Result<(), &'static str>> = std::sync::OnceLock::new();
-    let authenticode = *AUTHENTICODE.get_or_init(|| {
-        let out = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "(Get-AuthenticodeSignature '{}').Status -eq 'Valid'",
-                    p.display().to_string().replace('\'', "''")
-                ),
-            ])
-            .creation_flags(0x08000000)
-            .output();
-        let out = match out {
-            Ok(out) => out,
-            Err(_) => return Err("authenticode check failed"),
-        };
-        if !out.status.success() {
-            return Err("authenticode check failed");
-        }
-        let txt = String::from_utf8_lossy(&out.stdout);
-        if txt.trim().eq_ignore_ascii_case("true") {
-            Ok(())
-        } else {
-            Err("DLL authenticode not valid")
-        }
-    });
+    let authenticode = cached_authenticode_status(&p);
     match authenticode {
         Ok(()) => {}
         Err(e) => {
@@ -518,6 +544,7 @@ pub fn reset_dll_fns() {
     *DLL_EXEC.lock() = None;
     *DLL_CLOSE.lock() = None;
     invalidate_pawnio_version();
+    invalidate_authenticode();
 }
 
 /// Opens PawnIO handle and loads module blob.
@@ -602,6 +629,15 @@ pub(super) fn exec_ioctl(
 mod tests {
     use super::*;
     use std::os::windows::process::ExitStatusExt;
+
+    #[test]
+    fn invalidate_authenticode_clears_the_cache() {
+        // White-box: the whole point of Mutex<Option<…>> over OnceLock is
+        // clearability, so pin that property directly. No PowerShell runs.
+        *AUTHENTICODE.lock() = Some(Ok(()));
+        invalidate_authenticode();
+        assert!(AUTHENTICODE.lock().is_none());
+    }
 
     fn test_output(code: u32, stdout: &str, stderr: &str) -> std::process::Output {
         std::process::Output {
