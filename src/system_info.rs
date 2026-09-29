@@ -643,19 +643,64 @@ pub(crate) fn decode_console_bytes(bytes: &[u8]) -> String {
 /// The task action is registered through `/XML`, so no argument value has to
 /// survive schtasks' own command-line re-parsing.
 fn schtasks_output(args: &[&str]) -> Result<std::process::Output, String> {
-    // Own the arguments so the worker thread is not tied to the caller's
-    // borrow; the thread outlives this function on timeout.
+    use std::process::Stdio;
+    // Own the arguments so nothing borrows the caller across the wait below.
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut cmd = std::process::Command::new("schtasks");
-        cmd.args(&args);
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        let _ = tx.send(cmd.output());
+    let mut cmd = std::process::Command::new("schtasks");
+    cmd.args(&args);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to run schtasks: {e}"))?;
+    // Drain pipes on threads so a chatty child can never block on a full pipe
+    // while the main thread polls for exit.
+    let mut stdout = child.stdout.take();
+    let out_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        if let Some(ref mut o) = stdout {
+            let _ = o.read_to_end(&mut buf);
+        }
+        buf
     });
-    rx.recv_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| "schtasks timed out after 5s".to_string())?
-        .map_err(|e| format!("failed to run schtasks: {e}"))
+    let mut stderr = child.stderr.take();
+    let err_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        if let Some(ref mut e) = stderr {
+            let _ = e.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let start = std::time::Instant::now();
+    loop {
+        match child
+            .try_wait()
+            .map_err(|e| format!("failed to run schtasks: {e}"))?
+        {
+            Some(status) => {
+                let stdout = out_thread.join().unwrap_or_default();
+                let stderr = err_thread.join().unwrap_or_default();
+                return Ok(std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            None => {
+                if start.elapsed() >= std::time::Duration::from_secs(5) {
+                    // Kill on timeout: a /Create that lands after we already
+                    // reported failure would enable startup the UI claims is
+                    // off (or vice versa).
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("schtasks timed out after 5s".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
 }
 
 /// Escapes text for inclusion in the startup task XML.
