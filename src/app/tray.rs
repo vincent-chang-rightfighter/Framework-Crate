@@ -171,10 +171,19 @@ impl App {
                                                 if bios.captured_on_ac { "AC" } else { "battery" },
                                                 if ac_now { "AC" } else { "battery" }
                                             );
-                                        } else if let Err(e) =
-                                            crate::cpu_power::write_bios_defaults(&bios)
-                                        {
-                                            warn!("Resume write failed: {}", e);
+                                        } else {
+                                            match crate::cpu_power::write_bios_defaults(&bios) {
+                                                Ok(crate::cpu_power::BiosRestore::Full) => {}
+                                                Ok(crate::cpu_power::BiosRestore::Partial(e)) => {
+                                                    warn!(
+                                                        "Resume restore partial (MSR done): {}",
+                                                        e
+                                                    )
+                                                }
+                                                Err(e) => {
+                                                    warn!("Resume write failed: {}", e)
+                                                }
+                                            }
                                         }
                                     }
                                 }

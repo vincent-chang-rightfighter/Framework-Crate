@@ -11,7 +11,7 @@ pub use ffi::{
     update_pawnio, update_pawnio_modules,
 };
 pub use limits::{
-    CpuPowerInfo, CpuPowerUnavailable, PowerLimitParams, write_bios_defaults,
+    BiosRestore, CpuPowerInfo, CpuPowerUnavailable, PowerLimitParams, write_bios_defaults,
     write_msr_pl1_pl2_public,
 };
 pub use modules::{

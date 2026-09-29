@@ -459,8 +459,21 @@ fn write_mmio_pl1_pl2_public(params: PowerLimitParams) -> Result<(), String> {
     write_mmio_pl1_pl2(&mchbar_handle, &params)
 }
 
+/// Outcome of restoring factory limits.
+///
+/// MMIO may be absent on older snapshots and some MCHBAR blobs lack qword
+/// write support, so a failed MMIO restore must not fail the whole reset —
+/// but it also must not be reported as full success.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BiosRestore {
+    /// MSR restored, and MMIO restored or absent from the snapshot.
+    Full,
+    /// MSR restored; the MMIO mirror may still hold the custom limit.
+    Partial(String),
+}
+
 /// Writes both MSR and MMIO from `BiosDefaults` to restore factory state.
-pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<(), String> {
+pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<BiosRestore, String> {
     write_msr_pl1_pl2_public(PowerLimitParams {
         pl1_watts: bios.pl1_watts,
         pl1_enabled: bios.pl1_enabled,
@@ -473,9 +486,9 @@ pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<(), String> {
         power_unit: bios.power_unit,
         time_unit: bios.time_unit,
     })?;
-    // MMIO may be absent on older files; best-effort only.
-    if bios.pl1_mmio_watts > 0.0 || bios.pl2_mmio_watts > 0.0 {
-        let _ = write_mmio_pl1_pl2_public(PowerLimitParams {
+    // MMIO may be absent on older files; best-effort only, but reported.
+    if (bios.pl1_mmio_watts > 0.0 || bios.pl2_mmio_watts > 0.0)
+        && let Err(e) = write_mmio_pl1_pl2_public(PowerLimitParams {
             pl1_watts: bios.pl1_mmio_watts,
             pl1_enabled: bios.pl1_mmio_enabled,
             pl1_clamped: bios.pl1_mmio_clamped,
@@ -486,9 +499,11 @@ pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<(), String> {
             pl2_time_s: bios.pl2_mmio_time_s,
             power_unit: bios.power_unit,
             time_unit: bios.time_unit,
-        });
+        })
+    {
+        return Ok(BiosRestore::Partial(e));
     }
-    Ok(())
+    Ok(BiosRestore::Full)
 }
 
 #[cfg(test)]

@@ -124,7 +124,7 @@ impl App {
             Message::UpdatePawnIOAll => {
                 tracing::info!("UpdatePawnIOAll triggered");
                 self.modules_download_error =
-                    Some("Updating PawnIO & Modules... Please wait 30s".to_string());
+                    Some("Updating PawnIO & Modules... Please wait up to 2 minutes".to_string());
                 self.cpu_power_error = None;
                 self.mark_dirty();
                 Some(Task::perform(
@@ -215,7 +215,10 @@ impl App {
                 Some(Task::none())
             }
             Message::CpuPowerApply => {
-                if !self.cpu_power_supported() {
+                // Belt and suspenders: the controls only render when a live
+                // snapshot exists, but the handler re-checks so a stale or
+                // raced message can never reach the write path.
+                if !self.cpu_power_supported() || !self.state.cpu_power.snapshot().available {
                     return Some(Task::none());
                 }
                 let (pl1, pl2, pl1_time) = match self.validate_cpu_power_inputs() {
@@ -287,7 +290,7 @@ impl App {
                 Some(Task::none())
             }
             Message::CpuPowerSyncStart => {
-                if !self.cpu_power_supported() {
+                if !self.cpu_power_supported() || !self.state.cpu_power.snapshot().available {
                     return Some(Task::none());
                 }
                 let (pl1, pl2, pl1_time) = match self.validate_cpu_power_inputs() {
@@ -359,8 +362,13 @@ impl App {
             }
             Message::CpuPowerResetDone(result) => {
                 match result {
-                    Ok(()) => {
+                    Ok(crate::cpu_power::BiosRestore::Full) => {
                         self.cpu_power_error = None;
+                    }
+                    Ok(crate::cpu_power::BiosRestore::Partial(e)) => {
+                        warn!("CPU power reset partial: {}", e);
+                        self.cpu_power_error =
+                            Some(format!("MSR reset done; MMIO mirror may differ: {}", e));
                     }
                     Err(e) => {
                         warn!("CPU power reset failed: {}", e);
@@ -422,8 +430,7 @@ impl App {
                 )
                 .await;
                 let result = match write_result {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) => Err(e),
+                    Ok(inner) => inner,
                     Err(e) => Err(e),
                 };
                 Message::CpuPowerResetDone(result)
