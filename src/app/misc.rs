@@ -262,12 +262,12 @@ impl App {
                 }
                 Some(Task::none())
             }
-            Message::OpenProjectUrl => {
-                const URL: &str = "https://github.com/vincent-chang-rightfighter/Framework-Crate";
+            Message::OpenUrl(url) => {
+                let url: &str = url;
                 unsafe {
                     use windows_sys::Win32::UI::Shell::ShellExecuteW;
                     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-                    let url_wide: Vec<u16> = URL.encode_utf16().chain(std::iter::once(0)).collect();
+                    let url_wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
                     let open_wide: Vec<u16> =
                         "open".encode_utf16().chain(std::iter::once(0)).collect();
                     let result = ShellExecuteW(
@@ -281,11 +281,64 @@ impl App {
                     let result_code = result as isize;
                     if result_code <= 32 {
                         tracing::warn!(
-                            "Failed to open project URL (ShellExecuteW error {})",
+                            "Failed to open URL {} (ShellExecuteW error {})",
+                            url,
                             result_code
                         );
                     }
                 }
+                Some(Task::none())
+            }
+            Message::CheckForUpdates => {
+                if self.update_checking {
+                    return Some(Task::none());
+                }
+                self.update_checking = true;
+                self.update_available = None;
+                self.update_check_error = None;
+                self.mark_dirty();
+                Some(Task::perform(
+                    async {
+                        let res = crate::util::spawn_blocking_with_timeout(
+                            std::time::Duration::from_secs(30),
+                            || {
+                                let current = env!("CARGO_PKG_VERSION");
+                                match crate::update_check::fetch_latest_tag() {
+                                    None => Err("could not reach the releases API".to_string()),
+                                    Some(tag) => {
+                                        if crate::update_check::is_newer(current, &tag) {
+                                            Ok(Some(tag))
+                                        } else {
+                                            Ok(None)
+                                        }
+                                    }
+                                }
+                            },
+                        )
+                        .await;
+                        Message::UpdateCheckDone(res.unwrap_or_else(Err))
+                    },
+                    |msg| msg,
+                ))
+            }
+            Message::UpdateCheckDone(result) => {
+                self.update_checking = false;
+                self.update_checked = true;
+                match result {
+                    Ok(Some(tag)) => {
+                        self.update_available = Some(tag.clone());
+                        self.update_check_error = None;
+                    }
+                    Ok(None) => {
+                        self.update_available = None;
+                        self.update_check_error = None;
+                    }
+                    Err(e) => {
+                        self.update_available = None;
+                        self.update_check_error = Some(e.clone());
+                    }
+                }
+                self.mark_dirty();
                 Some(Task::none())
             }
             _ => None,

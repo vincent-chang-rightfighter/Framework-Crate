@@ -134,7 +134,9 @@ pub enum Message {
     QuitDutyChanged(u32),
     QuitCanceled,
     CollectDebugInfo,
-    OpenProjectUrl,
+    OpenUrl(&'static str),
+    CheckForUpdates,
+    UpdateCheckDone(Result<Option<String>, String>),
     ToggleExpansionCardDebug,
     StartupLaunchToggled(bool),
     StartupLaunchSet(bool, Result<(), String>),
@@ -213,6 +215,14 @@ pub struct App {
     /// Whether window height is fitted to content; resets on layout-changing toggles.
     pub height_set: bool,
     pub modules_download_error: Option<String>,
+    /// Self update check state (About page): in-flight flag, newer tag when
+    /// one exists, and the last failure to reach the API.
+    pub update_checking: bool,
+    pub update_available: Option<String>,
+    pub update_check_error: Option<String>,
+    /// Whether an update check completed (vs never checked): distinguishes
+    /// "up to date" from "not yet checked".
+    pub update_checked: bool,
     pub pl1_edit: String,
     pub pl2_edit: String,
     pub pl1_time_edit: String,
@@ -395,6 +405,10 @@ impl App {
             window_height: None,
             height_set: false,
             modules_download_error: None,
+            update_checking: false,
+            update_available: None,
+            update_check_error: None,
+            update_checked: false,
             pl1_edit: String::new(),
             pl2_edit: String::new(),
             pl1_time_edit: String::new(),

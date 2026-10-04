@@ -19,6 +19,7 @@ mod system_info;
 mod temp_chart;
 mod tray;
 mod types;
+mod update_check;
 mod util;
 mod views;
 

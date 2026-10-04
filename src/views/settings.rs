@@ -155,11 +155,12 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
                 .on_press(Message::CollectDebugInfo)
                 .style(btn_style),
             button(text("Project on GitHub").size(FONT_BODY))
-                .on_press(Message::OpenProjectUrl)
+                .on_press(Message::OpenUrl(crate::update_check::PROJECT_URL))
                 .style(btn_style),
         ]
         .spacing(8),
     );
+    content = content.push(update_check_row(app));
     content = content.push(
         text("If update fails, check internet or download manually: PawnIO → https://github.com/namazso/PawnIO/releases | Modules → https://github.com/namazso/PawnIO.Modules/releases/latest")
             .size(FONT_SMALL)
@@ -223,4 +224,53 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         .center_x(Length::Fill)
         .center_y(Length::Fill)
         .into()
+}
+
+/// Self update check row: manual check button, result status, and a download
+/// shortcut when a newer release exists. Notification only, nothing installs.
+fn update_check_row(app: &App) -> Element<'_, Message> {
+    let mut row = row![
+        text("App Updates:").size(FONT_BODY),
+        button(
+            text(if app.update_checking {
+                "Checking…"
+            } else {
+                "Check for Updates"
+            })
+            .size(FONT_BODY)
+        )
+        .on_press(Message::CheckForUpdates)
+        .style(btn_style),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    if let Some(ref tag) = app.update_available {
+        row = row.push(
+            button(text(format!("Download {tag}")).size(FONT_BODY))
+                .on_press(Message::OpenUrl(crate::update_check::RELEASES_URL))
+                .style(btn_style),
+        );
+        row = row.push(
+            text(format!("New version {tag} available"))
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_GREEN),
+                }),
+        );
+    } else if let Some(ref err) = app.update_check_error {
+        row = row.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+            iced::widget::text::Style {
+                color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+            }
+        }));
+    } else if app.update_checked {
+        row = row.push(
+            text(format!("Up to date ({})", env!("CARGO_PKG_VERSION")))
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(COLOR_GRAY),
+                }),
+        );
+    }
+    row.into()
 }
