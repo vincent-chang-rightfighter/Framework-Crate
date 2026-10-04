@@ -1,5 +1,6 @@
 use std::env;
 use std::fs::File;
+use std::io::BufReader;
 use std::io::BufWriter;
 use std::io::Write;
 use std::path::Path;
@@ -83,9 +84,16 @@ fn main() {
     // Anchored at CARGO_MANIFEST_DIR so --manifest-path builds from elsewhere work.
     println!("cargo:rerun-if-changed=assets/app.png");
     let png_path = Path::new(&manifest_dir).join("assets/app.png");
-    let decoder = png::Decoder::new(File::open(&png_path).expect("Failed to open assets/app.png"));
+    // png 0.18 takes BufRead; wrap the file instead of passing it directly.
+    let png_file = File::open(&png_path).expect("Failed to open assets/app.png");
+    let decoder = png::Decoder::new(BufReader::new(png_file));
     let mut reader = decoder.read_info().expect("Failed to read PNG info");
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let mut buf = vec![
+        0u8;
+        reader
+            .output_buffer_size()
+            .expect("PNG output buffer size unknown")
+    ];
     let info = reader
         .next_frame(&mut buf)
         .expect("Failed to decode PNG frame");
