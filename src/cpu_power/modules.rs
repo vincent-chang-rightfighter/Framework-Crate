@@ -44,7 +44,7 @@ pub(super) fn local_modules_version() -> Option<String> {
 }
 
 /// Extracts the release tag from a `.../download/{tag}/...` asset URL.
-fn tag_from_modules_url(url: &str) -> Option<String> {
+pub(super) fn tag_from_modules_url(url: &str) -> Option<String> {
     let marker = "/download/";
     let start = url.find(marker)? + marker.len();
     let rest = &url[start..];
@@ -54,6 +54,16 @@ fn tag_from_modules_url(url: &str) -> Option<String> {
         return None;
     }
     Some(tag)
+}
+
+/// Whether a Modules update download is needed: only when the recorded
+/// local tag differs from the upstream latest. Unknown on either side means
+/// download, so a missing marker or an unreachable API never blocks an update.
+pub(super) fn modules_update_needed(local: Option<&str>, latest_tag: Option<&str>) -> bool {
+    match (local, latest_tag) {
+        (Some(l), Some(t)) => l != t,
+        _ => true,
+    }
 }
 
 /// Records which upstream tag the local bins came from.
@@ -83,7 +93,7 @@ fn invalidate_modules_version() {
 
 /// Tries to fetch latest release asset download URL directly via GitHub API.
 /// Returns Some(url) if API succeeds, else None to use version-constructed URL.
-fn latest_modules_download_url() -> Option<String> {
+pub(super) fn latest_modules_download_url() -> Option<String> {
     let out = std::process::Command::new("curl.exe")
         .args([
             "-s",
@@ -688,6 +698,16 @@ mod tests {
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    #[test]
+    fn modules_update_needed_only_on_tag_mismatch() {
+        assert!(!modules_update_needed(Some("0.2.11"), Some("0.2.11")));
+        assert!(modules_update_needed(Some("0.2.10"), Some("0.2.11")));
+        // Unknown on either side must not block an update.
+        assert!(modules_update_needed(None, Some("0.2.11")));
+        assert!(modules_update_needed(Some("0.2.11"), None));
+        assert!(modules_update_needed(None, None));
     }
 
     #[test]

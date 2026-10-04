@@ -7,7 +7,10 @@ use std::os::windows::process::CommandExt;
 use tracing::warn;
 use windows_sys::Win32::Foundation::HANDLE;
 
-use super::modules::{download_and_extract_modules, sha256_hex};
+use super::modules::{
+    download_and_extract_modules, latest_modules_download_url, local_modules_version,
+    modules_update_needed, sha256_hex, tag_from_modules_url,
+};
 
 // PawnIOLib.dll function signatures (STDMETHODCALLTYPE / WINAPI - same on x64).
 type PawnioOpen = unsafe extern "system" fn(*mut HANDLE) -> i32; // HRESULT
@@ -324,8 +327,21 @@ pub fn update_pawnio() -> Result<(), String> {
     }
 }
 
-/// Forces redownload of PawnIO Modules (update).
+/// Updates PawnIO Modules. Skips the download when the recorded local tag
+/// already matches upstream latest; an unreachable API or missing marker
+/// falls through to downloading.
 pub fn update_pawnio_modules() -> Result<(), String> {
+    let latest_tag = latest_modules_download_url()
+        .as_deref()
+        .and_then(tag_from_modules_url);
+    let local = local_modules_version();
+    if !modules_update_needed(local.as_deref(), latest_tag.as_deref()) {
+        tracing::info!(
+            "PawnIO Modules already at latest ({})",
+            latest_tag.as_deref().unwrap_or_default()
+        );
+        return Ok(());
+    }
     download_and_extract_modules()
 }
 
