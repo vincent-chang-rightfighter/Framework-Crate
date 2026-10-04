@@ -1,0 +1,46 @@
+name: Upstream Modules Watch
+
+# Tripwire for enforced module hashes: since mismatches now refuse to load,
+# an upstream PawnIO.Modules release breaks all downloads until the pinned
+# tag and hashes are updated and released. This workflow notices first.
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Mondays 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compare upstream tag with pinned version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          latest=$(curl -sL --max-time 30 https://api.github.com/repos/namazso/PawnIO.Modules/releases/latest | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)
+          if [ -z "$latest" ]; then
+            echo "GitHub API unreachable, skipping without opening an issue"
+            exit 0
+          fi
+          latest_norm=$(echo "$latest" | sed 's/^v//')
+          pinned=$(grep -o 'LAST_KNOWN_MODULES_VERSION: &str = "[^"]*"' src/cpu_power/modules.rs | cut -d'"' -f2)
+          echo "upstream latest: $latest (normalized: $latest_norm)"
+          echo "pinned fallback: $pinned"
+          if [ "$latest_norm" = "$pinned" ]; then
+            echo "In sync, nothing to do"
+            exit 0
+          fi
+          if gh issue list --search "PawnIO.Modules $latest in:title" --state open --json number --jq length | grep -q '^0$'; then
+            gh issue create \
+              --title "PawnIO.Modules $latest released, pinned $pinned is stale" \
+              --body "Upstream released \`$latest\` but the app pins \`$pinned\` as fallback. Since module hashes are enforced, users on the new release get refused downloads until updated. Update \`LAST_KNOWN_MODULES_VERSION\`, \`INTEL_MSR_SHA256\` and \`INTEL_MCHBAR_SHA256\` in \`src/cpu_power/modules.rs\`, verify on hardware, and release."
+          else
+            echo "Issue already open, skipping"
+          fi
