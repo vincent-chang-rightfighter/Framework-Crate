@@ -42,7 +42,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
-sha2 = "0.10"
+sha2 = "0.11"
 smallvec = "1"
 
 [build-dependencies]

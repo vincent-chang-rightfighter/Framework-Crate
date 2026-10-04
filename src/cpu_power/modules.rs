@@ -145,7 +145,12 @@ pub(super) fn modules_dir() -> std::path::PathBuf {
 
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(bytes))
+    // sha2 0.11 returns a hybrid-array without LowerHex; encode manually so
+    // the format does not depend on the digest crate's output type.
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Explicit opt-in for loading module blobs whose hashes are not pinned.
