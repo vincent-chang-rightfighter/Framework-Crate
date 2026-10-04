@@ -578,7 +578,8 @@ impl EcClient {
             .map_err(|e| format!("Failed to set charge limit: {:?}", e))
     }
 
-    // C-cleanup: unused helper disabled; Windows-only.
+    // C-cleanup: unused helper disabled; kept commented for future
+    // restoration (charge-limit readback verification). Windows-only.
     // #[allow(dead_code)]
     // pub fn get_charge_limit(&self) -> Result<(u8, u8), String> {
     //     self.ec

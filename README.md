@@ -230,6 +230,16 @@ Notes:
 
 The file rotates once it grows past a size threshold, keeping `app.log.1` through `app.log.3`. If the log cannot be opened the app still starts and falls back to stderr.
 
+## Environment Variables
+
+| Variable | Effect |
+|----------|--------|
+| `RUST_LOG` | Log filter (default `info`); e.g. `RUST_LOG=debug` |
+| `FRAMEWORK_CONTROL_CONFIG_DIR` | Overrides the config directory. Must be absolute, with no `..` and no `\\?\` / `\\.\` prefix |
+| `FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1` | Loads PawnIO module blobs whose hash is not pinned. Only after manual verification of a newer upstream release |
+| `FRAMEWORK_ALLOW_UNSIGNED_PAWNIO=1` | Loads the PawnIO DLL despite an Authenticode failure. For self-signed test DLLs |
+| `FRAMEWORK_PIN_CORE=1` | Pins background work to the first enumerated core. Off by default; the OS scheduler is better than the heuristic |
+
 ## Known Limitations
 
 - **AMD CPU Power**: CPU Power (PL1/PL2 via PawnIO) is Intel-only. On AMD and other CPUs the card stays visible and shows **Not Supported**; no RAPL / PawnIO access is attempted.
@@ -238,6 +248,7 @@ The file rotates once it grows past a size threshold, keeping `app.log.1` throug
 - **Sleep / Hibernate Fan Control (resolved in v0.3.0)**: Previously, fan-speed control could stop responding correctly after the system resumed from sleep or hibernation. v0.3.0 detects `WM_POWERBROADCAST` resume events (resetting the EC client, `CurveStepper` state, and thermal history) and additionally re-asserts the fan duty every 30 s, so the fans spin back up even if the resume event is missed. Consecutive EC read / write failures also trigger automatic client reinitialization.
 - **Platform-specific**: This project has only been tested on Intel Core Ultra Series 1 (Meteor Lake) Framework laptops; broader support is not yet guaranteed.
 - **EC driver**: The Framework EC kernel driver must be installed for `framework_lib` to communicate with the hardware.
+- **Crash leaves last-applied state**: orderly quit restores firmware fan control and flushes the charge limit, but a crash or kill bypasses that path, so the EC keeps the last written fan duty until sleep, reboot, or the next launch re-asserts it.
 
 ## Third-Party Dependencies
 
@@ -254,9 +265,9 @@ The section reads and optionally writes PL1/PL2 via official PawnIO Modules. Tho
 
 1. Install the PawnIO driver: `winget install namazso.PawnIO` (or use **Install PawnIO** in the app).
 2. Open **CPU Power** and click **Download Modules**.
-3. The app fetches `IntelMSR.bin` and `IntelMCHBAR.bin` from [PawnIO Modules Releases](https://github.com/namazso/PawnIO.Modules/releases) (latest, falling back to 0.2.11 when the GitHub API is unreachable), checks SHA-256 (advisory) and caches them in `%APPDATA%/framework-crate/modules/`.
+3. The app fetches `IntelMSR.bin` and `IntelMCHBAR.bin` from [PawnIO Modules Releases](https://github.com/namazso/PawnIO.Modules/releases) (latest, falling back to 0.2.11 when the GitHub API is unreachable), checks SHA-256 (enforced) and caches them in `%APPDATA%/framework-crate/modules/`.
 
-A missing file blocks CPU Power; a hash mismatch only warns and still allows use (to follow github latest without code change). Failed download shows manual instructions: download latest `release_*.zip` from the releases page and place `IntelMSR.bin` + `IntelMCHBAR.bin` into `%APPDATA%/framework-crate/modules/`. Use **Open Modules Folder** and **Redetect** in the UI to verify — no restart needed.
+A missing file blocks CPU Power; a hash mismatch also blocks use — update the app for the new release, or set `FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1` only after manual verification. Failed download shows manual instructions: download latest `release_*.zip` from the releases page and place `IntelMSR.bin` + `IntelMCHBAR.bin` into `%APPDATA%/framework-crate/modules/`. Use **Open Modules Folder** and **Redetect** in the UI to verify — no restart needed.
 
 The first successful RAPL read also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` and resume-from-sleep both restore `min(MSR, MMIO)` from that snapshot.
 
