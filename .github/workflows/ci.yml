@@ -66,6 +66,11 @@ jobs:
           $ver = "2.13.1"
           $url = "https://github.com/orhun/git-cliff/releases/download/v${ver}/git-cliff-${ver}-x86_64-pc-windows-msvc.zip"
           Invoke-WebRequest $url -OutFile gitcliff.zip
+          # No upstream checksum file ships for the Windows zip, so the hash
+          # below is trust-on-first-use (pinned 2026-10-05). It still catches
+          # any later replacement of the asset. Update it when bumping $ver.
+          $hash = (Get-FileHash gitcliff.zip -Algorithm SHA256).Hash
+          if ($hash -ne "3AE3A5549E85C7AD5B20192EBCFEE4371269DECA51255F6F2F2E051C6541F5CA") { throw "git-cliff checksum mismatch: $hash" }
           Expand-Archive gitcliff.zip -DestinationPath gitcliff
           $exe = Get-ChildItem -Recurse -Filter git-cliff.exe gitcliff | Select-Object -First 1
           Write-Output "git-cliff installed at $($exe.DirectoryName)"
