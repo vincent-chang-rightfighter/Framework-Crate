@@ -37,11 +37,10 @@ use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORY
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, FindWindowExW, FindWindowW, GetSystemMetrics,
-    GetWindowLongPtrW, GetWindowPlacement, IsIconic, IsWindow, IsZoomed, PostMessageW,
-    RegisterWindowMessageW, SPI_GETWORKAREA, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowPlacement, SetWindowPos, ShowWindow, SystemParametersInfoW, TrackPopupMenu,
-    WINDOWPLACEMENT,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, FindWindowExW, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowPlacement, IsIconic, IsWindow, IsZoomed, PostMessageW, RegisterWindowMessageW,
+    SPI_GETWORKAREA, SetForegroundWindow, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos,
+    ShowWindow, SystemParametersInfoW, TrackPopupMenu, WINDOWPLACEMENT,
 };
 
 const VREFRESH: i32 = 116;
@@ -974,15 +973,44 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
 
 // Tray icon functions: SAFETY hwnd is valid handle from FindWindowW/CreateWindowExW.
 
-pub fn find_window_by_title(title: &str) -> Option<isize> {
-    let wide = to_wide(title);
-    // SAFETY: FindWindowW with null class matches any class.
-    let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
-    if hwnd.is_null() {
-        None
-    } else {
-        Some(hwnd as isize)
+/// Finds our own main window by process ID instead of title, so another app
+/// with the same title can never be mistaken for ours. Skips invisible
+/// windows such as the hidden tray message window.
+pub fn find_main_window_by_pid() -> Option<isize> {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    };
+    use windows_sys::core::BOOL;
+
+    struct EnumCtx {
+        pid: u32,
+        found: Option<isize>,
     }
+
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: lparam is the caller's EnumCtx, alive for the whole call.
+        let ctx = unsafe { &mut *(lparam as *mut EnumCtx) };
+        let mut pid = 0u32;
+        // SAFETY: hwnd comes from the enumerator; pid is a valid out-param.
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        // SAFETY: same hwnd as above.
+        if pid == ctx.pid && ctx.found.is_none() && unsafe { IsWindowVisible(hwnd) } != 0 {
+            ctx.found = Some(hwnd as isize);
+            return 0; // stop enumeration
+        }
+        1 // continue
+    }
+
+    let mut ctx = EnumCtx {
+        // SAFETY: takes no arguments.
+        pid: unsafe { GetCurrentProcessId() },
+        found: None,
+    };
+    // SAFETY: the callback only touches the stack EnumCtx above.
+    unsafe { EnumWindows(Some(enum_cb), &mut ctx as *mut EnumCtx as LPARAM) };
+    ctx.found
 }
 
 /// Hidden tray message window class.

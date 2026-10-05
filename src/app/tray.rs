@@ -24,7 +24,7 @@ impl App {
                 self.iconic_check_count = 0;
                 self.pending_minimize_to_tray = true;
                 if !self.tray_initialized {
-                    if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
+                    if let Some(hwnd) = system_info::find_main_window_by_pid() {
                         tracing::info!("Found window HWND: {}", hwnd);
                         self.tray.init(hwnd);
                         self.tray_initialized = true;

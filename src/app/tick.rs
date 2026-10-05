@@ -96,7 +96,7 @@ impl App {
         };
 
         if !self.tray_initialized
-            && let Some(hwnd) = system_info::find_window_by_title("Framework Crate")
+            && let Some(hwnd) = system_info::find_main_window_by_pid()
         {
             self.tray.init(hwnd);
             self.tray_initialized = true;
@@ -122,7 +122,7 @@ impl App {
                     self.last_hwnd_check_ts = now_ms;
                     if !system_info::is_window(self.tray.hwnd()) {
                         tracing::warn!("HWND {} invalid, reinitializing tray", self.tray.hwnd());
-                        if let Some(hwnd) = system_info::find_window_by_title("Framework Crate") {
+                        if let Some(hwnd) = system_info::find_main_window_by_pid() {
                             self.tray.request_reinit(hwnd);
                             self.tray.show_icon_async();
                         } else {
