@@ -347,13 +347,15 @@ fn acquire_single_instance(minimized: bool) -> Option<system_info::SingleInstanc
             std::process::exit(0);
         }
         Err(e) => {
-            // The mutex could not be created. Starting anyway is safer than
-            // exiting: a silent exit here looks identical to a failed startup,
-            // which is what Task Scheduler launch reports to the user.
+            // The mutex could not be created (e.g. handle exhaustion). Two
+            // unguarded instances would race EC writes, so refuse to start
+            // rather than run without the guard. Logged because a logon
+            // launch has no console, and exit code 1 (not silent 0) so Task
+            // Scheduler reports the failure instead of a clean run.
             fallback_log(&format!(
-                "startup: single-instance mutex unavailable ({e}); starting without the guard"
+                "startup: single-instance mutex unavailable ({e}); refusing to start without the guard"
             ));
-            None
+            std::process::exit(1);
         }
     }
 }
