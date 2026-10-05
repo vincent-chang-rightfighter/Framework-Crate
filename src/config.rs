@@ -103,7 +103,6 @@ fn default_config_dir() -> PathBuf {
 /// Checks the file DACL for an allow-ACE granting write-like rights to the
 /// Everyone SID (S-1-1-0). Returns false on any query failure (fail-open:
 /// inspection errors must not block saves).
-#[cfg(windows)]
 fn file_has_world_write_ace(path: &std::path::Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{GENERIC_WRITE, LocalFree};
@@ -210,7 +209,6 @@ fn file_has_world_write_ace(path: &std::path::Path) -> bool {
 /// granting write-like rights to Everyone. Fail-open: inspection errors are
 /// silently ignored and never block a save.
 pub(crate) fn warn_if_world_writable(path: &std::path::Path) {
-    #[cfg(windows)]
     {
         if !path.exists() {
             return;
@@ -230,7 +228,6 @@ pub(crate) fn warn_if_world_writable(path: &std::path::Path) {
 /// %APPDATA% (per-user). On Windows this re-enables inheritance; on Unix sets 0o600.
 /// Failures are warn-only and do not abort the save.
 pub(crate) fn harden_file_acl(path: &std::path::Path) {
-    #[cfg(windows)]
     {
         // On Windows, %APPDATA%/framework-crate already has a per-user DACL.
         // Files created there inherit it. We ensure inheritance is enabled
@@ -406,7 +403,6 @@ pub(crate) fn atomic_replace(
     sync: bool,
 ) -> Result<(), String> {
     // Windows rename fails if dest exists; use MoveFileExW for atomic replace.
-    #[cfg(windows)]
     {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
