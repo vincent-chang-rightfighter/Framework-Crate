@@ -12,26 +12,68 @@ use crate::style::{
 use crate::temp_chart;
 use crate::util::{read_lock, with_write_lock};
 
+mod fan_curve;
+mod fan_disabled;
+mod fan_manual;
+
 /// PD history depth to distinguish USB-A cards from transient USB device states.
 const MAX_PD_HISTORY: usize = 3;
 
 /// Consecutive EC read failures before reinitializing client (recovers after sleep/resume).
-const MAX_EC_IO_FAILURES: u32 = 5;
+pub(super) const MAX_EC_IO_FAILURES: u32 = 5;
 
 /// Consecutive EC write failures before reinitializing client (separate from reads).
-const MAX_EC_WRITE_FAILURES: u32 = 5;
+pub(super) const MAX_EC_WRITE_FAILURES: u32 = 5;
 
 /// Re-assert interval for converged fan duty; recovers fans if resume event was missed.
-const FAN_REASSERT_INTERVAL_MS: u64 = 30_000;
+pub(super) const FAN_REASSERT_INTERVAL_MS: u64 = 30_000;
 
 /// Rate-limit for curve fail-safe handover to firmware when temps are empty.
-const CURVE_TEMP_FAILOVER_MS: u64 = 1_000;
+pub(super) const CURVE_TEMP_FAILOVER_MS: u64 = 1_000;
 
 /// Maximum age of thermal sample before curve considers it stale.
-const THERMAL_STALE_MS: u64 = 5_000;
+pub(super) const THERMAL_STALE_MS: u64 = 5_000;
 
 /// Battery data considered stale after this duration without successful read.
 const BATTERY_STALE_MS: u64 = 15_000;
+
+/// Outcome of one fan-mode pass. The mode bodies live in submodules and
+/// cannot `continue 'poll_loop` or `return` across the function boundary,
+/// so they report how the parent loop should proceed instead.
+pub(super) enum Flow {
+    /// Arm finished; run the epilogue (`last_fan_mode`, `just_resumed`).
+    Done,
+    /// Skip the epilogue and start the next poll iteration.
+    Next,
+    /// Shutdown was requested; exit the worker.
+    Stop,
+}
+
+/// Per-iteration fan state shared with the mode submodules.
+///
+/// Plain scalars are owned copies, written back by the parent after the
+/// call; the stepper and per-fan ramp stay borrowed so no state is lost.
+pub(super) struct FanCtx<'a> {
+    pub state: &'a AppState,
+    pub ec: &'a Arc<cli::EcClient>,
+    pub mode: crate::types::FanControlMode,
+    pub now_ms: u64,
+    pub manual_duty: Option<u32>,
+    pub curve_hysteresis: Option<u32>,
+    pub curve_rate_limit: Option<u32>,
+    pub curve_rate_limit_down: Option<u32>,
+    pub curve_sensors: Vec<String>,
+    pub consecutive_ec_failures: u32,
+    pub consecutive_ec_write_failures: u32,
+    pub last_duty_write_ms: u64,
+    pub last_curve_failover_ms: u64,
+    pub last_manual_duty: Option<u32>,
+    pub manual_ramp_current: Option<u32>,
+    pub manual_per_fan_ramp: &'a mut Option<Vec<u32>>,
+    pub curve_stepper: &'a mut CurveStepper,
+    pub last_fan_mode: Option<crate::types::FanControlMode>,
+    pub just_resumed: bool,
+}
 
 /// Resets EC client after spawn panic so next iteration reinitializes.
 fn reset_ec_on_panic(state: &AppState) {
@@ -911,657 +953,48 @@ pub fn spawn(state: AppState) {
                             manual_ramp_current = None;
                         }
                     }
-                    match &mode {
-                        crate::types::FanControlMode::Disabled => {
-                            // Restore firmware control once when entering Disabled.
-                            if last_fan_mode
-                                .as_ref()
-                                .is_none_or(|m| m != &crate::types::FanControlMode::Disabled)
-                            {
-                                if shutdown_requested(&bg_state2) {
-                                    return;
-                                }
-                                let mut backoff_ec = false;
-                                {
-                                    let Some(_ec_guard) = crate::util::acquire_ec_write().await
-                                    else {
-                                        warn!("EC write lock contended, skipping this cycle");
-                                        continue 'poll_loop;
-                                    };
-                                    let ec_clone = Arc::clone(&ec);
-                                    match crate::util::spawn_blocking_with_timeout(
-                                        crate::util::EC_IO_TIMEOUT,
-                                        move || ec_clone.autofanctrl(),
-                                    )
-                                    .await
-                                    {
-                                        Ok(result) => {
-                                            if let Err(e) = result {
-                                                warn!("Failed to restore auto fan control: {}", e);
-                                                consecutive_ec_write_failures += 1;
-                                                if consecutive_ec_write_failures
-                                                    >= MAX_EC_WRITE_FAILURES
-                                                {
-                                                    reset_ec_after_failures(
-                                                        &bg_state2,
-                                                        consecutive_ec_write_failures,
-                                                    );
-                                                    // Drop the EC write lock before backing off
-                                                    // so other writers are not blocked for 3s.
-                                                    backoff_ec = true;
-                                                }
-                                            } else {
-                                                consecutive_ec_write_failures = 0;
-                                                last_duty_write_ms = now_ms;
-                                            }
-                                        }
-                                        Err(join_err) => {
-                                            warn!("EC spawn panicked (autofanctrl): {}", join_err);
-                                            reset_ec_on_panic(&bg_state2);
-                                            continue;
-                                        }
-                                    }
-                                }
-                                if backoff_ec {
-                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                    continue 'poll_loop;
-                                }
-                                let mode_now = crate::types::FanControlMode::from_u8(
-                                    bg_state2.fan.mode.load(Ordering::Acquire) as u8,
-                                );
-                                if mode_now != mode {
-                                    last_fan_mode = Some(mode);
-                                    continue;
-                                }
-                            }
+                    let mut ctx = FanCtx {
+                        state: &bg_state2,
+                        ec: &ec,
+                        mode,
+                        now_ms,
+                        manual_duty,
+                        curve_hysteresis,
+                        curve_rate_limit,
+                        curve_rate_limit_down,
+                        curve_sensors,
+                        consecutive_ec_failures,
+                        consecutive_ec_write_failures,
+                        last_duty_write_ms,
+                        last_curve_failover_ms,
+                        last_manual_duty,
+                        manual_ramp_current,
+                        manual_per_fan_ramp: &mut manual_per_fan_ramp,
+                        curve_stepper: &mut curve_stepper,
+                        last_fan_mode,
+                        just_resumed,
+                    };
+                    let flow = match &mode {
+                        crate::types::FanControlMode::Disabled => fan_disabled::run(&mut ctx).await,
+                        crate::types::FanControlMode::Manual => fan_manual::run(&mut ctx).await,
+                        crate::types::FanControlMode::Curve => fan_curve::run(&mut ctx).await,
+                    };
+                    // Write back the owned copies the arms may have mutated.
+                    consecutive_ec_failures = ctx.consecutive_ec_failures;
+                    consecutive_ec_write_failures = ctx.consecutive_ec_write_failures;
+                    last_duty_write_ms = ctx.last_duty_write_ms;
+                    last_curve_failover_ms = ctx.last_curve_failover_ms;
+                    last_manual_duty = ctx.last_manual_duty;
+                    manual_ramp_current = ctx.manual_ramp_current;
+                    last_fan_mode = ctx.last_fan_mode;
+                    match flow {
+                        Flow::Done => {
+                            last_fan_mode = Some(mode);
+                            just_resumed = false;
                         }
-                        crate::types::FanControlMode::Manual => {
-                            let unified = bg_state2.fan.unified_duty.load(Ordering::Acquire);
-                            if unified {
-                                if let Some(target) = manual_duty {
-                                    let current = manual_ramp_current.unwrap_or(target);
-                                    let next =
-                                        crate::fan_control::apply_rate_limit(current, target, 10);
-                                    let converged = last_manual_duty == Some(next);
-                                    // Re-assert periodically even when converged to recover missed resume.
-                                    let reassert = converged
-                                        && now_ms.saturating_sub(last_duty_write_ms)
-                                            >= FAN_REASSERT_INTERVAL_MS;
-                                    if converged && !reassert {
-                                        manual_ramp_current = Some(next);
-                                    } else {
-                                        if shutdown_requested(&bg_state2) {
-                                            return;
-                                        }
-                                        let mut backoff_ec = false;
-                                        {
-                                            let Some(_ec_guard) =
-                                                crate::util::acquire_ec_write().await
-                                            else {
-                                                warn!(
-                                                    "EC write lock contended, skipping this cycle"
-                                                );
-                                                continue 'poll_loop;
-                                            };
-                                            let ec_clone = Arc::clone(&ec);
-                                            match crate::util::spawn_blocking_with_timeout(
-                                                crate::util::EC_IO_TIMEOUT,
-                                                move || ec_clone.set_fan_duty(next, None),
-                                            )
-                                            .await
-                                            {
-                                                Ok(result) => match result {
-                                                    Ok(()) => {
-                                                        if shutdown_requested(&bg_state2) {
-                                                            return;
-                                                        }
-                                                        let mode_now =
-                                                            crate::types::FanControlMode::from_u8(
-                                                                bg_state2
-                                                                    .fan
-                                                                    .mode
-                                                                    .load(Ordering::Acquire)
-                                                                    as u8,
-                                                            );
-                                                        if mode_now != mode {
-                                                            last_fan_mode = Some(mode);
-                                                            continue;
-                                                        }
-                                                        consecutive_ec_write_failures = 0;
-                                                        last_duty_write_ms = now_ms;
-                                                        bg_state2
-                                                            .fan
-                                                            .last_applied_duty
-                                                            .store(next as u64, Ordering::Release);
-                                                        last_manual_duty = Some(next);
-                                                        manual_ramp_current = Some(next);
-                                                    }
-                                                    Err(e) => {
-                                                        warn!(
-                                                            "Failed to set manual fan duty: {}",
-                                                            e
-                                                        );
-                                                        consecutive_ec_write_failures += 1;
-                                                        if consecutive_ec_write_failures
-                                                            >= MAX_EC_WRITE_FAILURES
-                                                        {
-                                                            reset_ec_after_failures(
-                                                                &bg_state2,
-                                                                consecutive_ec_write_failures,
-                                                            );
-                                                            // Drop the EC write lock before backing off.
-                                                            backoff_ec = true;
-                                                        }
-                                                    }
-                                                },
-                                                Err(join_err) => {
-                                                    warn!(
-                                                        "EC spawn panicked (set_fan_duty): {}",
-                                                        join_err
-                                                    );
-                                                    reset_ec_on_panic(&bg_state2);
-                                                    continue;
-                                                }
-                                            }
-                                        }
-                                        if backoff_ec {
-                                            tokio::time::sleep(std::time::Duration::from_secs(3))
-                                                .await;
-                                            continue 'poll_loop;
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Per-fan manual ramps independently; not gated by unified ramp state.
-                                let per_fan = read_lock(&bg_state2.fan.per_fan_duty);
-                                if !per_fan.is_empty() {
-                                    let last_duty =
-                                        bg_state2.fan.last_applied_duty.load(Ordering::Acquire)
-                                            as u32;
-                                    let seed = if last_duty > 0 {
-                                        last_duty
-                                    } else {
-                                        estimate_duty_from_thermal(&bg_state2)
-                                            .unwrap_or_else(|| per_fan[0])
-                                    };
-                                    let ramp = manual_per_fan_ramp
-                                        .get_or_insert_with(|| vec![seed; per_fan.len()]);
-                                    // Grow ramp when fan count increases; otherwise new fans never get written.
-                                    if ramp.len() < per_fan.len() {
-                                        ramp.resize(per_fan.len(), seed);
-                                    }
-                                    let mut wrote_any = false;
-                                    let fan_count_now =
-                                        bg_state2.fan.fan_count.load(Ordering::Acquire) as usize;
-                                    // Re-assert once per pass, not per fan, to ensure all fans recover.
-                                    let reassert = now_ms.saturating_sub(last_duty_write_ms)
-                                        >= FAN_REASSERT_INTERVAL_MS;
-                                    let mut backoff_ec = false;
-                                    for (idx, &target) in per_fan.iter().enumerate() {
-                                        // Skip indices beyond physical fan count (vector retains docked fans).
-                                        if idx >= fan_count_now {
-                                            continue;
-                                        }
-                                        let current = ramp.get(idx).copied().unwrap_or(target);
-                                        let next_i = crate::fan_control::apply_rate_limit(
-                                            current, target, 10,
-                                        );
-                                        // Write even when converged on resume or periodic re-assert.
-                                        if next_i == current && !just_resumed && !reassert {
-                                            continue;
-                                        }
-                                        if shutdown_requested(&bg_state2) {
-                                            return;
-                                        }
-                                        // Re-check mode between fans to avoid writes after mode switch.
-                                        let mode_check = crate::types::FanControlMode::from_u8(
-                                            bg_state2.fan.mode.load(Ordering::Acquire) as u8,
-                                        );
-                                        if mode_check != mode {
-                                            break;
-                                        }
-                                        let mut write_backoff = false;
-                                        {
-                                            let Some(_ec_guard) =
-                                                crate::util::acquire_ec_write().await
-                                            else {
-                                                warn!(
-                                                    "EC write lock contended, skipping this cycle"
-                                                );
-                                                continue 'poll_loop;
-                                            };
-                                            let ec_clone = Arc::clone(&ec);
-                                            let fan_idx = idx as u32;
-                                            match crate::util::spawn_blocking_with_timeout(
-                                                crate::util::EC_IO_TIMEOUT,
-                                                move || {
-                                                    ec_clone.set_fan_duty(next_i, Some(fan_idx))
-                                                },
-                                            )
-                                            .await
-                                            {
-                                                Ok(Ok(())) => {
-                                                    if shutdown_requested(&bg_state2) {
-                                                        return;
-                                                    }
-                                                    ramp[idx] = next_i;
-                                                    wrote_any = true;
-                                                    consecutive_ec_write_failures = 0;
-                                                    last_duty_write_ms = now_ms;
-                                                }
-                                                Ok(Err(e)) => {
-                                                    warn!(
-                                                        "Failed to set fan {} duty: {}",
-                                                        fan_idx, e
-                                                    );
-                                                    consecutive_ec_write_failures += 1;
-                                                    if consecutive_ec_write_failures
-                                                        >= MAX_EC_WRITE_FAILURES
-                                                    {
-                                                        reset_ec_after_failures(
-                                                            &bg_state2,
-                                                            consecutive_ec_write_failures,
-                                                        );
-                                                        // Drop the EC write lock before backing off.
-                                                        write_backoff = true;
-                                                    }
-                                                }
-                                                Err(join_err) => {
-                                                    warn!(
-                                                        "EC spawn panicked (set_fan_duty fan {}): {}",
-                                                        fan_idx, join_err
-                                                    );
-                                                    reset_ec_on_panic(&bg_state2);
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        if write_backoff {
-                                            backoff_ec = true;
-                                            break;
-                                        }
-                                    }
-                                    if backoff_ec {
-                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                        continue 'poll_loop;
-                                    }
-                                    // Update on any write, including 0% convergence.
-                                    if wrote_any {
-                                        let max_applied = ramp.iter().copied().max().unwrap_or(0);
-                                        bg_state2
-                                            .fan
-                                            .last_applied_duty
-                                            .store(max_applied as u64, Ordering::Release);
-                                    }
-                                    // Sync unified ramp seed with per-fan max for mode switch.
-                                    manual_ramp_current = ramp.iter().copied().max();
-                                }
-                            }
-                        }
-                        crate::types::FanControlMode::Curve => {
-                            // Staleness check before using cached thermal.
-                            let last_ok = bg_state2.thermal.last_success_ms.load(Ordering::Acquire);
-                            let is_stale =
-                                last_ok == 0 || now_ms.saturating_sub(last_ok) > THERMAL_STALE_MS;
-                            if is_stale {
-                                consecutive_ec_failures += 1;
-                                if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-                                    reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
-                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                    continue 'poll_loop;
-                                }
-                                // Immediate handover when no fresh sample.
-                                if shutdown_requested(&bg_state2) {
-                                    return;
-                                }
-                                let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
-                                    warn!("EC write lock contended, skipping this cycle");
-                                    continue 'poll_loop;
-                                };
-                                let ec_clone = Arc::clone(&ec);
-                                match crate::util::spawn_blocking_with_timeout(
-                                    crate::util::EC_IO_TIMEOUT,
-                                    move || ec_clone.autofanctrl(),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(())) => {
-                                        last_curve_failover_ms = now_ms;
-                                        tracing::warn!(
-                                            "Curve mode: stale thermal ({}ms), handed fan control to firmware",
-                                            now_ms.saturating_sub(last_ok)
-                                        );
-                                    }
-                                    Ok(Err(e)) => {
-                                        warn!("Curve stale fail-safe autofanctrl failed: {}", e);
-                                        consecutive_ec_failures += 1;
-                                        if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-                                            reset_ec_after_failures(
-                                                &bg_state2,
-                                                consecutive_ec_failures,
-                                            );
-                                            tokio::time::sleep(std::time::Duration::from_secs(3))
-                                                .await;
-                                            continue 'poll_loop;
-                                        }
-                                    }
-                                    Err(join_err) => {
-                                        warn!(
-                                            "EC spawn panicked (curve stale fail-safe): {}",
-                                            join_err
-                                        );
-                                        reset_ec_on_panic(&bg_state2);
-                                    }
-                                }
-                                continue 'poll_loop;
-                            }
-                            let thermal_clone = read_lock(&bg_state2.thermal.data);
-                            let Some(ref thermal) = *thermal_clone else {
-                                // No sample yet but not stale-timed out above? immediate handover.
-                                if shutdown_requested(&bg_state2) {
-                                    return;
-                                }
-                                let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
-                                    warn!("EC write lock contended, skipping this cycle");
-                                    continue 'poll_loop;
-                                };
-                                let ec_clone = Arc::clone(&ec);
-                                let _ = crate::util::spawn_blocking_with_timeout(
-                                    crate::util::EC_IO_TIMEOUT,
-                                    move || ec_clone.autofanctrl(),
-                                )
-                                .await;
-                                continue 'poll_loop;
-                            };
-                            // avoid unwrap panic if curve config is corrupted/missing
-                            let Some(hyst) = curve_hysteresis else {
-                                warn!(
-                                    "Curve mode with missing hysteresis, handing back to firmware"
-                                );
-                                if !shutdown_requested(&bg_state2) {
-                                    let Some(_ec_guard) = crate::util::acquire_ec_write().await
-                                    else {
-                                        warn!("EC write lock contended, skipping this cycle");
-                                        continue 'poll_loop;
-                                    };
-                                    let ec_clone = Arc::clone(&ec);
-                                    let _ = crate::util::spawn_blocking_with_timeout(
-                                        crate::util::EC_IO_TIMEOUT,
-                                        move || ec_clone.autofanctrl(),
-                                    )
-                                    .await;
-                                }
-                                continue 'poll_loop;
-                            };
-                            let Some(rate) = curve_rate_limit else {
-                                warn!(
-                                    "Curve mode with missing rate_limit, handing back to firmware"
-                                );
-                                if !shutdown_requested(&bg_state2) {
-                                    let Some(_ec_guard) = crate::util::acquire_ec_write().await
-                                    else {
-                                        warn!("EC write lock contended, skipping this cycle");
-                                        continue 'poll_loop;
-                                    };
-                                    let ec_clone = Arc::clone(&ec);
-                                    let _ = crate::util::spawn_blocking_with_timeout(
-                                        crate::util::EC_IO_TIMEOUT,
-                                        move || ec_clone.autofanctrl(),
-                                    )
-                                    .await;
-                                }
-                                continue 'poll_loop;
-                            };
-                            // Fail-safe: empty temps means EC read failed; hand back to firmware immediately.
-                            // Previously waited 30s (CURVE_TEMP_FAILOVER_MS) holding last duty (could be 0%) → overheat.
-                            if thermal.temps.is_empty() {
-                                // Count as read failure toward EC reset.
-                                consecutive_ec_failures += 1;
-                                if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-                                    reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
-                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                    continue 'poll_loop;
-                                }
-                                // Throttle autofanctrl to once per second to avoid spamming EC
-                                if now_ms.saturating_sub(last_curve_failover_ms)
-                                    >= CURVE_TEMP_FAILOVER_MS
-                                {
-                                    if shutdown_requested(&bg_state2) {
-                                        return;
-                                    }
-                                    let Some(_ec_guard) = crate::util::acquire_ec_write().await
-                                    else {
-                                        warn!("EC write lock contended, skipping this cycle");
-                                        continue 'poll_loop;
-                                    };
-                                    let ec_clone = Arc::clone(&ec);
-                                    match crate::util::spawn_blocking_with_timeout(
-                                        crate::util::EC_IO_TIMEOUT,
-                                        move || ec_clone.autofanctrl(),
-                                    )
-                                    .await
-                                    {
-                                        Ok(Ok(())) => {
-                                            last_curve_failover_ms = now_ms;
-                                            consecutive_ec_failures = 0;
-                                            tracing::warn!(
-                                                "Curve mode: EC temps read failed, handed fan control to firmware"
-                                            );
-                                        }
-                                        Ok(Err(e)) => {
-                                            warn!("Curve fail-safe autofanctrl failed: {}", e);
-                                            // Count failure toward EC reset.
-                                            consecutive_ec_failures += 1;
-                                            if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-                                                reset_ec_after_failures(
-                                                    &bg_state2,
-                                                    consecutive_ec_failures,
-                                                );
-                                                tokio::time::sleep(std::time::Duration::from_secs(
-                                                    3,
-                                                ))
-                                                .await;
-                                                continue 'poll_loop;
-                                            }
-                                        }
-                                        Err(join_err) => {
-                                            warn!(
-                                                "EC spawn panicked (curve fail-safe autofanctrl): {}",
-                                                join_err
-                                            );
-                                            reset_ec_on_panic(&bg_state2);
-                                        }
-                                    }
-                                }
-                                continue 'poll_loop;
-                            }
-                            let control_temp =
-                                crate::types::curve_control_temp(&thermal.temps, &curve_sensors);
-                            let full_pts_arc = read_lock(&bg_state2.fan.curve_full_points);
-                            let full_pts: &[[u32; 2]] = &full_pts_arc;
-                            let mut next = curve_stepper.next(
-                                control_temp,
-                                hyst,
-                                rate,
-                                curve_rate_limit_down,
-                                full_pts,
-                            );
-                            // Even when the stepper has converged, periodically
-                            // re-assert the last duty. This recovers from a
-                            // missed resume event that would otherwise leave
-                            // fans in firmware control.
-                            if next.is_none()
-                                && now_ms.saturating_sub(last_duty_write_ms)
-                                    >= FAN_REASSERT_INTERVAL_MS
-                            {
-                                next = curve_stepper.current_duty();
-                            }
-                            if let Some(next) = next {
-                                let fan_count =
-                                    bg_state2.fan.fan_count.load(Ordering::Acquire) as u32;
-                                let write_each =
-                                    !bg_state2.fan.unified_duty.load(Ordering::Acquire)
-                                        && fan_count > 1;
-                                // Only advance the stepper when every target fan
-                                // was updated. Partial success must not distort
-                                // the ramp state.
-                                let mut applied = false;
-                                if write_each {
-                                    let mut all_fans_applied = true;
-                                    let mut any_succeeded = false;
-                                    let mut failed_fans: Vec<u32> = Vec::new();
-                                    for fan_idx in 0..fan_count {
-                                        if shutdown_requested(&bg_state2) {
-                                            return;
-                                        }
-                                        let mode_check = crate::types::FanControlMode::from_u8(
-                                            bg_state2.fan.mode.load(Ordering::Acquire) as u8,
-                                        );
-                                        if mode_check != mode {
-                                            all_fans_applied = false;
-                                            break;
-                                        }
-                                        let Some(_ec_guard) = crate::util::acquire_ec_write().await
-                                        else {
-                                            warn!("EC write lock contended, skipping this cycle");
-                                            continue 'poll_loop;
-                                        };
-                                        let ec_clone = Arc::clone(&ec);
-                                        match crate::util::spawn_blocking_with_timeout(
-                                            crate::util::EC_IO_TIMEOUT,
-                                            move || ec_clone.set_fan_duty(next, Some(fan_idx)),
-                                        )
-                                        .await
-                                        {
-                                            Ok(result) => {
-                                                if let Err(e) = result {
-                                                    // Transient per-fan failure (e.g. dock unplugged); only all-fail counts toward reset.
-                                                    all_fans_applied = false;
-                                                    failed_fans.push(fan_idx);
-                                                    tracing::debug!(
-                                                        "Failed to set fan {} duty (curve): {}",
-                                                        fan_idx,
-                                                        e
-                                                    );
-                                                } else {
-                                                    any_succeeded = true;
-                                                    last_duty_write_ms = now_ms;
-                                                }
-                                            }
-                                            Err(join_err) => {
-                                                warn!(
-                                                    "EC spawn panicked (set_fan_duty curve fan {}): {}",
-                                                    fan_idx, join_err
-                                                );
-                                                reset_ec_on_panic(&bg_state2);
-                                                all_fans_applied = false;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if any_succeeded {
-                                        consecutive_ec_write_failures = 0;
-                                    } else {
-                                        consecutive_ec_write_failures += 1;
-                                        if consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
-                                            reset_ec_after_failures(
-                                                &bg_state2,
-                                                consecutive_ec_write_failures,
-                                            );
-                                            tokio::time::sleep(std::time::Duration::from_secs(3))
-                                                .await;
-                                            continue 'poll_loop;
-                                        }
-                                    }
-                                    if !failed_fans.is_empty() {
-                                        warn!(
-                                            "Failed to set fan duties (curve) for fans {:?} ({} of {} wrote)",
-                                            failed_fans,
-                                            fan_count.saturating_sub(failed_fans.len() as u32),
-                                            fan_count
-                                        );
-                                    }
-                                    applied = all_fans_applied;
-                                    if applied {
-                                        bg_state2
-                                            .fan
-                                            .last_applied_duty
-                                            .store(next as u64, Ordering::Release);
-                                    }
-                                } else {
-                                    if shutdown_requested(&bg_state2) {
-                                        return;
-                                    }
-                                    let Some(_ec_guard) = crate::util::acquire_ec_write().await
-                                    else {
-                                        warn!("EC write lock contended, skipping this cycle");
-                                        continue 'poll_loop;
-                                    };
-                                    let ec_clone = Arc::clone(&ec);
-                                    match crate::util::spawn_blocking_with_timeout(
-                                        crate::util::EC_IO_TIMEOUT,
-                                        move || ec_clone.set_fan_duty(next, None),
-                                    )
-                                    .await
-                                    {
-                                        Ok(result) => match result {
-                                            Ok(()) => {
-                                                if shutdown_requested(&bg_state2) {
-                                                    return;
-                                                }
-                                                let mode_now =
-                                                    crate::types::FanControlMode::from_u8(
-                                                        bg_state2.fan.mode.load(Ordering::Acquire)
-                                                            as u8,
-                                                    );
-                                                if mode_now != mode {
-                                                    last_fan_mode = Some(mode);
-                                                    continue;
-                                                }
-                                                consecutive_ec_write_failures = 0;
-                                                last_duty_write_ms = now_ms;
-                                                bg_state2
-                                                    .fan
-                                                    .last_applied_duty
-                                                    .store(next as u64, Ordering::Release);
-                                                applied = true;
-                                            }
-                                            Err(e) => {
-                                                warn!("Failed to set fan duty (curve): {}", e);
-                                                consecutive_ec_write_failures += 1;
-                                                if consecutive_ec_write_failures
-                                                    >= MAX_EC_WRITE_FAILURES
-                                                {
-                                                    reset_ec_after_failures(
-                                                        &bg_state2,
-                                                        consecutive_ec_write_failures,
-                                                    );
-                                                    tokio::time::sleep(
-                                                        std::time::Duration::from_secs(3),
-                                                    )
-                                                    .await;
-                                                    continue 'poll_loop;
-                                                }
-                                            }
-                                        },
-                                        Err(join_err) => {
-                                            warn!(
-                                                "EC spawn panicked (set_fan_duty curve): {}",
-                                                join_err
-                                            );
-                                            reset_ec_on_panic(&bg_state2);
-                                            continue;
-                                        }
-                                    }
-                                }
-                                if applied {
-                                    curve_stepper.note_applied(next);
-                                }
-                            }
-                        }
+                        Flow::Next => continue 'poll_loop,
+                        Flow::Stop => return,
                     }
-                    last_fan_mode = Some(mode);
-                    just_resumed = false;
                 }
             });
             if let Err(e) = handle.await {
