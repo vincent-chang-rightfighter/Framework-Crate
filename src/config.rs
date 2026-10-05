@@ -100,27 +100,29 @@ fn default_config_dir() -> PathBuf {
     }
 }
 
+/// Write-like rights: writing/appending data, taking ownership, or changing
+/// the DACL all let Everyone rewrite or re-permission the file.
+const WORLD_WRITE_MASK: u32 = {
+    use windows_sys::Win32::Foundation::GENERIC_WRITE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_APPEND_DATA, FILE_WRITE_DATA, WRITE_DAC, WRITE_OWNER,
+    };
+    FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | WRITE_DAC | WRITE_OWNER
+};
+
 /// Checks the file DACL for an allow-ACE granting write-like rights to the
 /// Everyone SID (S-1-1-0). Returns false on any query failure (fail-open:
 /// inspection errors must not block saves).
 fn file_has_world_write_ace(path: &std::path::Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{GENERIC_WRITE, LocalFree};
+    use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION, PSID,
         SECURITY_MAX_SID_SIZE, WinWorldSid,
     };
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_APPEND_DATA, FILE_WRITE_DATA, WRITE_DAC, WRITE_OWNER,
-    };
     use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
     use windows_sys::core::PCWSTR;
-
-    // Write-like rights: writing/appending data, taking ownership, or changing
-    // the DACL all let Everyone rewrite or re-permission the file.
-    const WORLD_WRITE_MASK: u32 =
-        FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | WRITE_DAC | WRITE_OWNER;
 
     // Everyone SID for comparison.
     let mut everyone = [0u8; SECURITY_MAX_SID_SIZE as usize];
@@ -224,28 +226,175 @@ pub(crate) fn warn_if_world_writable(path: &std::path::Path) {
     }
 }
 
-/// Best-effort hardening: ensure the config file inherits restrictive ACL from
-/// %APPDATA% (per-user). On Windows this re-enables inheritance; on Unix sets 0o600.
+/// Best-effort hardening: removes explicit Everyone write ACEs from the
+/// config file, leaving inherited ACLs (e.g. from %APPDATA%) untouched.
 /// Failures are warn-only and do not abort the save.
 pub(crate) fn harden_file_acl(path: &std::path::Path) {
-    {
-        // On Windows, %APPDATA%/framework-crate already has a per-user DACL.
-        // Files created there inherit it. We ensure inheritance is enabled
-        // (UNPROTECTED_DACL) so no explicit permissive ACEs linger.
-        // Full DACL rewrite (SetNamedSecurityInfoW with explicit user SID) is
-        // deferred — current inherited ACL is already restrictive enough for
-        // per-user config. Log for audit.
+    if !file_has_world_write_ace(path) {
         tracing::debug!(
             "Config file {} saved with inherited ACL from %APPDATA% (per-user)",
             path.display()
         );
-        // Follow-up hardening (if needed): call SetNamedSecurityInfoW with
-        // UNPROTECTED_DACL_SECURITY_INFORMATION to force inheritance, or
-        // construct explicit DACL for current user only (requires
-        // Win32_Security_Authorization + TokenUser SID lookup).
-        let _ = path;
-        warn_if_world_writable(path);
+        return;
     }
+    match revoke_everyone_write(path) {
+        Ok(true) => tracing::warn!(
+            "Removed permissive Everyone write ACE from {}",
+            path.display()
+        ),
+        Ok(false) => tracing::warn!(
+            "Config file {} has an inherited Everyone write ACE, leaving it (parent dir out of scope)",
+            path.display()
+        ),
+        Err(e) => tracing::warn!(
+            "Failed to remove permissive ACE from {}: {}",
+            path.display(),
+            e
+        ),
+    }
+}
+
+/// Revokes Everyone's write-like rights on `path` via an explicit REVOKE
+/// entry, then re-verifies. Only explicit ACEs are touched: inherited ones
+/// belong to the parent directory and are reported, not modified.
+/// Returns Ok(true) when the file verifies clean afterwards.
+fn revoke_everyone_write(path: &std::path::Path) -> Result<bool, &'static str> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS,
+        SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_USER,
+        TRUSTEE_W,
+    };
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
+        INHERITED_ACE, NO_INHERITANCE, PSID, SECURITY_MAX_SID_SIZE, WinWorldSid,
+    };
+    use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+    use windows_sys::core::{PCWSTR, PWSTR};
+
+    // Everyone SID for the trustee and for comparison.
+    let mut everyone = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut everyone_len = everyone.len() as u32;
+    // SAFETY: buffer is SECURITY_MAX_SID_SIZE bytes, the documented maximum.
+    let ok = unsafe {
+        CreateWellKnownSid(
+            WinWorldSid,
+            std::ptr::null_mut(),
+            everyone.as_mut_ptr() as PSID,
+            &mut everyone_len,
+        )
+    };
+    if ok == 0 {
+        return Err("could not build Everyone SID");
+    }
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut sd: *mut core::ffi::c_void = std::ptr::null_mut();
+    // SAFETY: null-terminated path; DACL and SD outputs freed below.
+    let err = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr() as PCWSTR,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if err != 0 || dacl.is_null() {
+        if !sd.is_null() {
+            // SAFETY: SD was allocated by the call above.
+            unsafe { LocalFree(sd) };
+        }
+        return Err("could not read DACL");
+    }
+    // Refuse when any offending ACE is inherited: those belong to the parent
+    // directory and must not be rewritten here.
+    // SAFETY: dacl points to a valid ACL; bounds-checked against AclSize.
+    let explicit_only = unsafe {
+        let acl_size = (*dacl).AclSize as usize;
+        let mut offset = std::mem::size_of::<ACL>();
+        let mut all_explicit = true;
+        while offset + std::mem::size_of::<ACE_HEADER>() <= acl_size {
+            let header = &*((dacl as *const u8).add(offset) as *const ACE_HEADER);
+            let size = header.AceSize as usize;
+            if size < std::mem::size_of::<ACE_HEADER>() || offset + size > acl_size {
+                break;
+            }
+            if header.AceType as u32 == ACCESS_ALLOWED_ACE_TYPE {
+                let ace = &*((dacl as *const u8).add(offset) as *const ACCESS_ALLOWED_ACE);
+                let sid = &ace.SidStart as *const u32 as *const u8;
+                let sid_len = 8 + 4 * (*sid.add(1) as usize);
+                if sid_len == everyone_len as usize
+                    && core::slice::from_raw_parts(sid, sid_len)
+                        == &everyone[..everyone_len as usize]
+                    && ace.Mask & WORLD_WRITE_MASK != 0
+                    && (header.AceFlags as u32) & INHERITED_ACE != 0
+                {
+                    all_explicit = false;
+                    break;
+                }
+            }
+            offset += size;
+        }
+        all_explicit
+    };
+    if !explicit_only {
+        // SAFETY: SD was allocated above.
+        unsafe { LocalFree(sd) };
+        return Ok(false);
+    }
+    let trustee = TRUSTEE_W {
+        pMultipleTrustee: std::ptr::null_mut(),
+        MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+        TrusteeForm: TRUSTEE_IS_SID,
+        TrusteeType: TRUSTEE_IS_USER,
+        ptstrName: everyone.as_mut_ptr() as PWSTR,
+    };
+    let explicit = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: WORLD_WRITE_MASK,
+        grfAccessMode: REVOKE_ACCESS,
+        grfInheritance: NO_INHERITANCE,
+        Trustee: trustee,
+    };
+    let mut new_dacl: *mut ACL = std::ptr::null_mut();
+    // SAFETY: explicit entry and old DACL are valid; new DACL freed below.
+    let err = unsafe { SetEntriesInAclW(1, &explicit, dacl, &mut new_dacl) };
+    // SAFETY: SD was allocated above.
+    unsafe { LocalFree(sd) };
+    if err != 0 || new_dacl.is_null() {
+        return Err("could not rebuild DACL");
+    }
+    // SAFETY: null-terminated path; new DACL built above, freed below.
+    let err = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_ptr() as PCWSTR,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            new_dacl,
+            std::ptr::null_mut(),
+        )
+    };
+    // SAFETY: allocated by SetEntriesInAclW above.
+    unsafe { LocalFree(new_dacl as *mut core::ffi::c_void) };
+    if err != 0 {
+        return Err("could not write DACL");
+    }
+    // Verify the removal actually landed.
+    if file_has_world_write_ace(path) {
+        return Err("permissive ACE still present after revoke");
+    }
+    Ok(true)
 }
 
 /// Backs up corrupt config before next save overwrites it.
@@ -469,6 +618,33 @@ mod tests {
     use super::*;
     use crate::types::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn harden_removes_explicit_everyone_write_ace() {
+        // End-to-end through the real DACL: plant an Everyone write ACE the
+        // way a misconfigured tool would, then verify detection sees it and
+        // hardening removes it. Skips quietly when icacls is unavailable.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("acl-test.toml");
+        std::fs::write(&path, "x = 1").unwrap();
+        let grant = std::process::Command::new("icacls")
+            .arg(&path)
+            .args(["/grant", "Everyone:W"])
+            .output();
+        let Ok(out) = grant else { return };
+        if !out.status.success() {
+            return;
+        }
+        assert!(
+            file_has_world_write_ace(&path),
+            "planted ACE must be detected"
+        );
+        harden_file_acl(&path);
+        assert!(
+            !file_has_world_write_ace(&path),
+            "permissive ACE must be revoked"
+        );
+    }
 
     fn tmp_config() -> (TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
