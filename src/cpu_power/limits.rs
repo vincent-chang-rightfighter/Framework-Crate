@@ -162,7 +162,7 @@ impl CpuPowerInfo {
 }
 
 /// Lower of enabled limits, ignoring 0/invalid and disabled registers.
-pub(super) fn effective_limit(msr: f64, msr_en: bool, mmio: f64, mmio_en: bool) -> f64 {
+fn effective_limit(msr: f64, msr_en: bool, mmio: f64, mmio_en: bool) -> f64 {
     let msr_valid = msr_en && msr > 0.0 && msr.is_finite();
     let mmio_valid = mmio_en && mmio > 0.0 && mmio.is_finite();
     match (msr_valid, mmio_valid) {
@@ -190,7 +190,7 @@ pub(super) fn decode_time_window(y: u32, z: u32, time_unit: f64) -> f64 {
 }
 
 /// Encodes time window into Y and Z fields.
-pub(super) fn encode_time_window(time_s: f64, time_unit: f64) -> (u32, u32) {
+fn encode_time_window(time_s: f64, time_unit: f64) -> (u32, u32) {
     if time_unit <= 0.0 || time_s <= 0.0 {
         return (0, 0);
     }
@@ -204,7 +204,7 @@ pub(super) fn encode_time_window(time_s: f64, time_unit: f64) -> (u32, u32) {
 }
 
 /// Encodes power limit into 32-bit register half.
-pub(super) fn encode_power_limit(
+fn encode_power_limit(
     watts: f64,
     enabled: bool,
     clamped: bool,
@@ -251,7 +251,7 @@ pub struct PowerLimitParams {
 /// because the register can only hold a whole number of `power_unit` steps. If
 /// the request were compared directly, every limit that is not an exact
 /// multiple of the unit would look like a locked register.
-pub(super) fn encoded_watts(encoded: u32, power_unit: f64) -> f64 {
+fn encoded_watts(encoded: u32, power_unit: f64) -> f64 {
     ((encoded & 0x7FFF) as f64) * power_unit
 }
 
@@ -259,13 +259,13 @@ pub(super) fn encoded_watts(encoded: u32, power_unit: f64) -> f64 {
 ///
 /// Floors at 0.25W so that a very small `power_unit` cannot turn ordinary
 /// quantisation into a false lock detection.
-pub(super) fn readback_tolerance(power_unit: f64) -> f64 {
+fn readback_tolerance(power_unit: f64) -> f64 {
     power_unit.max(0.25)
 }
 
 /// Whether a register read-back reflects the limits that were just written.
 #[derive(Debug, PartialEq)]
-pub(super) enum Readback {
+enum Readback {
     Matches,
     /// The write did not land. A BIOS-locked register keeps its previous
     /// value, and the enabled bit is cleared when a limit is disabled.
@@ -282,7 +282,7 @@ pub(super) enum Readback {
 /// This is the BIOS-lock detection: it is the only thing standing between a
 /// silently ignored write and a UI that reports success, so it is kept pure
 /// and tested directly rather than only exercised through a real handle.
-pub(super) fn classify_readback(
+fn classify_readback(
     rb_raw: u64,
     pl1_enc: u32,
     pl2_enc: u32,

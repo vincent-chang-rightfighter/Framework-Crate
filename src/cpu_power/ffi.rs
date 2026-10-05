@@ -52,7 +52,7 @@ static DLL_INIT_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 const DLL_PATH: &str = r"C:\Program Files\PawnIO\PawnIOLib.dll";
 
-pub(super) fn known_program_files() -> Option<std::path::PathBuf> {
+fn known_program_files() -> Option<std::path::PathBuf> {
     // Query the OS instead of trusting %ProgramFiles% env (a malicious
     // launcher can override env vars for the child process).
     use windows_sys::Win32::UI::Shell::SHGetFolderPathW;
@@ -77,7 +77,7 @@ pub(super) fn known_program_files() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-pub(super) fn resolved_dll_path() -> std::path::PathBuf {
+fn resolved_dll_path() -> std::path::PathBuf {
     if let Some(pf) = known_program_files() {
         let cand = pf.join("PawnIO").join("PawnIOLib.dll");
         if cand.exists() {
@@ -132,14 +132,7 @@ fn classify_winget_output(output: &std::process::Output) -> WingetOutcome {
     {
         return WingetOutcome::NotInstalled;
     }
-    let detail = if !stderr.trim().is_empty() {
-        stderr.trim().to_string()
-    } else if !stdout.trim().is_empty() {
-        stdout.trim().to_string()
-    } else {
-        format!("exit code {}", output.status.code().unwrap_or(-1))
-    };
-    WingetOutcome::Failed(detail)
+    WingetOutcome::Failed(super::modules::proc_failure_detail(output))
 }
 
 /// Installs PawnIO via winget.
@@ -353,7 +346,7 @@ static AUTHENTICODE: parking_lot::Mutex<Option<Result<(), &'static str>>> =
 
 /// Drops the cached Authenticode verdict. Called with the DLL pointers so an
 /// upgraded DLL is re-verified on next load.
-pub(super) fn invalidate_authenticode() {
+fn invalidate_authenticode() {
     *AUTHENTICODE.lock() = None;
 }
 
@@ -397,7 +390,7 @@ fn check_authenticode(p: &std::path::Path) -> Result<(), &'static str> {
 }
 
 /// Verifies DLL is at expected location and not a symlink/reparse point before loading.
-pub(super) fn verify_dll_path() -> Result<(), &'static str> {
+fn verify_dll_path() -> Result<(), &'static str> {
     let p = resolved_dll_path();
     // Must exist and not be a symlink
     let meta = std::fs::symlink_metadata(&p).map_err(|_| "PawnIO not installed")?;
@@ -471,7 +464,7 @@ pub(super) fn verify_dll_path() -> Result<(), &'static str> {
 }
 
 /// Initializes DLL function pointers (reinitializable).
-pub(super) fn init_dll_fns() -> Result<(), &'static str> {
+fn init_dll_fns() -> Result<(), &'static str> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW};
 

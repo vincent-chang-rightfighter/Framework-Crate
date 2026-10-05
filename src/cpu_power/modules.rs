@@ -6,24 +6,23 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 
-pub(super) const MODULES_DIR_NAME: &str = "modules";
+const MODULES_DIR_NAME: &str = "modules";
 /// Marker file recording which upstream tag the local bins came from.
-pub(super) const MODULES_VERSION_FILE: &str = ".version";
+const MODULES_VERSION_FILE: &str = ".version";
 /// Last-known-good PawnIO.Modules upstream release tag, used ONLY as a
 /// fallback download URL when the GitHub API is unreachable. The primary
 /// path always queries the latest release. Hashes are enforced by default;
 /// set FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1 only after manual verification.
-pub(super) const LAST_KNOWN_MODULES_VERSION: &str = "0.2.11";
-pub(super) const INTEL_MSR_SHA256: &str =
-    "d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a21cb48413c9b92e5f";
-pub(super) const INTEL_MCHBAR_SHA256: &str =
+const LAST_KNOWN_MODULES_VERSION: &str = "0.2.11";
+const INTEL_MSR_SHA256: &str = "d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a21cb48413c9b92e5f";
+const INTEL_MCHBAR_SHA256: &str =
     "3f82b832d99b4aac37d2a20fdb7c9baa2a3bc0488612c9019c9484eb0e8a6eae";
 
 /// Module blob file names. Named next to the hashes they belong to: a typo in
 /// a file name compiles either way and only shows up as a missing blob at
 /// runtime, next to a hash that is correct.
-pub(super) const INTEL_MSR_FILE: &str = "IntelMSR.bin";
-pub(super) const INTEL_MCHBAR_FILE: &str = "IntelMCHBAR.bin";
+const INTEL_MSR_FILE: &str = "IntelMSR.bin";
+const INTEL_MCHBAR_FILE: &str = "IntelMCHBAR.bin";
 
 /// Upper bound for the downloaded Modules ZIP. Releases are a few hundred KB;
 /// anything larger is either the wrong file or a decompression-bomb attempt.
@@ -66,20 +65,49 @@ pub(super) fn modules_update_needed(local: Option<&str>, latest_tag: Option<&str
     }
 }
 
+/// Creates a file exclusively: fails if it exists, never follows a planted
+/// symlink at the temp path.
+fn create_new_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+}
+
+/// Escapes a string for embedding in a PowerShell single-quoted string.
+fn ps_escape(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Manual fallback instructions appended to download/extraction failures.
+fn manual_download_hint() -> &'static str {
+    "check internet or download latest release_*.zip manually from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into the modules folder (use Open Modules Folder)"
+}
+
+/// One-line failure detail from child output: stderr, else stdout, else exit
+/// code. Shared so every subprocess failure reads the same way.
+pub(super) fn proc_failure_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stderr.trim().is_empty() {
+        stderr.trim().to_string()
+    } else if !stdout.trim().is_empty() {
+        stdout.trim().to_string()
+    } else {
+        format!("exit code {}", output.status.code().unwrap_or(-1))
+    }
+}
+
 /// Records which upstream tag the local bins came from.
 ///
 /// Only the cached version display string is dropped. The blobs themselves
 /// are untouched, because this is also called from the self-heal path inside
 /// `pawnio_modules_version`, and forcing a re-read plus SHA-256 re-verification
 /// of both files from a getter would be a needless cost.
-pub(super) fn persist_local_modules_version(dir: &std::path::Path, tag: &str) {
+fn persist_local_modules_version(dir: &std::path::Path, tag: &str) {
     let path = dir.join(MODULES_VERSION_FILE);
     let _ = std::fs::remove_file(&path);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&path)
-    {
+    if let Ok(mut f) = create_new_file(&path) {
         use std::io::Write;
         let _ = writeln!(f, "{}", tag);
     }
@@ -130,13 +158,12 @@ pub(super) fn latest_modules_download_url() -> Option<String> {
     None
 }
 
-pub(super) static PS_SCRIPT_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static PS_SCRIPT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Local modules directory (%APPDATA%/framework-crate/modules/).
 /// Per-user on purpose: downloads and reads stay in the user profile and
 /// never touch machine-wide locations.
-pub(super) fn modules_dir() -> std::path::PathBuf {
+fn modules_dir() -> std::path::PathBuf {
     let base = dirs::config_dir()
         .or_else(dirs::data_local_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -187,27 +214,21 @@ fn check_module_hash(
     Err("module hash mismatch")
 }
 
-pub(super) fn verify_module_hash(
-    path: &std::path::Path,
-    expected: &str,
-) -> Result<(), &'static str> {
+fn verify_module_hash(path: &std::path::Path, expected: &str) -> Result<(), &'static str> {
     let bytes = std::fs::read(path).map_err(|_| "module blob missing")?;
     let actual = sha256_hex(&bytes);
     check_module_hash(path, expected, &actual, module_hash_override_enabled())
 }
 
 /// Reads module blob and verifies hash on same bytes to prevent TOCTOU.
-pub(super) fn read_verified_module(
-    path: &std::path::Path,
-    expected: &str,
-) -> Result<Vec<u8>, &'static str> {
+fn read_verified_module(path: &std::path::Path, expected: &str) -> Result<Vec<u8>, &'static str> {
     let bytes = std::fs::read(path).map_err(|_| "module blob missing")?;
     let actual = sha256_hex(&bytes);
     check_module_hash(path, expected, &actual, module_hash_override_enabled())?;
     Ok(bytes)
 }
 
-pub(super) static MODULES_CACHE: parking_lot::RwLock<Option<bool>> = parking_lot::RwLock::new(None);
+static MODULES_CACHE: parking_lot::RwLock<Option<bool>> = parking_lot::RwLock::new(None);
 
 /// Checks if usable module blobs are present (cached). Presence alone is not
 /// enough: hashes are enforced, so a mismatched manual copy counts as missing.
@@ -227,7 +248,7 @@ pub fn modules_downloaded() -> bool {
     ready
 }
 
-pub(super) fn invalidate_modules_cache() {
+fn invalidate_modules_cache() {
     *MODULES_CACHE.write() = None;
 }
 
@@ -340,11 +361,10 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
         .output();
     let tar_ok = matches!(&tar_out, Ok(o) if o.status.success());
     if !tar_ok {
-        let esc = |s: &str| s.replace('\'', "''");
         let ps = format!(
             "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-            esc(&zip_tmp.display().to_string()),
-            esc(&staging.display().to_string())
+            ps_escape(&zip_tmp.display().to_string()),
+            ps_escape(&staging.display().to_string())
         );
         let ps_out = std::process::Command::new("powershell")
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
@@ -447,11 +467,8 @@ pub fn download_and_extract_modules() -> Result<(), String> {
     ));
     // ensure tmp is fresh
     {
-        let _guard = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&zip_tmp)
-            .map_err(|e| format!("failed to create temp zip: {}", e))?;
+        let _guard =
+            create_new_file(&zip_tmp).map_err(|e| format!("failed to create temp zip: {}", e))?;
     }
     debug!("Downloading modules from: {}", url);
 
@@ -464,12 +481,11 @@ pub fn download_and_extract_modules() -> Result<(), String> {
 
     // Download via inline -Command (no script file, no script-path race).
     // Escape single quotes for PowerShell single-quoted strings.
-    let esc = |s: &str| s.replace('\'', "''");
     let ps_command = format!(
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
          Invoke-WebRequest -Uri '{url}' -OutFile '{zip}' -UseBasicParsing -ErrorAction Stop",
-        url = esc(&url),
-        zip = esc(&zip_tmp.display().to_string()),
+        url = ps_escape(&url),
+        zip = ps_escape(&zip_tmp.display().to_string()),
     );
 
     let output = std::process::Command::new("powershell")
@@ -487,15 +503,7 @@ pub fn download_and_extract_modules() -> Result<(), String> {
     // PowerShell only downloads; extraction always goes through staged validation.
     let _ = std::fs::remove_file(&zip_path);
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let detail = if !stderr.trim().is_empty() {
-            stderr.trim().to_string()
-        } else if !stdout.trim().is_empty() {
-            stdout.trim().to_string()
-        } else {
-            format!("exit code {}", output.status.code().unwrap_or(-1))
-        };
+        let detail = proc_failure_detail(&output);
         warn!(
             "PowerShell download failed: {}, trying curl fallback",
             detail
@@ -509,8 +517,9 @@ pub fn download_and_extract_modules() -> Result<(), String> {
         }
         warn!("curl fallback also failed");
         return Err(format!(
-            "download/extraction failed: {} — check internet or download latest release_*.zip manually from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into the modules folder (use Open Modules Folder)",
-            detail
+            "download/extraction failed: {} — {}",
+            detail,
+            manual_download_hint()
         ));
     }
 
@@ -525,10 +534,7 @@ pub fn download_and_extract_modules() -> Result<(), String> {
             );
             return Ok(());
         }
-        return Err(format!(
-            "{} — check internet or download latest release_*.zip manually from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into the modules folder (use Open Modules Folder)",
-            e
-        ));
+        return Err(format!("{} — {}", e, manual_download_hint()));
     }
     if let Some(tag) = tag_from_modules_url(&url) {
         persist_local_modules_version(&dir, &tag);
@@ -548,10 +554,7 @@ fn try_curl_download(url: &str, dir: &std::path::Path) -> Result<(), String> {
     ));
     // Ensure tmp doesn't exist via create_new guard
     {
-        let _guard = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&zip_tmp)
+        let _guard = create_new_file(&zip_tmp)
             .map_err(|e| format!("failed to create temp zip (possible race): {}", e))?;
     }
     // Refuse oversized responses up front via Content-Length.
@@ -592,10 +595,8 @@ fn try_curl_download(url: &str, dir: &std::path::Path) -> Result<(), String> {
     res
 }
 
-pub(super) static MSR_BLOB_CACHE: parking_lot::Mutex<Option<Arc<Vec<u8>>>> =
-    parking_lot::Mutex::new(None);
-pub(super) static MCHBAR_BLOB_CACHE: parking_lot::Mutex<Option<Arc<Vec<u8>>>> =
-    parking_lot::Mutex::new(None);
+static MSR_BLOB_CACHE: parking_lot::Mutex<Option<Arc<Vec<u8>>>> = parking_lot::Mutex::new(None);
+static MCHBAR_BLOB_CACHE: parking_lot::Mutex<Option<Arc<Vec<u8>>>> = parking_lot::Mutex::new(None);
 
 /// Cached Modules version display string. Lives next to the blob caches so
 /// that invalidating one invalidates all of them.
@@ -606,7 +607,7 @@ static MODULES_VERSION: parking_lot::RwLock<Option<String>> = parking_lot::RwLoc
 /// The version string is derived from the same files as the blobs, so it is
 /// cleared here too. Callers used to have to remember a second call, and a
 /// fourth one would have silently missed it.
-pub(super) fn invalidate_blob_cache() {
+fn invalidate_blob_cache() {
     *MSR_BLOB_CACHE.lock() = None;
     *MCHBAR_BLOB_CACHE.lock() = None;
     invalidate_modules_version();
@@ -665,32 +666,33 @@ pub fn redetect_modules() -> bool {
     modules_downloaded()
 }
 
-/// Loads IntelMSR blob (cached after first verified load).
-pub(super) fn load_intel_msr_blob() -> Result<Vec<u8>, &'static str> {
+/// Loads a module blob through the cache, verifying hash on first load.
+/// Shared by the MSR/MCHBAR loaders so the two cannot drift apart.
+fn load_blob(
+    cache: &parking_lot::Mutex<Option<Arc<Vec<u8>>>>,
+    name: &str,
+    expected: &str,
+) -> Result<Vec<u8>, &'static str> {
     {
-        let guard = MSR_BLOB_CACHE.lock();
+        let guard = cache.lock();
         if let Some(cached) = guard.as_ref() {
             return Ok((**cached).clone());
         }
     }
-    let blob = read_verified_module(&modules_dir().join(INTEL_MSR_FILE), INTEL_MSR_SHA256)?;
+    let blob = read_verified_module(&modules_dir().join(name), expected)?;
     let arc = Arc::new(blob.clone());
-    *MSR_BLOB_CACHE.lock() = Some(arc);
+    *cache.lock() = Some(arc);
     Ok(blob)
+}
+
+/// Loads IntelMSR blob (cached after first verified load).
+pub(super) fn load_intel_msr_blob() -> Result<Vec<u8>, &'static str> {
+    load_blob(&MSR_BLOB_CACHE, INTEL_MSR_FILE, INTEL_MSR_SHA256)
 }
 
 /// Loads IntelMCHBAR blob (cached after first verified load).
 pub(super) fn load_intel_mchbar_blob() -> Result<Vec<u8>, &'static str> {
-    {
-        let guard = MCHBAR_BLOB_CACHE.lock();
-        if let Some(cached) = guard.as_ref() {
-            return Ok((**cached).clone());
-        }
-    }
-    let blob = read_verified_module(&modules_dir().join(INTEL_MCHBAR_FILE), INTEL_MCHBAR_SHA256)?;
-    let arc = Arc::new(blob.clone());
-    *MCHBAR_BLOB_CACHE.lock() = Some(arc);
-    Ok(blob)
+    load_blob(&MCHBAR_BLOB_CACHE, INTEL_MCHBAR_FILE, INTEL_MCHBAR_SHA256)
 }
 
 #[cfg(test)]
