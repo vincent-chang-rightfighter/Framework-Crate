@@ -1,0 +1,17 @@
+# cargo-audit accept-list. Re-check on every dependency upgrade round:
+# remove an entry once the advisory is fixed upstream and `cargo update`
+# pulls the fixed version.
+[advisories]
+ignore = [
+    # paste 1.0.15 unmaintained (RUSTSEC-2024-0436). Transitive via the iced
+    # 0.14 macro stack. Upstream-only fix.
+    "RUSTSEC-2024-0436",
+    # ttf-parser 0.25.1 unmaintained (RUSTSEC-2026-0192). Transitive via
+    # fontdb/cosmic-text. Upstream-only fix.
+    "RUSTSEC-2026-0192",
+    # lru 0.16.4 unsound pop() under panic-unwind (RUSTSEC-2026-0253).
+    # Not exploitable here: the release profile is panic=abort (no unwinding
+    # to exploit) and nothing panics in the glyph-cache path. Transitive via
+    # cryoglyph/iced_wgpu. Upstream-only fix.
+    "RUSTSEC-2026-0253",
+]
