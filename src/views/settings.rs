@@ -2,10 +2,20 @@ use crate::App;
 use crate::Message;
 use crate::style::*;
 use crate::util::read_lock;
-use iced::widget::{button, column, container, row, space, text};
+use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length};
 
 /// About page reads `App` live; modal and infrequent so it bypasses snapshot cache.
+/// Section header matching the CPU Power card style.
+fn section_title(label: &str) -> Element<'_, Message> {
+    text(label)
+        .size(FONT_SECTION)
+        .style(|_theme| iced::widget::text::Style {
+            color: Some(COLOR_HEADER),
+        })
+        .into()
+}
+
 pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     let versions = read_lock(&app.state.system.versions);
 
@@ -127,13 +137,10 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         .align_y(iced::Alignment::Center),
     );
 
-    let mut content = column![].spacing(12).padding(20);
-    content = content.push(title_row);
-    content = content.push(hw_content);
-    content = content.push(sw_content);
-    content = content.push(space::vertical().height(12));
+    let mut content = column![].spacing(8);
     let ec_debug = app.expansion_card_debug;
-    content = content.push(
+    let diagnostics = column![
+        section_title("Diagnostics"),
         row![
             text("Expansion Card Debug Mode:").size(FONT_BODY),
             button(text(if ec_debug { "ON" } else { "OFF" }).size(FONT_BODY))
@@ -142,50 +149,74 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
-    );
-    content = content.push(
         row![
-            button(text("Update PawnIO & Modules").size(FONT_BODY))
-                .on_press(Message::UpdatePawnIOAll)
-                .style(btn_style),
-            button(text("Open Modules Folder").size(FONT_BODY))
-                .on_press(Message::OpenModulesDir)
-                .style(btn_style),
-            button(text("Collect Debug Info").size(FONT_BODY))
+            text("Tools:").size(FONT_BODY),
+            button(text("Debug Info").size(FONT_BODY))
                 .on_press(Message::CollectDebugInfo)
                 .style(btn_style),
-            button(text("Project on GitHub").size(FONT_BODY))
-                .on_press(Message::OpenUrl(crate::update_check::PROJECT_URL))
-                .style(btn_style),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(8);
+    content = content.push(
+        row![
+            card(
+                column![section_title("Device"), hw_content]
+                    .spacing(4)
+                    .into()
+            ),
+            card(diagnostics.into()),
         ]
         .spacing(8),
     );
-    content = content.push(update_check_row(app));
-    content = content.push(
+    content = content.push(card(
+        column![section_title("Software"), sw_content]
+            .spacing(4)
+            .into(),
+    ));
+    let mut updates = column![
+        section_title("Updates"),
+        update_check_row(app),
+        row![
+            text("PawnIO:").size(FONT_BODY),
+            button(text("Update PawnIO").size(FONT_BODY))
+                .on_press(Message::UpdatePawnIOAll)
+                .style(btn_style),
+            button(text("Open Folder").size(FONT_BODY))
+                .on_press(Message::OpenModulesDir)
+                .style(btn_style),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
         text("If update fails, check internet or download manually: PawnIO → https://github.com/namazso/PawnIO/releases | Modules → https://github.com/namazso/PawnIO.Modules/releases/latest")
             .size(FONT_SMALL)
             .style(|_theme| iced::widget::text::Style {
                 color: Some(COLOR_GRAY),
             }),
-    );
-    if let Some(ref err) = app.cpu_power_error {
-        content = content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
-            iced::widget::text::Style {
-                color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
-            }
-        }));
-    }
+    ]
+    .spacing(8);
     if let Some(ref err) = app.modules_download_error {
-        content = content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+        updates = updates.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
             iced::widget::text::Style {
                 color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
             }
         }));
     }
-
-    content = content.push(space::vertical().height(8));
-    content = content.push(
+    content = content.push(card(updates.into()));
+    if let Some(ref err) = app.cpu_power_error {
+        content = content.push(card(
+            text(err.as_str())
+                .size(FONT_SMALL)
+                .style(|_theme| iced::widget::text::Style {
+                    color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+                })
+                .into(),
+        ));
+    }
+    content = content.push(card(
         column![
+            section_title("License"),
             text("Framework Crate — MIT License")
                 .size(FONT_SMALL)
                 .style(|_theme| iced::widget::text::Style {
@@ -217,13 +248,39 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
                     color: Some(COLOR_GRAY)
                 }),
         ]
-        .spacing(2),
-    );
+        .spacing(2)
+        .into(),
+    ));
 
-    container(content)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into()
+    // Scrollable: section headers grew the page past some window heights,
+    // and autosize stays off while settings are shown, so without this the
+    // License block at the bottom is unreachable.
+    // Title bar stays fixed like the main header; only the cards scroll.
+    // Insets match the main page: header padding [8,12], content 4/12/12/12.
+    column![
+        container(title_row)
+            .padding(iced::Padding::from([8, 12]))
+            .width(Length::Fill),
+        scrollable(
+            container(content)
+                .center_x(Length::Fill)
+                .padding(iced::Padding {
+                    top: 4.0,
+                    right: 12.0,
+                    bottom: 12.0,
+                    left: 12.0,
+                }),
+        )
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Scrollbar::new()
+                .width(6.0)
+                .scroller_width(6.0)
+                .spacing(4.0),
+        ))
+        .height(Length::Fill),
+    ]
+    .spacing(5)
+    .into()
 }
 
 /// Self update check row: manual check button, result status, and a download
@@ -235,12 +292,15 @@ fn update_check_row(app: &App) -> Element<'_, Message> {
             text(if app.update_checking {
                 "Checking…"
             } else {
-                "Check for Updates"
+                "Check"
             })
             .size(FONT_BODY)
         )
         .on_press(Message::CheckForUpdates)
         .style(btn_style),
+        button(text("GitHub").size(FONT_BODY))
+            .on_press(Message::OpenUrl(crate::update_check::PROJECT_URL))
+            .style(btn_style),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
