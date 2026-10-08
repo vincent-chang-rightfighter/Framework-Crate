@@ -170,17 +170,6 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         ]
         .spacing(8),
     );
-    content = content.push(
-        row![
-            card(
-                column![section_title(app.theme, "Software"), sw_content]
-                    .spacing(4)
-                    .into()
-            ),
-            card(theme_picker(app)),
-        ]
-        .spacing(8),
-    );
     let mut updates = column![
         section_title(app.theme, "Updates"),
         update_check_row(app),
@@ -209,7 +198,17 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
             }
         }));
     }
-    content = content.push(card(updates.into()));
+    content = content.push(
+        row![
+            card(
+                column![section_title(app.theme, "Software"), sw_content]
+                    .spacing(4)
+                    .into()
+            ),
+            column![card(theme_picker(app)), card(updates.into()),].spacing(8),
+        ]
+        .spacing(8),
+    );
     if let Some(ref err) = app.cpu_power_error {
         content = content.push(card(
             text(err.as_str())

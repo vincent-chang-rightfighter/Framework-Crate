@@ -58,6 +58,8 @@ struct CurveState {
     /// Previous hover/drag to detect highlight needing redraw.
     last_hover: Cell<Option<usize>>,
     last_drag: Cell<Option<usize>>,
+    /// Active theme tag; a theme switch must invalidate the cached geometry.
+    last_theme: Cell<Option<std::mem::Discriminant<iced::Theme>>>,
 }
 
 impl Default for CurveState {
@@ -71,6 +73,7 @@ impl Default for CurveState {
             hover: Cell::new(None),
             last_hover: Cell::new(None),
             last_drag: Cell::new(None),
+            last_theme: Cell::new(None),
         }
     }
 }
@@ -228,7 +231,7 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
         &self,
         state: &Self::State,
         renderer: &iced::Renderer,
-        _theme: &iced::Theme,
+        theme: &iced::Theme,
         bounds: iced::Rectangle,
         _cursor: iced::mouse::Cursor,
     ) -> Vec<iced::widget::canvas::Geometry> {
@@ -253,7 +256,14 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
         let marks_changed = state.last_marks.borrow().as_deref() != Some(self.marks.as_ref());
         let highlight_changed = state.last_hover.get() != state.hover.get()
             || state.last_drag.get() != state.dragging.get();
-        if state.cached_key.get() != key || points_changed || marks_changed || highlight_changed {
+        let theme_tag = std::mem::discriminant(theme);
+        let theme_changed = state.last_theme.get() != Some(theme_tag);
+        if state.cached_key.get() != key
+            || points_changed
+            || marks_changed
+            || highlight_changed
+            || theme_changed
+        {
             state.cached_key.set(key);
             if points_changed {
                 *state.last_points.borrow_mut() = Some(Arc::clone(&self.points));
@@ -263,6 +273,7 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
             }
             state.last_hover.set(state.hover.get());
             state.last_drag.set(state.dragging.get());
+            state.last_theme.set(Some(theme_tag));
             state.cache.clear();
         }
 
@@ -275,6 +286,7 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
                 &self.marks,
                 size,
                 (state.hover.get(), state.dragging.get()),
+                theme,
             );
         });
         vec![geo]
@@ -306,6 +318,8 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
     }
 }
 
+/// Renders one frame; arity is fixed by the call chain, hence the allow.
+#[allow(clippy::too_many_arguments)]
 fn draw_curve_contents(
     frame: &mut iced::widget::canvas::Frame<iced::Renderer>,
     all_pts: &Arc<Vec<[u32; 2]>>,
@@ -314,7 +328,9 @@ fn draw_curve_contents(
     marks: &Arc<Vec<SensorMark>>,
     size: Size,
     highlight: (Option<usize>, Option<usize>),
+    theme: &iced::Theme,
 ) {
+    let pal = crate::style::palette(theme);
     if all_pts.is_empty() {
         return;
     }
@@ -329,7 +345,7 @@ fn draw_curve_contents(
         f.fill_rectangle(
             layout.origin,
             Size::new(layout.plot_w, layout.plot_h),
-            Color::from_rgb(0.12, 0.12, 0.15),
+            pal.curve_plot_bg,
         );
         // Locked zone 100–110°C: subtle highlight to indicate forced 100%
         let lock_x0 = to_screen(crate::types::CURVE_TEMP_LOCK_START as f32, 0.0).x;
@@ -347,7 +363,10 @@ fn draw_curve_contents(
         );
 
         let grid_stroke = iced::widget::canvas::Stroke::default()
-            .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.1))
+            .with_color(iced::Color {
+                a: 0.1,
+                ..pal.grid_base
+            })
             .with_width(0.5);
         for v in [20.0, 40.0, 60.0, 80.0, 100.0] {
             f.stroke(
@@ -366,7 +385,10 @@ fn draw_curve_contents(
             layout.origin,
             Size::new(layout.plot_w, layout.plot_h),
             iced::widget::canvas::Stroke::default()
-                .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.3))
+                .with_color(iced::Color {
+                    a: 0.3,
+                    ..pal.grid_base
+                })
                 .with_width(1.0),
         );
 
@@ -394,11 +416,11 @@ fn draw_curve_contents(
                     POINT_RADIUS,
                 )
             } else if drag_idx == Some(config_idx) {
-                (crate::style::COLOR_CURVE, Color::WHITE, POINT_RADIUS + 2.0)
+                (crate::style::COLOR_CURVE, pal.grid_base, POINT_RADIUS + 2.0)
             } else if hover_idx == Some(config_idx) {
-                (crate::style::COLOR_CURVE, Color::WHITE, POINT_RADIUS + 1.0)
+                (crate::style::COLOR_CURVE, pal.grid_base, POINT_RADIUS + 1.0)
             } else {
-                (crate::style::COLOR_CURVE, Color::WHITE, POINT_RADIUS)
+                (crate::style::COLOR_CURVE, pal.grid_base, POINT_RADIUS)
             };
             let circle = iced::widget::canvas::Path::circle(center, r);
             f.fill(&circle, fill_color);
@@ -466,7 +488,7 @@ fn draw_curve_contents(
             f.stroke(
                 &dot,
                 iced::widget::canvas::Stroke::default()
-                    .with_color(Color::WHITE)
+                    .with_color(pal.grid_base)
                     .with_width(1.5),
             );
         }
@@ -493,7 +515,7 @@ fn draw_curve_contents(
         frame.fill_text(iced::widget::canvas::Text {
             content: AXIS_LABELS_X[i].to_owned(),
             position: Point::new(x, layout.origin.y + layout.plot_h + 4.0),
-            color: Color::from_rgb(0.6, 0.6, 0.6),
+            color: pal.curve_axis_text,
             size: iced::Pixels(9.0),
             font,
             align_x: align_x.into(),
@@ -510,7 +532,7 @@ fn draw_curve_contents(
             frame.fill_text(iced::widget::canvas::Text {
                 content: AXIS_LABELS_Y[i].to_owned(),
                 position: Point::new(2.0, y),
-                color: Color::from_rgb(0.6, 0.6, 0.6),
+                color: pal.curve_axis_text,
                 size: iced::Pixels(9.0),
                 font,
                 align_x: iced::alignment::Horizontal::Left.into(),

@@ -136,6 +136,17 @@ pub struct Palette {
     pub toggle_off_text: iced::Color,
     pub toggle_off_border: iced::Color,
     pub slider_empty: iced::Color,
+    /// Temp-chart plot panel. Default is verbatim; other themes use a panel
+    /// distinct from cards.
+    pub temp_plot_bg: iced::Color,
+    /// Curve-canvas plot panel. Same role as above, different legacy value.
+    pub curve_plot_bg: iced::Color,
+    /// Temp-chart axis labels.
+    pub temp_axis_text: iced::Color,
+    /// Curve-canvas axis labels.
+    pub curve_axis_text: iced::Color,
+    /// Grid strokes, plot borders, and light-on-dark rings/dots.
+    pub grid_base: iced::Color,
 }
 
 pub fn palette(theme: &iced::Theme) -> Palette {
@@ -175,6 +186,11 @@ pub fn palette(theme: &iced::Theme) -> Palette {
                 toggle_off_text: e.secondary.weak.text,
                 toggle_off_border: e.background.strong.color,
                 slider_empty: e.background.strong.color,
+                temp_plot_bg: e.background.weakest.color,
+                curve_plot_bg: e.background.weakest.color,
+                temp_axis_text: p.text,
+                curve_axis_text: p.text,
+                grid_base: p.text,
             }
         }
         _ => Palette {
@@ -200,6 +216,11 @@ pub fn palette(theme: &iced::Theme) -> Palette {
             toggle_off_text: iced::Color::from_rgb(0.7, 0.7, 0.7),
             toggle_off_border: iced::Color::from_rgb(0.4, 0.4, 0.4),
             slider_empty: COLOR_DARK,
+            temp_plot_bg: iced::Color::from_rgb(0.10, 0.10, 0.13),
+            curve_plot_bg: iced::Color::from_rgb(0.12, 0.12, 0.15),
+            temp_axis_text: iced::Color::from_rgb(0.5, 0.5, 0.5),
+            curve_axis_text: iced::Color::from_rgb(0.6, 0.6, 0.6),
+            grid_base: iced::Color::WHITE,
         },
     }
 }
@@ -464,6 +485,11 @@ mod tests {
         assert_eq!(pal.warning, iced::Color::from_rgb(0.9, 0.6, 0.0));
         assert_eq!(pal.warning_bg, iced::Color::from_rgba(0.9, 0.6, 0.0, 0.15));
         assert_eq!(pal.btn_text, iced::Color::from_rgb(0.85, 0.85, 0.85));
+        assert_eq!(pal.temp_plot_bg, iced::Color::from_rgb(0.10, 0.10, 0.13));
+        assert_eq!(pal.curve_plot_bg, iced::Color::from_rgb(0.12, 0.12, 0.15));
+        assert_eq!(pal.temp_axis_text, iced::Color::from_rgb(0.5, 0.5, 0.5));
+        assert_eq!(pal.curve_axis_text, iced::Color::from_rgb(0.6, 0.6, 0.6));
+        assert_eq!(pal.grid_base, iced::Color::WHITE);
     }
 
     #[test]

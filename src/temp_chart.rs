@@ -177,7 +177,7 @@ impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
         &self,
         state: &Self::State,
         renderer: &iced::Renderer,
-        _theme: &iced::Theme,
+        theme: &iced::Theme,
         bounds: iced::Rectangle,
         _cursor: iced::mouse::Cursor,
     ) -> Vec<iced::widget::canvas::Geometry> {
@@ -193,7 +193,7 @@ impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
             last_ts,
         );
         // theme change should invalidate cache (discriminant compare, no alloc)
-        let theme_tag = std::mem::discriminant(_theme);
+        let theme_tag = std::mem::discriminant(theme);
         let theme_changed = state.last_theme.get() != Some(theme_tag);
         if state.cached_key.get() != key || theme_changed {
             state.cached_key.set(key);
@@ -214,12 +214,15 @@ impl iced::widget::canvas::Program<crate::Message> for TempChartRenderer {
                 self.window_seconds,
                 &mut points_buf,
                 size,
+                crate::style::palette(theme),
             );
         });
         vec![geo]
     }
 }
 
+/// Renders one frame; arity is fixed by the call chain, hence the allow.
+#[allow(clippy::too_many_arguments)]
 fn draw_temp_chart_contents(
     frame: &mut iced::widget::canvas::Frame<iced::Renderer>,
     samples: &Arc<std::collections::VecDeque<TempSample>>,
@@ -228,6 +231,7 @@ fn draw_temp_chart_contents(
     window_seconds: i64,
     points_buf: &mut Vec<(f32, f32)>,
     size: Size,
+    pal: crate::style::Palette,
 ) {
     let margin_left = 36.0f32;
     let margin_right = 8.0f32;
@@ -238,14 +242,13 @@ fn draw_temp_chart_contents(
     let plot_h = (size.height - margin_top - margin_bottom).max(1.0);
     let origin = Point::new(margin_left, margin_top);
 
-    frame.fill_rectangle(
-        origin,
-        Size::new(plot_w, plot_h),
-        Color::from_rgb(0.10, 0.10, 0.13),
-    );
+    frame.fill_rectangle(origin, Size::new(plot_w, plot_h), pal.temp_plot_bg);
 
     let grid_stroke = iced::widget::canvas::Stroke::default()
-        .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.08))
+        .with_color(iced::Color {
+            a: 0.08,
+            ..pal.grid_base
+        })
         .with_width(0.5);
     for temp in [20.0, 40.0, 60.0, 80.0, 100.0] {
         let y = origin.y + plot_h - ((temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * plot_h;
@@ -262,7 +265,10 @@ fn draw_temp_chart_contents(
         origin,
         Size::new(plot_w, plot_h),
         iced::widget::canvas::Stroke::default()
-            .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.2))
+            .with_color(iced::Color {
+                a: 0.2,
+                ..pal.grid_base
+            })
             .with_width(1.0),
     );
 
@@ -273,7 +279,7 @@ fn draw_temp_chart_contents(
         frame.fill_text(iced::widget::canvas::Text {
             content: Y_LABELS[i].to_owned(),
             position: Point::new(2.0, y),
-            color: Color::from_rgb(0.5, 0.5, 0.5),
+            color: pal.temp_axis_text,
             size: iced::Pixels(8.0),
             font,
             align_x: iced::alignment::Horizontal::Left.into(),
@@ -293,7 +299,7 @@ fn draw_temp_chart_contents(
         frame.fill_text(iced::widget::canvas::Text {
             content: format!("{}s", secs),
             position: Point::new(x, origin.y + plot_h + 4.0),
-            color: Color::from_rgb(0.5, 0.5, 0.5),
+            color: pal.temp_axis_text,
             size: iced::Pixels(8.0),
             font,
             align_x: iced::alignment::Horizontal::Center.into(),
@@ -339,7 +345,7 @@ fn draw_temp_chart_contents(
 
     for (sensor_idx, sensor_name) in sensor_names.iter().enumerate() {
         let color = if colors.is_empty() {
-            Color::WHITE
+            pal.grid_base
         } else {
             colors[sensor_idx % colors.len()]
         };
