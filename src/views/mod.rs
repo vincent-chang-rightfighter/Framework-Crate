@@ -248,12 +248,15 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
             .into();
     }
 
-    if app.show_settings {
-        return settings::view_settings(app);
-    }
-
+    // Quit confirmation is modal and must win over any underlying page:
+    // otherwise quitting from the tray while About is open flips state
+    // with nothing visible to answer it.
     if app.show_quit_warning {
         return quit_warning::view_quit_warning(app);
+    }
+
+    if app.show_settings {
+        return settings::view_settings(app);
     }
 
     let snap = match &app.cached_snapshot {
