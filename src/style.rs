@@ -154,9 +154,14 @@ pub fn palette(theme: &iced::Theme) -> Palette {
         iced::Theme::Light | iced::Theme::Dracula | iced::Theme::Nord => {
             let p = theme.palette();
             let e = theme.extended_palette();
+            // Secondary text must be readable on CARD backgrounds, not on
+            // some other swatch: borrowing secondary.weak.text renders
+            // near-black on dark cards. Recompute against the card color.
+            let card_bg = e.background.weak.color;
+            let gray = iced::theme::palette::Pair::new(card_bg, p.text).text;
             Palette {
                 header: p.text,
-                gray: e.secondary.weak.text,
+                gray,
                 green: e.success.base.color,
                 error: e.danger.base.color,
                 error_bg: iced::Color {
@@ -168,7 +173,7 @@ pub fn palette(theme: &iced::Theme) -> Palette {
                     a: 0.15,
                     ..p.warning
                 },
-                card_bg: e.background.weak.color,
+                card_bg,
                 card_border: e.background.strong.color,
                 settings_bg: e.background.weaker.color,
                 dark: e.background.strong.color,
@@ -178,12 +183,12 @@ pub fn palette(theme: &iced::Theme) -> Palette {
                 },
                 not_supported_text: e.danger.base.color,
                 btn_text: p.text,
-                btn_text_dim: e.secondary.weak.text,
+                btn_text_dim: gray,
                 btn_hover_text: p.text,
                 btn_border: e.background.strong.color,
                 btn_hover_bg: iced::Color { a: 0.12, ..p.text },
                 btn_pressed_bg: iced::Color { a: 0.2, ..p.text },
-                toggle_off_text: e.secondary.weak.text,
+                toggle_off_text: gray,
                 toggle_off_border: e.background.strong.color,
                 slider_empty: e.background.strong.color,
                 temp_plot_bg: e.background.weakest.color,
@@ -498,5 +503,22 @@ mod tests {
         let pal = palette_for(ThemeId::Light);
         assert_ne!(pal.header, COLOR_HEADER);
         assert_ne!(pal.card_bg, COLOR_CARD_BG);
+    }
+
+    #[test]
+    fn gray_contrasts_with_card_in_every_theme() {
+        // Regression: borrowing secondary.weak.text rendered near-black on
+        // dark cards. Gray must always stand clearly off the surface behind it.
+        fn lum(c: iced::Color) -> f32 {
+            0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+        }
+        for id in [ThemeId::Light, ThemeId::Dracula, ThemeId::Nord] {
+            let pal = palette_for(id);
+            let gap = (lum(pal.gray) - lum(pal.card_bg)).abs();
+            assert!(
+                gap > 0.3,
+                "{id:?}: gray too close to card bg (gap {gap:.2})"
+            );
+        }
     }
 }
