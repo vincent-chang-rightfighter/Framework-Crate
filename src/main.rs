@@ -409,8 +409,8 @@ fn main() {
         "Framework Crate".to_string()
     }
 
-    fn app_theme(_app: &App) -> iced::Theme {
-        iced::Theme::Dark
+    fn app_theme(app: &App) -> iced::Theme {
+        app.theme.iced()
     }
 
     let run_result = iced::application(move || App::new(minimized), App::update, App::view)
@@ -719,6 +719,7 @@ mod tests {
             },
             battery: types::BatteryConfig::default(),
             telemetry: types::TelemetryConfig::default(),
+            theme: "default".to_string(),
         };
         let serialized = toml::to_string(&config).expect("serialize");
         let deserialized: types::Config = toml::from_str(&serialized).expect("deserialize");
@@ -745,6 +746,7 @@ mod tests {
             },
             battery: types::BatteryConfig::default(),
             telemetry: types::TelemetryConfig::default(),
+            theme: "dracula".to_string(),
         };
         let serialized = toml::to_string(&config).expect("serialize");
         let deserialized: types::Config = toml::from_str(&serialized).expect("deserialize");
@@ -774,6 +776,7 @@ mod tests {
                 ui_refresh_ms: 200,
                 selected_sensors: vec!["CPU".into(), "Battery".into()],
             },
+            theme: "light".to_string(),
         };
 
         let serialized = toml::to_string(&original).expect("serialize");

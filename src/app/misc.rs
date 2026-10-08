@@ -72,6 +72,20 @@ impl App {
                 self.height_set = false;
                 Some(Task::none())
             }
+            Message::ThemeChanged(id) => {
+                let id = *id;
+                if self.theme == id {
+                    return Some(Task::none());
+                }
+                self.theme = id;
+                self.mutate_config(|cfg| {
+                    cfg.theme = id.label().to_string();
+                });
+                // Snapshot caches the resolved palette; rebuild on next update.
+                self.mark_dirty();
+                self.save_config();
+                Some(Task::none())
+            }
             Message::KblightChanged(percent) => {
                 let percent = *percent;
                 let kblight = Arc::clone(&self.state.peripherals.kblight);

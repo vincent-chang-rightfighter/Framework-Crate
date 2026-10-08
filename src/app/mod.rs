@@ -137,6 +137,7 @@ pub enum Message {
     OpenUrl(&'static str),
     CheckForUpdates,
     UpdateCheckDone(Result<Option<String>, String>),
+    ThemeChanged(crate::style::ThemeId),
     ToggleExpansionCardDebug,
     StartupLaunchToggled(bool),
     StartupLaunchSet(bool, Result<(), String>),
@@ -223,6 +224,9 @@ pub struct App {
     /// Whether an update check completed (vs never checked): distinguishes
     /// "up to date" from "not yet checked".
     pub update_checked: bool,
+    /// UI theme preference; resolved to a palette per snapshot and to an
+    /// iced theme for the renderer.
+    pub theme: crate::style::ThemeId,
     pub pl1_edit: String,
     pub pl2_edit: String,
     pub pl1_time_edit: String,
@@ -409,6 +413,8 @@ impl App {
             update_available: None,
             update_check_error: None,
             update_checked: false,
+            theme: crate::style::ThemeId::parse(&loaded_config.theme)
+                .unwrap_or(crate::style::ThemeId::Default),
             pl1_edit: String::new(),
             pl2_edit: String::new(),
             pl1_time_edit: String::new(),

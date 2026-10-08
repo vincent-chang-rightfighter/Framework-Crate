@@ -54,6 +54,9 @@ pub(crate) struct ViewSnapshot {
     pub cpu_power_error: Option<Arc<String>>,
     pub ec_op_error: Option<Arc<String>>,
     pub intel_cpu: bool,
+    /// Resolved UI colors for the active theme. Style closures read from
+    /// here instead of hardcoded constants so every theme renders fully.
+    pub palette: crate::style::Palette,
     pub curve_points: Arc<[[u32; 2]]>,
     pub curve_marks: Arc<Vec<crate::curve_canvas::SensorMark>>,
 }
@@ -161,16 +164,17 @@ impl ViewSnapshot {
             cpu_power_error: app.cpu_power_error.as_ref().map(|s| Arc::new(s.clone())),
             ec_op_error: app.ec_op_error.as_ref().map(|s| Arc::new(s.clone())),
             intel_cpu: app.state.system.intel_cpu.load(Ordering::Acquire),
+            palette: crate::style::palette_for(app.theme),
             curve_points,
             curve_marks,
         }
     }
 }
 
-pub(crate) fn warning_banner(msg: String) -> Element<'static, Message> {
+pub(crate) fn warning_banner(pal: crate::style::Palette, msg: String) -> Element<'static, Message> {
     container(
         row![
-            colored_dot(iced::Color::from_rgb(0.9, 0.6, 0.0), 8.0),
+            colored_dot(pal.warning, 8.0),
             text(msg).size(FONT_BODY),
             space::horizontal(),
             button(text("Dismiss").size(FONT_SMALL))
@@ -182,37 +186,40 @@ pub(crate) fn warning_banner(msg: String) -> Element<'static, Message> {
     )
     .padding(iced::Padding::from([6, 12]))
     .width(Length::Fill)
-    .style(|_theme| iced::widget::container::Style {
-        background: Some(iced::Color::from_rgba(0.9, 0.6, 0.0, 0.15).into()),
+    .style(move |_theme| iced::widget::container::Style {
+        background: Some(pal.warning_bg.into()),
         border: iced::Border::default()
             .rounded(4)
             .width(1)
-            .color(iced::Color::from_rgb(0.9, 0.6, 0.0)),
+            .color(pal.warning),
         ..Default::default()
     })
     .into()
 }
 
-pub(crate) fn not_supported_section(title: &str) -> Element<'_, Message> {
+pub(crate) fn not_supported_section(
+    pal: crate::style::Palette,
+    title: &str,
+) -> Element<'_, Message> {
     container(
         column![
             text(title)
                 .size(FONT_SECTION)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_NOT_SUPPORTED_TEXT)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.not_supported_text)
                 }),
             text("Not Supported")
                 .size(FONT_BODY)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_NOT_SUPPORTED_TEXT)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.not_supported_text)
                 }),
         ]
         .spacing(4),
     )
     .padding(iced::Padding::from([8, 12]))
     .width(Length::Fill)
-    .style(|_theme| iced::widget::container::Style {
-        background: Some(COLOR_NOT_SUPPORTED_BG.into()),
+    .style(move |_theme| iced::widget::container::Style {
+        background: Some(pal.not_supported_bg.into()),
         border: iced::Border::default().rounded(4),
         ..Default::default()
     })
@@ -270,20 +277,22 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     };
 
     let header = header::view_header(app);
+    let pal = crate::style::palette_for(app.theme);
     let config_warning = if app.config_save_failed {
         Some(warning_banner(
+            pal,
             "Config save failed - changes may not persist after restart".to_string(),
         ))
     } else {
         app.config_load_warning
             .as_ref()
-            .map(|msg| warning_banner(format!("Config load failed (using defaults): {}", msg)))
+            .map(|msg| warning_banner(pal, format!("Config load failed (using defaults): {}", msg)))
     };
     let cli_warning = if app.init_complete && !app.cli_present {
         Some(
             container(
                 row![
-                    colored_dot(iced::Color::from_rgb(0.9, 0.3, 0.3), 8.0),
+                    colored_dot(pal.error, 8.0),
                     text("EC unavailable — hardware control disabled").size(FONT_BODY),
                 ]
                 .align_y(iced::Alignment::Center)
@@ -291,8 +300,8 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
             )
             .padding(iced::Padding::from([6, 12]))
             .width(Length::Fill)
-            .style(|_theme| iced::widget::container::Style {
-                background: Some(iced::Color::from_rgba(0.9, 0.2, 0.2, 0.1).into()),
+            .style(move |_theme| iced::widget::container::Style {
+                background: Some(pal.error_bg.into()),
                 border: iced::Border::default().rounded(4),
                 ..Default::default()
             }),
@@ -444,16 +453,18 @@ mod tests {
     #[test]
     fn view_battery_verbose_no_verbose_fields() {
         let bat = default_battery_info();
-        assert!(view_battery_verbose(&bat, false).is_none());
-        assert!(view_battery_verbose(&bat, true).is_none());
+        let pal = crate::style::palette_for(crate::style::ThemeId::Default);
+        assert!(view_battery_verbose(pal, &bat, false).is_none());
+        assert!(view_battery_verbose(pal, &bat, true).is_none());
     }
 
     #[test]
     fn view_battery_verbose_with_manufacturer() {
         let mut bat = default_battery_info();
         bat.manufacturer = Some("Intel".to_string());
-        assert!(view_battery_verbose(&bat, false).is_some());
-        assert!(view_battery_verbose(&bat, true).is_some());
+        let pal = crate::style::palette_for(crate::style::ThemeId::Default);
+        assert!(view_battery_verbose(pal, &bat, false).is_some());
+        assert!(view_battery_verbose(pal, &bat, true).is_some());
     }
 
     #[test]
@@ -462,7 +473,8 @@ mod tests {
         bat.model_number = Some("ABC123".to_string());
         bat.serial_number = Some("SN001".to_string());
         bat.battery_type = Some("Li-ion".to_string());
-        assert!(view_battery_verbose(&bat, false).is_some());
+        let pal = crate::style::palette_for(crate::style::ThemeId::Default);
+        assert!(view_battery_verbose(pal, &bat, false).is_some());
     }
 
     #[test]

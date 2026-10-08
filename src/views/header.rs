@@ -5,6 +5,7 @@ use iced::widget::{button, column, container, row, space, text};
 use iced::{Element, Length};
 
 pub(crate) fn view_header(app: &App) -> Element<'_, Message> {
+    let pal = crate::style::palette_for(app.theme);
     let header_content = column![
         row![
             text(&app.system_info.header_device_name).size(18),
@@ -16,8 +17,8 @@ pub(crate) fn view_header(app: &App) -> Element<'_, Message> {
         .align_y(iced::Alignment::Center),
         text(&app.system_info.header_info_text)
             .size(FONT_SMALL)
-            .style(|_theme| iced::widget::text::Style {
-                color: Some(COLOR_GRAY)
+            .style(move |_theme| iced::widget::text::Style {
+                color: Some(pal.gray)
             }),
     ]
     .spacing(4);

@@ -6,20 +6,21 @@ use iced::{Element, Length};
 
 const MISC_SECTION_MAX_HEIGHT: f32 = 300.0;
 pub(crate) fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
+    let pal = snap.palette;
     let mut content =
         column![
             text("Misc")
                 .size(FONT_SECTION)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_HEADER)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.header)
                 })
         ]
         .spacing(6);
 
     if let Some(ref err) = snap.ec_op_error {
-        content = content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+        content = content.push(text(err.as_str()).size(FONT_SMALL).style(move |_theme| {
             iced::widget::text::Style {
-                color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+                color: Some(pal.error),
             }
         }));
     }
@@ -27,7 +28,10 @@ pub(crate) fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
     if snap.platform.has_keyboard_backlight() {
         content = content.push(kblight_section(snap));
     } else {
-        content = content.push(crate::views::not_supported_section("Keyboard Backlight"));
+        content = content.push(crate::views::not_supported_section(
+            snap.palette,
+            "Keyboard Backlight",
+        ));
     }
 
     content = content.push(space::vertical().height(8));
@@ -48,7 +52,10 @@ pub(crate) fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
         .spacing(6);
         content = content.push(button_row);
     } else {
-        content = content.push(crate::views::not_supported_section("Fingerprint LED"));
+        content = content.push(crate::views::not_supported_section(
+            snap.palette,
+            "Fingerprint LED",
+        ));
     }
 
     content = content.push(space::vertical().height(8));
@@ -69,14 +76,15 @@ pub(crate) fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
 
 pub(crate) fn kblight_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     let kblight = &snap.kblight;
+    let pal = snap.palette;
     let mut content = column![].spacing(2);
     if let Some(kb) = kblight.as_ref().as_ref().copied() {
         content = content.push(
             row![
                 text("Keyboard Backlight")
                     .size(FONT_SECTION)
-                    .style(|_theme| iced::widget::text::Style {
-                        color: Some(COLOR_HEADER)
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.header)
                     }),
                 space::horizontal(),
                 text(format!("{}%", kb)).size(FONT_BODY),
@@ -89,16 +97,14 @@ pub(crate) fn kblight_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 .style(slider_style),
         );
     } else {
-        content = content.push(
-            text("Keyboard Backlight")
-                .size(FONT_SECTION)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_HEADER),
-                }),
-        );
-        content = content.push(text("Unavailable").size(FONT_BODY).style(|_theme| {
+        content = content.push(text("Keyboard Backlight").size(FONT_SECTION).style(
+            move |_theme| iced::widget::text::Style {
+                color: Some(pal.header),
+            },
+        ));
+        content = content.push(text("Unavailable").size(FONT_BODY).style(move |_theme| {
             iced::widget::text::Style {
-                color: Some(COLOR_GRAY),
+                color: Some(pal.gray),
             }
         }));
     }
@@ -109,20 +115,21 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     let cards = &snap.expansion_cards;
     let ports = &snap.pd_ports;
     let history = &snap.pd_ports_history;
+    let pal = snap.palette;
     let mut content = column![text("Ports & Expansion Cards").size(FONT_SECTION)].spacing(2);
 
     if ports.is_empty() && cards.is_empty() {
-        content = content.push(text("None detected").size(FONT_BODY).style(|_theme| {
+        content = content.push(text("None detected").size(FONT_BODY).style(move |_theme| {
             iced::widget::text::Style {
-                color: Some(COLOR_GRAY),
+                color: Some(pal.gray),
             }
         }));
         if snap.expansion_card_debug {
             content = content.push(
                 text("[Debug] No ports or expansion cards detected")
                     .size(FONT_SMALL)
-                    .style(|_theme| iced::widget::text::Style {
-                        color: Some(COLOR_GRAY),
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.gray),
                     }),
             );
         }
@@ -161,8 +168,8 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     if let Some(ref fw) = card.active_firmware {
                         row_content =
                             row_content.push(text(format!("v{}", fw)).size(FONT_SMALL).style(
-                                |_theme| iced::widget::text::Style {
-                                    color: Some(COLOR_GRAY),
+                                move |_theme| iced::widget::text::Style {
+                                    color: Some(pal.gray),
                                 },
                             ));
                     }
@@ -180,9 +187,9 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 && let Some(ref level) = port.negotiated_text
             {
                 let color = if port.power_role == Some("Source") {
-                    COLOR_GRAY
+                    pal.gray
                 } else {
-                    COLOR_GREEN
+                    pal.green
                 };
                 content = content.push(
                     text(format!("  {}", level))
@@ -202,9 +209,9 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     "  [{}] role={} data={} {} watts={}",
                     port.port, role_str, data_str, dp_alt_str, watts_str
                 );
-                content = content.push(text(debug_line).size(FONT_SMALL).style(|_theme| {
+                content = content.push(text(debug_line).size(FONT_SMALL).style(move |_theme| {
                     iced::widget::text::Style {
-                        color: Some(COLOR_GRAY),
+                        color: Some(pal.gray),
                     }
                 }));
             }
@@ -218,12 +225,11 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             .align_y(iced::Alignment::Center)
             .spacing(6);
             if let Some(ref fw) = card.active_firmware {
-                row_content =
-                    row_content.push(text(format!("v{}", fw)).size(FONT_SMALL).style(|_theme| {
-                        iced::widget::text::Style {
-                            color: Some(COLOR_GRAY),
-                        }
-                    }));
+                row_content = row_content.push(text(format!("v{}", fw)).size(FONT_SMALL).style(
+                    move |_theme| iced::widget::text::Style {
+                        color: Some(pal.gray),
+                    },
+                ));
             }
             content = content.push(row_content);
             if snap.expansion_card_debug {
@@ -231,8 +237,8 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 content = content.push(
                     text(format!("  [Debug] name={} fw={}", card.name, fw_str))
                         .size(FONT_SMALL)
-                        .style(|_theme| iced::widget::text::Style {
-                            color: Some(COLOR_GRAY),
+                        .style(move |_theme| iced::widget::text::Style {
+                            color: Some(pal.gray),
                         }),
                 );
             }
@@ -243,8 +249,8 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 content = content.push(
                     text(format!("  [Debug] {} fw={}", card.name, fw_str))
                         .size(FONT_SMALL)
-                        .style(|_theme| iced::widget::text::Style {
-                            color: Some(COLOR_GRAY),
+                        .style(move |_theme| iced::widget::text::Style {
+                            color: Some(pal.gray),
                         }),
                 );
             }

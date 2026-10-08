@@ -9,6 +9,7 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
     let thermal = &snap.thermal;
     let config = &snap.config;
     let current_mode = config.fan.mode;
+    let pal = snap.palette;
 
     let fan_rpm_text = thermal.as_ref().as_ref().and_then(|t| {
         if t.fans.is_empty() {
@@ -50,8 +51,8 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
     let title_row = row![
         text("Fan Control")
             .size(FONT_SECTION)
-            .style(|_theme| iced::widget::text::Style {
-                color: Some(COLOR_HEADER)
+            .style(move |_theme| iced::widget::text::Style {
+                color: Some(pal.header)
             }),
         space::horizontal(),
         text(right_text).size(FONT_BODY),
@@ -67,13 +68,13 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
         row![
             button(text("Auto").size(FONT_BODY))
                 .on_press(Message::FanModeChanged(FanControlMode::Disabled))
-                .style(move |_theme, _status| mode_style(is_disabled)),
+                .style(move |theme, _status| mode_style(theme, is_disabled)),
             button(text("Manual").size(FONT_BODY))
                 .on_press(Message::FanModeChanged(FanControlMode::Manual))
-                .style(move |_theme, _status| mode_style(is_manual)),
+                .style(move |theme, _status| mode_style(theme, is_manual)),
             button(text("Curve").size(FONT_BODY))
                 .on_press(Message::FanModeChanged(FanControlMode::Curve))
-                .style(move |_theme, _status| mode_style(is_curve)),
+                .style(move |theme, _status| mode_style(theme, is_curve)),
         ]
         .spacing(8)
     };
@@ -138,9 +139,9 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                 };
                 content = content.push(
                     row![
-                        text("Curve").size(FONT_SECTION).style(|_theme| {
+                        text("Curve").size(FONT_SECTION).style(move |_theme| {
                             iced::widget::text::Style {
-                                color: Some(COLOR_HEADER),
+                                color: Some(pal.header),
                             }
                         }),
                         space::horizontal(),
@@ -203,8 +204,8 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                         settings_content = settings_content.push(
                             text("No sensors detected yet")
                                 .size(FONT_SMALL)
-                                .style(|_theme| iced::widget::text::Style {
-                                    color: Some(COLOR_GRAY),
+                                .style(move |_theme| iced::widget::text::Style {
+                                    color: Some(pal.gray),
                                 }),
                         );
                     } else {
@@ -212,8 +213,8 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                             let is_on = curve_sensor == Some(name.as_str());
                             let color = SENSOR_COLORS[idx % SENSOR_COLORS.len()];
                             let on_off = if is_on { "On" } else { "Off" };
-                            let on_color = if is_on { COLOR_GREEN } else { COLOR_GRAY };
-                            let bg_color = if is_on { color } else { COLOR_DARK };
+                            let on_color = if is_on { pal.green } else { pal.gray };
+                            let bg_color = if is_on { color } else { pal.dark };
                             settings_content = settings_content.push(
                                 row![
                                     button(
@@ -252,12 +253,9 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                     container(settings_content)
                         .width(Length::Fill)
                         .padding(8)
-                        .style(|_theme| iced::widget::container::Style {
-                            background: Some(COLOR_SETTINGS_BG.into()),
-                            border: iced::Border::default()
-                                .rounded(4)
-                                .color(COLOR_DARK)
-                                .width(1),
+                        .style(move |_theme| iced::widget::container::Style {
+                            background: Some(pal.settings_bg.into()),
+                            border: iced::Border::default().rounded(4).color(pal.dark).width(1),
                             ..Default::default()
                         })
                         .into()
@@ -275,11 +273,11 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                         let idx = chunk_idx * 3 + offset;
                         let label = format!("P{}: {}°C -> {}%", idx + 1, point[0], point[1]);
                         let txt = if point[0] >= crate::types::CURVE_TEMP_LOCK_START {
-                            text(label)
-                                .size(FONT_BODY)
-                                .style(|_theme| iced::widget::text::Style {
-                                    color: Some(COLOR_GRAY),
-                                })
+                            text(label).size(FONT_BODY).style(move |_theme| {
+                                iced::widget::text::Style {
+                                    color: Some(pal.gray),
+                                }
+                            })
                         } else {
                             text(label).size(FONT_BODY)
                         };

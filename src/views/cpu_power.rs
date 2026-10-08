@@ -5,6 +5,7 @@ use iced::widget::{button, column, container, row, space, text, text_input};
 use iced::{Element, Length};
 pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     let mut content = column![].spacing(2);
+    let pal = snap.palette;
 
     let settings_label = if snap.show_cpu_power_settings {
         "[-] Settings"
@@ -14,8 +15,8 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     content = content.push(row![
         text("CPU Power")
             .size(FONT_SECTION)
-            .style(|_theme| iced::widget::text::Style {
-                color: Some(COLOR_HEADER)
+            .style(move |_theme| iced::widget::text::Style {
+                color: Some(pal.header)
             }),
         space::horizontal(),
         if snap.intel_cpu {
@@ -28,16 +29,16 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     ]);
 
     if !snap.intel_cpu {
-        content = content.push(text("Not Supported").size(FONT_BODY).style(|_theme| {
+        content = content.push(text("Not Supported").size(FONT_BODY).style(move |_theme| {
             iced::widget::text::Style {
-                color: Some(COLOR_NOT_SUPPORTED_TEXT),
+                color: Some(pal.not_supported_text),
             }
         }));
         content = content.push(
             text("CPU Power is available on Intel CPUs only.")
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_GRAY),
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.gray),
                 }),
         );
         return content.into();
@@ -50,14 +51,11 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             .unavailable
             .map(crate::cpu_power::CpuPowerUnavailable::message)
             .unwrap_or("PawnIO driver not available");
-        content =
-            content.push(
-                text(msg)
-                    .size(FONT_BODY)
-                    .style(|_theme| iced::widget::text::Style {
-                        color: Some(COLOR_GRAY),
-                    }),
-            );
+        content = content.push(text(msg).size(FONT_BODY).style(move |_theme| {
+            iced::widget::text::Style {
+                color: Some(pal.gray),
+            }
+        }));
         if !crate::cpu_power::is_pawnio_installed() {
             content = content.push(
                 button(text("Install PawnIO").size(FONT_BODY))
@@ -66,14 +64,14 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             );
         } else if !crate::cpu_power::modules_downloaded() {
             content = content.push(text("PawnIO Modules required").size(FONT_SMALL).style(
-                |_theme| iced::widget::text::Style {
-                    color: Some(COLOR_GRAY),
+                move |_theme| iced::widget::text::Style {
+                    color: Some(pal.gray),
                 },
             ));
             if let Some(ref err) = snap.modules_download_error {
-                content = content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+                content = content.push(text(err.as_str()).size(FONT_SMALL).style(move |_theme| {
                     iced::widget::text::Style {
-                        color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+                        color: Some(pal.error),
                     }
                 }));
             }
@@ -85,8 +83,8 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             content = content.push(
                 text("Manual: download latest release_*.zip from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into the modules folder (Open Modules Folder)")
                     .size(FONT_SMALL)
-                    .style(|_theme| iced::widget::text::Style {
-                        color: Some(COLOR_GRAY),
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.gray),
                     }),
             );
             content = content.push(
@@ -103,17 +101,17 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
         } else {
             // PawnIO and modules present but driver read still fails (needs reboot/elevation)
             if let Some(ref err) = snap.cpu_power_error {
-                content = content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+                content = content.push(text(err.as_str()).size(FONT_SMALL).style(move |_theme| {
                     iced::widget::text::Style {
-                        color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+                        color: Some(pal.error),
                     }
                 }));
             }
             content = content.push(
                 text("PawnIO driver may require reboot or elevation. Try Retry, or reinstall PawnIO and reboot.")
                     .size(FONT_SMALL)
-                    .style(|_theme| iced::widget::text::Style {
-                        color: Some(COLOR_GRAY),
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.gray),
                     }),
             );
             content = content.push(
@@ -136,14 +134,14 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
 
     // Show effective (min) limit; CPU enforces lower of MSR and MMIO.
     let pl1_color = if snap.pl_custom_applied {
-        COLOR_GREEN
+        pal.green
     } else {
-        COLOR_HEADER
+        pal.header
     };
     let pl2_color = if snap.pl_custom_applied {
-        COLOR_GREEN
+        pal.green
     } else {
-        COLOR_HEADER
+        pal.header
     };
     content = content.push(
         row![
@@ -160,11 +158,11 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     color: Some(pl2_color)
                 }),
             if snap.sync_enabled {
-                text("  [Syncing]")
-                    .size(FONT_SMALL)
-                    .style(|_theme| iced::widget::text::Style {
-                        color: Some(COLOR_GREEN),
-                    })
+                text("  [Syncing]").size(FONT_SMALL).style(move |_theme| {
+                    iced::widget::text::Style {
+                        color: Some(pal.green),
+                    }
+                })
             } else {
                 text("").size(FONT_SMALL)
             },
@@ -189,17 +187,17 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     " [Dis]"
                 })
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
+                .style(move |_theme| iced::widget::text::Style {
                     color: Some(if info.pl1_msr_enabled {
-                        COLOR_GREEN
+                        pal.green
                     } else {
-                        COLOR_GRAY
+                        pal.gray
                     })
                 }),
                 text(if info.pl1_msr_clamped { " [Cl]" } else { "" })
                     .size(FONT_SMALL)
-                    .style(|_theme| iced::widget::text::Style {
-                        color: Some(COLOR_HEADER)
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.header)
                     }),
             ]
             .spacing(4),
@@ -217,17 +215,17 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     " [Dis]"
                 })
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
+                .style(move |_theme| iced::widget::text::Style {
                     color: Some(if info.pl2_msr_enabled {
-                        COLOR_GREEN
+                        pal.green
                     } else {
-                        COLOR_GRAY
+                        pal.gray
                     })
                 }),
                 text(if info.pl2_msr_clamped { " [Cl]" } else { "" })
                     .size(FONT_SMALL)
-                    .style(|_theme| iced::widget::text::Style {
-                        color: Some(COLOR_HEADER)
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.header)
                     }),
             ]
             .spacing(4),
@@ -247,17 +245,17 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     " [Dis]"
                 })
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
+                .style(move |_theme| iced::widget::text::Style {
                     color: Some(if info.pl1_mmio_enabled {
-                        COLOR_GREEN
+                        pal.green
                     } else {
-                        COLOR_GRAY
+                        pal.gray
                     })
                 }),
                 text(if info.pl1_mmio_clamped { " [Cl]" } else { "" })
                     .size(FONT_SMALL)
-                    .style(|_theme| iced::widget::text::Style {
-                        color: Some(COLOR_HEADER)
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.header)
                     }),
             ]
             .spacing(4),
@@ -275,17 +273,17 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     " [Dis]"
                 })
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
+                .style(move |_theme| iced::widget::text::Style {
                     color: Some(if info.pl2_mmio_enabled {
-                        COLOR_GREEN
+                        pal.green
                     } else {
-                        COLOR_GRAY
+                        pal.gray
                     })
                 }),
                 text(if info.pl2_mmio_clamped { " [Cl]" } else { "" })
                     .size(FONT_SMALL)
-                    .style(|_theme| iced::widget::text::Style {
-                        color: Some(COLOR_HEADER)
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.header)
                     }),
             ]
             .spacing(4),
@@ -335,9 +333,9 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
 
         if let Some(ref err) = snap.cpu_power_error {
             settings_content =
-                settings_content.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+                settings_content.push(text(err.as_str()).size(FONT_SMALL).style(move |_theme| {
                     iced::widget::text::Style {
-                        color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+                        color: Some(pal.error),
                     }
                 }));
         }
@@ -346,8 +344,8 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             settings_content = settings_content.push(
                 text("Syncing MSR 0x610 every 250ms")
                     .size(FONT_SMALL)
-                    .style(|_theme| iced::widget::text::Style {
-                        color: Some(COLOR_GREEN),
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.green),
                     }),
             );
         }
@@ -382,12 +380,9 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             container(settings_content)
                 .width(Length::Fill)
                 .padding(8)
-                .style(|_theme| iced::widget::container::Style {
-                    background: Some(COLOR_SETTINGS_BG.into()),
-                    border: iced::Border::default()
-                        .rounded(4)
-                        .color(COLOR_DARK)
-                        .width(1),
+                .style(move |_theme| iced::widget::container::Style {
+                    background: Some(pal.settings_bg.into()),
+                    border: iced::Border::default().rounded(4).color(pal.dark).width(1),
                     ..Default::default()
                 }),
         );

@@ -90,6 +90,7 @@ pub(crate) fn view_battery_info(
 }
 
 pub(crate) fn view_battery_verbose(
+    pal: crate::style::Palette,
     battery: &crate::cli::ec_wrapper::BatteryData,
     show_details: bool,
 ) -> Option<Element<'_, Message>> {
@@ -119,7 +120,7 @@ pub(crate) fn view_battery_verbose(
             .style(btn_style),
     ]);
 
-    if show_details && let Some(details) = battery_detail_rows(battery) {
+    if show_details && let Some(details) = battery_detail_rows(pal, battery) {
         content = content.push(details);
     }
 
@@ -131,14 +132,15 @@ const BATTERY_SECTION_MAX_HEIGHT: f32 = 300.0;
 
 pub(crate) fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message> {
     if !snap.platform.has_battery() {
-        return crate::views::not_supported_section("Battery & Power");
+        return crate::views::not_supported_section(snap.palette, "Battery & Power");
     }
     let battery = &snap.battery;
     let config = &snap.config;
+    let pal = snap.palette;
     if let Some(battery) = battery.as_ref().as_ref() {
         let charging = battery.power_info.ac_present == Some(true)
             && battery.power_info.discharging != Some(true);
-        let status_color = if charging { COLOR_GREEN } else { COLOR_HEADER };
+        let status_color = if charging { pal.green } else { pal.header };
 
         let power_text = battery
             .power_info
@@ -166,8 +168,8 @@ pub(crate) fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
         let title_row = row![
             text("Battery & Power")
                 .size(FONT_SECTION)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_HEADER)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.header)
                 }),
             space::horizontal(),
             text(format!("{}  {}", power_text, soc_text))
@@ -188,7 +190,9 @@ pub(crate) fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
         ));
         content = content.push(view_battery_info(&battery.power_info, charging));
 
-        if let Some(verbose) = view_battery_verbose(&battery.power_info, app.show_battery_details) {
+        if let Some(verbose) =
+            view_battery_verbose(pal, &battery.power_info, app.show_battery_details)
+        {
             content = content.push(verbose);
         }
 
@@ -209,6 +213,7 @@ pub(crate) fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
 }
 
 pub(crate) fn battery_detail_rows(
+    pal: crate::style::Palette,
     battery_info: &crate::cli::ec_wrapper::BatteryData,
 ) -> Option<Element<'_, Message>> {
     let mut rows = column![].spacing(2).padding(4);
@@ -319,12 +324,9 @@ pub(crate) fn battery_detail_rows(
             container(rows)
                 .padding(iced::Padding::from([4, 8]))
                 .width(Length::Fill)
-                .style(|_theme| iced::widget::container::Style {
-                    background: Some(COLOR_SETTINGS_BG.into()),
-                    border: iced::Border::default()
-                        .rounded(4)
-                        .color(COLOR_DARK)
-                        .width(1),
+                .style(move |_theme| iced::widget::container::Style {
+                    background: Some(pal.settings_bg.into()),
+                    border: iced::Border::default().rounded(4).color(pal.dark).width(1),
                     ..Default::default()
                 })
                 .into(),

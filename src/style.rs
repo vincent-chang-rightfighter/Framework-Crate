@@ -60,6 +60,156 @@ pub const COLOR_CURVE: iced::Color = iced::Color {
     a: 1.0,
 };
 
+/// UI theme preference. Default preserves the exact long-standing look;
+/// the rest map to iced built-in themes. Stock iced Dark is deliberately
+/// NOT offered: Default renders on Theme::Dark and the palette resolver
+/// keys on the theme value, so the two must never collide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeId {
+    Default,
+    Light,
+    Dracula,
+    Nord,
+}
+
+impl ThemeId {
+    pub const ALL: [ThemeId; 4] = [
+        ThemeId::Default,
+        ThemeId::Light,
+        ThemeId::Dracula,
+        ThemeId::Nord,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeId::Default => "Default",
+            ThemeId::Light => "Light",
+            ThemeId::Dracula => "Dracula",
+            ThemeId::Nord => "Nord",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ThemeId> {
+        match s.to_lowercase().as_str() {
+            "default" => Some(ThemeId::Default),
+            "light" => Some(ThemeId::Light),
+            "dracula" => Some(ThemeId::Dracula),
+            "nord" => Some(ThemeId::Nord),
+            _ => None,
+        }
+    }
+
+    pub fn iced(self) -> iced::Theme {
+        match self {
+            ThemeId::Default => iced::Theme::Dark,
+            ThemeId::Light => iced::Theme::Light,
+            ThemeId::Dracula => iced::Theme::Dracula,
+            ThemeId::Nord => iced::Theme::Nord,
+        }
+    }
+}
+
+/// Resolved UI colors for one theme. The Default arm returns the
+/// long-standing constants verbatim so the current look cannot drift;
+/// other themes derive from iced's own palettes.
+#[derive(Debug, Clone, Copy)]
+pub struct Palette {
+    pub header: iced::Color,
+    pub gray: iced::Color,
+    pub green: iced::Color,
+    pub error: iced::Color,
+    pub error_bg: iced::Color,
+    pub warning: iced::Color,
+    pub warning_bg: iced::Color,
+    pub card_bg: iced::Color,
+    pub card_border: iced::Color,
+    pub settings_bg: iced::Color,
+    pub dark: iced::Color,
+    pub not_supported_bg: iced::Color,
+    pub not_supported_text: iced::Color,
+    pub btn_text: iced::Color,
+    pub btn_text_dim: iced::Color,
+    pub btn_hover_text: iced::Color,
+    pub btn_border: iced::Color,
+    pub btn_hover_bg: iced::Color,
+    pub btn_pressed_bg: iced::Color,
+    pub toggle_off_text: iced::Color,
+    pub toggle_off_border: iced::Color,
+    pub slider_empty: iced::Color,
+}
+
+pub fn palette(theme: &iced::Theme) -> Palette {
+    match theme {
+        iced::Theme::Light | iced::Theme::Dracula | iced::Theme::Nord => {
+            let p = theme.palette();
+            let e = theme.extended_palette();
+            Palette {
+                header: p.text,
+                gray: e.secondary.weak.text,
+                green: e.success.base.color,
+                error: e.danger.base.color,
+                error_bg: iced::Color {
+                    a: 0.1,
+                    ..e.danger.base.color
+                },
+                warning: p.warning,
+                warning_bg: iced::Color {
+                    a: 0.15,
+                    ..p.warning
+                },
+                card_bg: e.background.weak.color,
+                card_border: e.background.strong.color,
+                settings_bg: e.background.weaker.color,
+                dark: e.background.strong.color,
+                not_supported_bg: iced::Color {
+                    a: 0.4,
+                    ..e.danger.weak.color
+                },
+                not_supported_text: e.danger.base.color,
+                btn_text: p.text,
+                btn_text_dim: e.secondary.weak.text,
+                btn_hover_text: p.text,
+                btn_border: e.background.strong.color,
+                btn_hover_bg: iced::Color { a: 0.12, ..p.text },
+                btn_pressed_bg: iced::Color { a: 0.2, ..p.text },
+                toggle_off_text: e.secondary.weak.text,
+                toggle_off_border: e.background.strong.color,
+                slider_empty: e.background.strong.color,
+            }
+        }
+        _ => Palette {
+            header: COLOR_HEADER,
+            gray: COLOR_GRAY,
+            green: COLOR_GREEN,
+            error: iced::Color::from_rgb(0.9, 0.3, 0.3),
+            error_bg: iced::Color::from_rgba(0.9, 0.2, 0.2, 0.1),
+            warning: iced::Color::from_rgb(0.9, 0.6, 0.0),
+            warning_bg: iced::Color::from_rgba(0.9, 0.6, 0.0, 0.15),
+            card_bg: COLOR_CARD_BG,
+            card_border: COLOR_CARD_BORDER,
+            settings_bg: COLOR_SETTINGS_BG,
+            dark: COLOR_DARK,
+            not_supported_bg: COLOR_NOT_SUPPORTED_BG,
+            not_supported_text: COLOR_NOT_SUPPORTED_TEXT,
+            btn_text: iced::Color::from_rgb(0.85, 0.85, 0.85),
+            btn_text_dim: iced::Color::from_rgb(0.5, 0.5, 0.5),
+            btn_hover_text: iced::Color::WHITE,
+            btn_border: iced::Color::from_rgb(0.4, 0.4, 0.4),
+            btn_hover_bg: iced::Color::from_rgba(0.3, 0.3, 0.3, 0.5),
+            btn_pressed_bg: iced::Color::from_rgba(0.2, 0.2, 0.2, 0.6),
+            toggle_off_text: iced::Color::from_rgb(0.7, 0.7, 0.7),
+            toggle_off_border: iced::Color::from_rgb(0.4, 0.4, 0.4),
+            slider_empty: COLOR_DARK,
+        },
+    }
+}
+
+/// Resolves the palette for a theme preference without needing a live theme
+/// value. Used where only the preference is at hand (App state, snapshots).
+pub fn palette_for(id: ThemeId) -> Palette {
+    palette(&id.iced())
+}
+
 /// Minimum poll interval: 200ms avoids overlapping framework_tool calls.
 pub const POLL_RATE_MIN_MS: u32 = 200;
 /// Minimum charge limit enforced by EC to preserve battery health.
@@ -155,13 +305,16 @@ pub fn card<'a>(content: iced::Element<'a, crate::Message>) -> iced::Element<'a,
     iced::widget::container(content)
         .padding(12)
         .width(iced::Length::Fill)
-        .style(|_theme| iced::widget::container::Style {
-            background: Some(COLOR_CARD_BG.into()),
-            border: iced::Border::default()
-                .rounded(8)
-                .color(COLOR_CARD_BORDER)
-                .width(1),
-            ..Default::default()
+        .style(|theme| {
+            let pal = palette(theme);
+            iced::widget::container::Style {
+                background: Some(pal.card_bg.into()),
+                border: iced::Border::default()
+                    .rounded(8)
+                    .color(pal.card_border)
+                    .width(1),
+                ..Default::default()
+            }
         })
         .into()
 }
@@ -189,8 +342,8 @@ pub fn info_row(label: &str, value: &str) -> iced::Element<'static, crate::Messa
     iced::widget::row![
         iced::widget::text(format!("{}:", label))
             .size(FONT_BODY)
-            .style(|_theme| iced::widget::text::Style {
-                color: Some(COLOR_GRAY)
+            .style(|theme| iced::widget::text::Style {
+                color: Some(palette(theme).gray)
             }),
         iced::widget::text(value.to_owned()).size(FONT_BODY),
     ]
@@ -198,7 +351,7 @@ pub fn info_row(label: &str, value: &str) -> iced::Element<'static, crate::Messa
     .into()
 }
 
-pub fn mode_style(selected: bool) -> iced::widget::button::Style {
+pub fn mode_style(theme: &iced::Theme, selected: bool) -> iced::widget::button::Style {
     if selected {
         iced::widget::button::Style {
             background: Some(iced::Color::from_rgb(0.23, 0.51, 0.96).into()),
@@ -210,20 +363,21 @@ pub fn mode_style(selected: bool) -> iced::widget::button::Style {
             ..iced::widget::button::Style::default()
         }
     } else {
+        let pal = palette(theme);
         iced::widget::button::Style {
             background: Some(iced::Color::TRANSPARENT.into()),
-            text_color: iced::Color::from_rgb(0.7, 0.7, 0.7),
+            text_color: pal.toggle_off_text,
             border: iced::Border::default()
                 .rounded(6)
                 .width(1)
-                .color(iced::Color::from_rgb(0.4, 0.4, 0.4)),
+                .color(pal.toggle_off_border),
             ..iced::widget::button::Style::default()
         }
     }
 }
 
 pub fn slider_style(
-    _theme: &iced::Theme,
+    theme: &iced::Theme,
     status: iced::widget::slider::Status,
 ) -> iced::widget::slider::Style {
     use iced::widget::slider::{Handle, HandleShape, Rail};
@@ -233,10 +387,11 @@ pub fn slider_style(
         iced::widget::slider::Status::Hovered => (6.0, 2.0),
         iced::widget::slider::Status::Dragged => (7.0, 2.0),
     };
+    let pal = palette(theme);
     iced::widget::slider::Style {
         rail: Rail {
             // Filled side uses curve color to match curve line.
-            backgrounds: (COLOR_CURVE.into(), COLOR_DARK.into()),
+            backgrounds: (COLOR_CURVE.into(), pal.slider_empty.into()),
             width: 4.0,
             border: iced::Border::default().rounded(2),
         },
@@ -250,26 +405,21 @@ pub fn slider_style(
 }
 
 pub fn btn_style(
-    _theme: &iced::Theme,
+    theme: &iced::Theme,
     status: iced::widget::button::Status,
 ) -> iced::widget::button::Style {
+    let pal = palette(theme);
     let (bg, text_color) = match status {
-        iced::widget::button::Status::Hovered => (
-            Some(iced::Color::from_rgba(0.3, 0.3, 0.3, 0.5).into()),
-            iced::Color::WHITE,
-        ),
-        iced::widget::button::Status::Pressed => (
-            Some(iced::Color::from_rgba(0.2, 0.2, 0.2, 0.6).into()),
-            iced::Color::WHITE,
-        ),
-        iced::widget::button::Status::Disabled => (
-            Some(iced::Color::TRANSPARENT.into()),
-            iced::Color::from_rgb(0.5, 0.5, 0.5),
-        ),
-        _ => (
-            Some(iced::Color::TRANSPARENT.into()),
-            iced::Color::from_rgb(0.85, 0.85, 0.85),
-        ),
+        iced::widget::button::Status::Hovered => {
+            (Some(pal.btn_hover_bg.into()), pal.btn_hover_text)
+        }
+        iced::widget::button::Status::Pressed => {
+            (Some(pal.btn_pressed_bg.into()), pal.btn_hover_text)
+        }
+        iced::widget::button::Status::Disabled => {
+            (Some(iced::Color::TRANSPARENT.into()), pal.btn_text_dim)
+        }
+        _ => (Some(iced::Color::TRANSPARENT.into()), pal.btn_text),
     };
     iced::widget::button::Style {
         background: bg,
@@ -277,7 +427,50 @@ pub fn btn_style(
         border: iced::Border::default()
             .rounded(6)
             .width(1)
-            .color(iced::Color::from_rgb(0.4, 0.4, 0.4)),
+            .color(pal.btn_border),
         ..iced::widget::button::Style::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_id_round_trips() {
+        for id in ThemeId::ALL {
+            assert_eq!(ThemeId::parse(id.label()), Some(id));
+        }
+        assert_eq!(ThemeId::parse("nope"), None);
+        assert_eq!(ThemeId::parse("LIGHT"), Some(ThemeId::Light));
+    }
+
+    #[test]
+    fn default_palette_matches_current_constants() {
+        // The Default look must not drift: every slot equals the constant
+        // it replaced.
+        let pal = palette_for(ThemeId::Default);
+        assert_eq!(pal.header, COLOR_HEADER);
+        assert_eq!(pal.gray, COLOR_GRAY);
+        assert_eq!(pal.green, COLOR_GREEN);
+        assert_eq!(pal.card_bg, COLOR_CARD_BG);
+        assert_eq!(pal.card_border, COLOR_CARD_BORDER);
+        assert_eq!(pal.settings_bg, COLOR_SETTINGS_BG);
+        assert_eq!(pal.dark, COLOR_DARK);
+        assert_eq!(pal.not_supported_bg, COLOR_NOT_SUPPORTED_BG);
+        assert_eq!(pal.not_supported_text, COLOR_NOT_SUPPORTED_TEXT);
+        assert_eq!(pal.slider_empty, COLOR_DARK);
+        assert_eq!(pal.error, iced::Color::from_rgb(0.9, 0.3, 0.3));
+        assert_eq!(pal.warning, iced::Color::from_rgb(0.9, 0.6, 0.0));
+        assert_eq!(pal.warning_bg, iced::Color::from_rgba(0.9, 0.6, 0.0, 0.15));
+        assert_eq!(pal.btn_text, iced::Color::from_rgb(0.85, 0.85, 0.85));
+    }
+
+    #[test]
+    fn light_palette_uses_dark_text() {
+        // Light background needs dark text; iced's own palette provides it.
+        let pal = palette_for(ThemeId::Light);
+        assert_ne!(pal.header, COLOR_HEADER);
+        assert_ne!(pal.card_bg, COLOR_CARD_BG);
     }
 }

@@ -7,11 +7,11 @@ use iced::{Element, Length};
 
 /// About page reads `App` live; modal and infrequent so it bypasses snapshot cache.
 /// Section header matching the CPU Power card style.
-fn section_title(label: &str) -> Element<'_, Message> {
+fn section_title(id: crate::style::ThemeId, label: &str) -> Element<'_, Message> {
     text(label)
         .size(FONT_SECTION)
-        .style(|_theme| iced::widget::text::Style {
-            color: Some(COLOR_HEADER),
+        .style(move |_theme| iced::widget::text::Style {
+            color: Some(crate::style::palette_for(id).header),
         })
         .into()
 }
@@ -118,8 +118,8 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     let startup_err_el: Element<'_, Message> = if let Some(err) = startup_error {
         text(err)
             .size(FONT_SMALL)
-            .style(|_theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(COLOR_GRAY),
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(palette(theme).gray),
             })
             .into()
     } else {
@@ -130,7 +130,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
             text("Launch at Startup:").size(FONT_BODY),
             button(text(if startup_enabled { "ON" } else { "OFF" }).size(FONT_BODY))
                 .on_press(Message::StartupLaunchToggled(!startup_enabled))
-                .style(move |_theme, _status| mode_style(startup_enabled)),
+                .style(move |theme, _status| mode_style(theme, startup_enabled)),
             startup_err_el,
         ]
         .spacing(8)
@@ -140,12 +140,12 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     let mut content = column![].spacing(8);
     let ec_debug = app.expansion_card_debug;
     let diagnostics = column![
-        section_title("Diagnostics"),
+        section_title(app.theme, "Diagnostics"),
         row![
             text("Expansion Card Debug Mode:").size(FONT_BODY),
             button(text(if ec_debug { "ON" } else { "OFF" }).size(FONT_BODY))
                 .on_press(Message::ToggleExpansionCardDebug)
-                .style(move |_theme, _status| mode_style(ec_debug)),
+                .style(move |theme, _status| mode_style(theme, ec_debug)),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
@@ -162,7 +162,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     content = content.push(
         row![
             card(
-                column![section_title("Device"), hw_content]
+                column![section_title(app.theme, "Device"), hw_content]
                     .spacing(4)
                     .into()
             ),
@@ -170,13 +170,19 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         ]
         .spacing(8),
     );
-    content = content.push(card(
-        column![section_title("Software"), sw_content]
-            .spacing(4)
-            .into(),
-    ));
+    content = content.push(
+        row![
+            card(
+                column![section_title(app.theme, "Software"), sw_content]
+                    .spacing(4)
+                    .into()
+            ),
+            card(theme_picker(app)),
+        ]
+        .spacing(8),
+    );
     let mut updates = column![
-        section_title("Updates"),
+        section_title(app.theme, "Updates"),
         update_check_row(app),
         row![
             text("PawnIO:").size(FONT_BODY),
@@ -191,15 +197,15 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         .align_y(iced::Alignment::Center),
         text("If update fails, check internet or download manually: PawnIO → https://github.com/namazso/PawnIO/releases | Modules → https://github.com/namazso/PawnIO.Modules/releases/latest")
             .size(FONT_SMALL)
-            .style(|_theme| iced::widget::text::Style {
-                color: Some(COLOR_GRAY),
+            .style(|theme| iced::widget::text::Style {
+                color: Some(palette(theme).gray),
             }),
     ]
     .spacing(8);
     if let Some(ref err) = app.modules_download_error {
-        updates = updates.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+        updates = updates.push(text(err.as_str()).size(FONT_SMALL).style(|theme| {
             iced::widget::text::Style {
-                color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+                color: Some(palette(theme).error),
             }
         }));
     }
@@ -208,44 +214,44 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         content = content.push(card(
             text(err.as_str())
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+                .style(|theme| iced::widget::text::Style {
+                    color: Some(palette(theme).error),
                 })
                 .into(),
         ));
     }
     content = content.push(card(
         column![
-            section_title("License"),
+            section_title(app.theme, "License"),
             text("Framework Crate — MIT License")
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_GRAY)
+                .style(|theme| iced::widget::text::Style {
+                    color: Some(palette(theme).gray)
                 }),
             text("framework_lib — BSD-3-Clause")
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_GRAY)
+                .style(|theme| iced::widget::text::Style {
+                    color: Some(palette(theme).gray)
                 }),
             text("PawnIO (optional) — GPL-2.0")
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_GRAY)
+                .style(|theme| iced::widget::text::Style {
+                    color: Some(palette(theme).gray)
                 }),
             text("PawnIO Modules (optional) — LGPL-2.1")
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_GRAY)
+                .style(|theme| iced::widget::text::Style {
+                    color: Some(palette(theme).gray)
                 }),
             text("iced / tokio / tracing — MIT License")
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_GRAY)
+                .style(|theme| iced::widget::text::Style {
+                    color: Some(palette(theme).gray)
                 }),
             text("serde / windows-sys — MIT OR Apache-2.0")
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_GRAY)
+                .style(|theme| iced::widget::text::Style {
+                    color: Some(palette(theme).gray)
                 }),
         ]
         .spacing(2)
@@ -283,6 +289,33 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// Theme picker: one button per scheme, selected state highlighted.
+/// Default preserves the exact long-standing look.
+fn theme_picker(app: &App) -> Element<'_, Message> {
+    let mut theme_row = row![text("Scheme:").size(FONT_BODY),]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+    for id in crate::style::ThemeId::ALL {
+        let selected = app.theme == id;
+        theme_row = theme_row.push(
+            button(text(id.label()).size(FONT_SMALL))
+                .on_press(Message::ThemeChanged(id))
+                .style(move |theme, _status| mode_style(theme, selected)),
+        );
+    }
+    column![
+        section_title(app.theme, "Theme"),
+        theme_row,
+        text("Default preserves the current look.")
+            .size(FONT_SMALL)
+            .style(|theme| iced::widget::text::Style {
+                color: Some(palette(theme).gray),
+            }),
+    ]
+    .spacing(8)
+    .into()
+}
+
 /// Self update check row: manual check button, result status, and a download
 /// shortcut when a newer release exists. Notification only, nothing installs.
 fn update_check_row(app: &App) -> Element<'_, Message> {
@@ -313,22 +346,22 @@ fn update_check_row(app: &App) -> Element<'_, Message> {
         row = row.push(
             text(format!("New version {tag} available"))
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_GREEN),
+                .style(|theme| iced::widget::text::Style {
+                    color: Some(palette(theme).green),
                 }),
         );
     } else if let Some(ref err) = app.update_check_error {
-        row = row.push(text(err.as_str()).size(FONT_SMALL).style(|_theme| {
+        row = row.push(text(err.as_str()).size(FONT_SMALL).style(|theme| {
             iced::widget::text::Style {
-                color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+                color: Some(palette(theme).error),
             }
         }));
     } else if app.update_checked {
         row = row.push(
             text(format!("Up to date ({})", env!("CARGO_PKG_VERSION")))
                 .size(FONT_SMALL)
-                .style(|_theme| iced::widget::text::Style {
-                    color: Some(COLOR_GRAY),
+                .style(|theme| iced::widget::text::Style {
+                    color: Some(palette(theme).gray),
                 }),
         );
     }

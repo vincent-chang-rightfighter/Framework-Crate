@@ -29,11 +29,22 @@ pub struct Config {
     pub battery: BatteryConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// UI theme id ("default", "light", "dracula", "nord"). Unknown values
+    /// fall back to default on load so a typo never breaks the UI.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    "default".to_string()
 }
 
 impl Config {
     /// Clamps all values to safe ranges to prevent hardware damage or instability.
     pub fn validate(&mut self) {
+        if crate::style::ThemeId::parse(&self.theme).is_none() {
+            self.theme = default_theme();
+        }
         self.telemetry.poll_ms = self.telemetry.poll_ms.clamp(POLL_MS_MIN, POLL_MS_MAX);
         self.telemetry.ui_refresh_ms = self
             .telemetry
@@ -398,6 +409,26 @@ pub fn sorted_sensor_list(selected: &[String], sensor_keys: &[String]) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_unknown_theme_falls_back_to_default() {
+        let mut c = Config {
+            theme: "nope".to_string(),
+            ..Default::default()
+        };
+        c.validate();
+        assert_eq!(c.theme, "default");
+    }
+
+    #[test]
+    fn validate_known_theme_unchanged() {
+        let mut c = Config {
+            theme: "Dracula".to_string(),
+            ..Default::default()
+        };
+        c.validate();
+        assert_eq!(c.theme, "Dracula");
+    }
 
     #[test]
     fn validate_poll_ms_below_min_clamps() {
