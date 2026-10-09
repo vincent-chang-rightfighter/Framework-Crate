@@ -248,6 +248,15 @@ pub fn palette(theme: &iced::Theme) -> Palette {
                 pal.curve_plot_bg = iced::Color::BLACK;
                 pal.gray = iced::theme::palette::Pair::new(iced::Color::BLACK, p.text).text;
             }
+            // Gruvbox's signature accent is orange; iced's built-in primary
+            // is aqua. Bright orange needs dark text to stay readable.
+            if *theme == iced::Theme::GruvboxDark {
+                let orange = iced::Color::from_rgb8(0xFE, 0x80, 0x19);
+                pal.select_bg = orange;
+                pal.select_text = iced::Color::BLACK;
+                pal.slider_fill = orange;
+                pal.fan_curve = orange;
+            }
             pal
         }
         _ => Palette {
@@ -555,6 +564,17 @@ mod tests {
         assert_eq!(pal.temp_axis_text, iced::Color::from_rgb(0.5, 0.5, 0.5));
         assert_eq!(pal.curve_axis_text, iced::Color::from_rgb(0.6, 0.6, 0.6));
         assert_eq!(pal.grid_base, iced::Color::WHITE);
+    }
+
+    #[test]
+    fn gruvbox_uses_signature_orange_accent() {
+        // iced's Gruvbox primary is aqua; the recognizable accent is orange.
+        let pal = palette_for(ThemeId::GruvboxDark);
+        let orange = iced::Color::from_rgb8(0xFE, 0x80, 0x19);
+        assert_eq!(pal.select_bg, orange);
+        assert_eq!(pal.select_text, iced::Color::BLACK);
+        assert_eq!(pal.slider_fill, orange);
+        assert_eq!(pal.fan_curve, orange);
     }
 
     #[test]
