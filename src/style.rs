@@ -70,7 +70,7 @@ pub enum ThemeId {
     Light,
     Dracula,
     Nord,
-    TokyoNight,
+    Black,
     GruvboxDark,
     CatppuccinMocha,
     Nightfly,
@@ -82,7 +82,7 @@ impl ThemeId {
         ThemeId::Light,
         ThemeId::Dracula,
         ThemeId::Nord,
-        ThemeId::TokyoNight,
+        ThemeId::Black,
         ThemeId::GruvboxDark,
         ThemeId::CatppuccinMocha,
         ThemeId::Nightfly,
@@ -94,7 +94,7 @@ impl ThemeId {
             ThemeId::Light => "Light",
             ThemeId::Dracula => "Dracula",
             ThemeId::Nord => "Nord",
-            ThemeId::TokyoNight => "Tokyo Night",
+            ThemeId::Black => "Black",
             ThemeId::GruvboxDark => "Gruvbox",
             ThemeId::CatppuccinMocha => "Mocha",
             ThemeId::Nightfly => "Nightfly",
@@ -107,7 +107,7 @@ impl ThemeId {
             "light" => Some(ThemeId::Light),
             "dracula" => Some(ThemeId::Dracula),
             "nord" => Some(ThemeId::Nord),
-            "tokyonight" | "tokyo night" => Some(ThemeId::TokyoNight),
+            "black" | "oxocarbon" => Some(ThemeId::Black),
             "gruvboxdark" | "gruvbox" => Some(ThemeId::GruvboxDark),
             "catppuccinmocha" | "mocha" | "catppuccin mocha" => Some(ThemeId::CatppuccinMocha),
             "nightfly" => Some(ThemeId::Nightfly),
@@ -121,7 +121,7 @@ impl ThemeId {
             ThemeId::Light => iced::Theme::Light,
             ThemeId::Dracula => iced::Theme::Dracula,
             ThemeId::Nord => iced::Theme::Nord,
-            ThemeId::TokyoNight => iced::Theme::TokyoNight,
+            ThemeId::Black => iced::Theme::Oxocarbon,
             ThemeId::GruvboxDark => iced::Theme::GruvboxDark,
             ThemeId::CatppuccinMocha => iced::Theme::CatppuccinMocha,
             ThemeId::Nightfly => iced::Theme::Nightfly,
@@ -156,6 +156,14 @@ pub struct Palette {
     pub toggle_off_text: iced::Color,
     pub toggle_off_border: iced::Color,
     pub slider_empty: iced::Color,
+    /// Selected-state fill and text (mode toggles, theme buttons). Default
+    /// is the verbatim legacy blue with white text; other themes use their
+    /// own primary pair.
+    pub select_bg: iced::Color,
+    pub select_text: iced::Color,
+    /// Slider filled rail and handle. Default is the verbatim legacy curve
+    /// indigo; other themes use their own primary.
+    pub slider_fill: iced::Color,
     /// Temp-chart plot panel. Default is verbatim; other themes use a panel
     /// distinct from cards.
     pub temp_plot_bg: iced::Color,
@@ -174,7 +182,7 @@ pub fn palette(theme: &iced::Theme) -> Palette {
         iced::Theme::Light
         | iced::Theme::Dracula
         | iced::Theme::Nord
-        | iced::Theme::TokyoNight
+        | iced::Theme::Oxocarbon
         | iced::Theme::GruvboxDark
         | iced::Theme::CatppuccinMocha
         | iced::Theme::Nightfly => {
@@ -216,7 +224,10 @@ pub fn palette(theme: &iced::Theme) -> Palette {
                 btn_pressed_bg: iced::Color { a: 0.2, ..p.text },
                 toggle_off_text: gray,
                 toggle_off_border: e.background.strong.color,
+                select_bg: e.primary.strong.color,
+                select_text: e.primary.strong.text,
                 slider_empty: e.background.strong.color,
+                slider_fill: e.primary.base.color,
                 temp_plot_bg: e.background.weakest.color,
                 curve_plot_bg: e.background.weakest.color,
                 temp_axis_text: p.text,
@@ -246,7 +257,10 @@ pub fn palette(theme: &iced::Theme) -> Palette {
             btn_pressed_bg: iced::Color::from_rgba(0.2, 0.2, 0.2, 0.6),
             toggle_off_text: iced::Color::from_rgb(0.7, 0.7, 0.7),
             toggle_off_border: iced::Color::from_rgb(0.4, 0.4, 0.4),
+            select_bg: iced::Color::from_rgb(0.23, 0.51, 0.96),
+            select_text: iced::Color::WHITE,
             slider_empty: COLOR_DARK,
+            slider_fill: COLOR_CURVE,
             temp_plot_bg: iced::Color::from_rgb(0.10, 0.10, 0.13),
             curve_plot_bg: iced::Color::from_rgb(0.12, 0.12, 0.15),
             temp_axis_text: iced::Color::from_rgb(0.5, 0.5, 0.5),
@@ -404,18 +418,18 @@ pub fn info_row(label: &str, value: &str) -> iced::Element<'static, crate::Messa
 }
 
 pub fn mode_style(theme: &iced::Theme, selected: bool) -> iced::widget::button::Style {
+    let pal = palette(theme);
     if selected {
         iced::widget::button::Style {
-            background: Some(iced::Color::from_rgb(0.23, 0.51, 0.96).into()),
-            text_color: iced::Color::WHITE,
+            background: Some(pal.select_bg.into()),
+            text_color: pal.select_text,
             border: iced::Border::default()
                 .rounded(6)
                 .width(1)
-                .color(iced::Color::from_rgb(0.23, 0.51, 0.96)),
+                .color(pal.select_bg),
             ..iced::widget::button::Style::default()
         }
     } else {
-        let pal = palette(theme);
         iced::widget::button::Style {
             background: Some(iced::Color::TRANSPARENT.into()),
             text_color: pal.toggle_off_text,
@@ -442,14 +456,14 @@ pub fn slider_style(
     let pal = palette(theme);
     iced::widget::slider::Style {
         rail: Rail {
-            // Filled side uses curve color to match curve line.
-            backgrounds: (COLOR_CURVE.into(), pal.slider_empty.into()),
+            // Filled side follows the theme accent; Default keeps curve indigo.
+            backgrounds: (pal.slider_fill.into(), pal.slider_empty.into()),
             width: 4.0,
             border: iced::Border::default().rounded(2),
         },
         handle: Handle {
             shape: HandleShape::Circle { radius },
-            background: COLOR_CURVE.into(),
+            background: pal.slider_fill.into(),
             border_width,
             border_color: iced::Color::WHITE,
         },
@@ -512,6 +526,9 @@ mod tests {
         assert_eq!(pal.not_supported_bg, COLOR_NOT_SUPPORTED_BG);
         assert_eq!(pal.not_supported_text, COLOR_NOT_SUPPORTED_TEXT);
         assert_eq!(pal.slider_empty, COLOR_DARK);
+        assert_eq!(pal.select_bg, iced::Color::from_rgb(0.23, 0.51, 0.96));
+        assert_eq!(pal.select_text, iced::Color::WHITE);
+        assert_eq!(pal.slider_fill, COLOR_CURVE);
         assert_eq!(pal.error, iced::Color::from_rgb(0.9, 0.3, 0.3));
         assert_eq!(pal.warning, iced::Color::from_rgb(0.9, 0.6, 0.0));
         assert_eq!(pal.warning_bg, iced::Color::from_rgba(0.9, 0.6, 0.0, 0.15));
