@@ -288,31 +288,31 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Theme picker: one button per scheme, selected state highlighted.
+/// Theme picker: two rows of scheme buttons with selected highlight.
 /// Default preserves the exact long-standing look.
 fn theme_picker(app: &App) -> Element<'_, Message> {
-    let mut theme_row = row![text("Scheme:").size(FONT_BODY),]
-        .spacing(8)
-        .align_y(iced::Alignment::Center);
-    for id in crate::style::ThemeId::ALL {
-        let selected = app.theme == id;
-        theme_row = theme_row.push(
-            button(text(id.label()).size(FONT_SMALL))
-                .on_press(Message::ThemeChanged(id))
-                .style(move |theme, _status| mode_style(theme, selected)),
-        );
+    let mut rows = column![section_title(app.theme, "Theme")].spacing(8);
+    // Two rows of four: the half-width card cannot fit eight side by side.
+    for chunk in crate::style::ThemeId::ALL.chunks(4) {
+        let mut row = row![].spacing(8).align_y(iced::Alignment::Center);
+        for id in chunk {
+            let selected = app.theme == *id;
+            row = row.push(
+                button(text(id.label()).size(FONT_SMALL))
+                    .on_press(Message::ThemeChanged(*id))
+                    .style(move |theme, _status| mode_style(theme, selected)),
+            );
+        }
+        rows = rows.push(row);
     }
-    column![
-        section_title(app.theme, "Theme"),
-        theme_row,
+    rows = rows.push(
         text("Default preserves the current look.")
             .size(FONT_SMALL)
             .style(|theme| iced::widget::text::Style {
                 color: Some(palette(theme).gray),
             }),
-    ]
-    .spacing(8)
-    .into()
+    );
+    rows.into()
 }
 
 /// Self update check row: manual check button, result status, and a download

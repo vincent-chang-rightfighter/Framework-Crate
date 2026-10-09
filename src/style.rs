@@ -70,14 +70,22 @@ pub enum ThemeId {
     Light,
     Dracula,
     Nord,
+    TokyoNight,
+    GruvboxDark,
+    CatppuccinMocha,
+    Nightfly,
 }
 
 impl ThemeId {
-    pub const ALL: [ThemeId; 4] = [
+    pub const ALL: [ThemeId; 8] = [
         ThemeId::Default,
         ThemeId::Light,
         ThemeId::Dracula,
         ThemeId::Nord,
+        ThemeId::TokyoNight,
+        ThemeId::GruvboxDark,
+        ThemeId::CatppuccinMocha,
+        ThemeId::Nightfly,
     ];
 
     pub fn label(self) -> &'static str {
@@ -86,6 +94,10 @@ impl ThemeId {
             ThemeId::Light => "Light",
             ThemeId::Dracula => "Dracula",
             ThemeId::Nord => "Nord",
+            ThemeId::TokyoNight => "Tokyo Night",
+            ThemeId::GruvboxDark => "Gruvbox",
+            ThemeId::CatppuccinMocha => "Mocha",
+            ThemeId::Nightfly => "Nightfly",
         }
     }
 
@@ -95,6 +107,10 @@ impl ThemeId {
             "light" => Some(ThemeId::Light),
             "dracula" => Some(ThemeId::Dracula),
             "nord" => Some(ThemeId::Nord),
+            "tokyonight" | "tokyo night" => Some(ThemeId::TokyoNight),
+            "gruvboxdark" | "gruvbox" => Some(ThemeId::GruvboxDark),
+            "catppuccinmocha" | "mocha" | "catppuccin mocha" => Some(ThemeId::CatppuccinMocha),
+            "nightfly" => Some(ThemeId::Nightfly),
             _ => None,
         }
     }
@@ -105,6 +121,10 @@ impl ThemeId {
             ThemeId::Light => iced::Theme::Light,
             ThemeId::Dracula => iced::Theme::Dracula,
             ThemeId::Nord => iced::Theme::Nord,
+            ThemeId::TokyoNight => iced::Theme::TokyoNight,
+            ThemeId::GruvboxDark => iced::Theme::GruvboxDark,
+            ThemeId::CatppuccinMocha => iced::Theme::CatppuccinMocha,
+            ThemeId::Nightfly => iced::Theme::Nightfly,
         }
     }
 }
@@ -151,7 +171,13 @@ pub struct Palette {
 
 pub fn palette(theme: &iced::Theme) -> Palette {
     match theme {
-        iced::Theme::Light | iced::Theme::Dracula | iced::Theme::Nord => {
+        iced::Theme::Light
+        | iced::Theme::Dracula
+        | iced::Theme::Nord
+        | iced::Theme::TokyoNight
+        | iced::Theme::GruvboxDark
+        | iced::Theme::CatppuccinMocha
+        | iced::Theme::Nightfly => {
             let p = theme.palette();
             let e = theme.extended_palette();
             // Secondary text must be readable on CARD backgrounds, not on
@@ -512,7 +538,10 @@ mod tests {
         fn lum(c: iced::Color) -> f32 {
             0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
         }
-        for id in [ThemeId::Light, ThemeId::Dracula, ThemeId::Nord] {
+        for id in ThemeId::ALL {
+            if id == ThemeId::Default {
+                continue;
+            }
             let pal = palette_for(id);
             let gap = (lum(pal.gray) - lum(pal.card_bg)).abs();
             assert!(
