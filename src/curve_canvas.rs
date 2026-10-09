@@ -401,7 +401,7 @@ fn draw_curve_contents(
         f.stroke(
             &curve_path,
             iced::widget::canvas::Stroke::default()
-                .with_color(crate::style::COLOR_CURVE)
+                .with_color(pal.fan_curve)
                 .with_width(2.0),
         );
 
@@ -416,11 +416,11 @@ fn draw_curve_contents(
                     POINT_RADIUS,
                 )
             } else if drag_idx == Some(config_idx) {
-                (crate::style::COLOR_CURVE, pal.grid_base, POINT_RADIUS + 2.0)
+                (pal.fan_curve, pal.grid_base, POINT_RADIUS + 2.0)
             } else if hover_idx == Some(config_idx) {
-                (crate::style::COLOR_CURVE, pal.grid_base, POINT_RADIUS + 1.0)
+                (pal.fan_curve, pal.grid_base, POINT_RADIUS + 1.0)
             } else {
-                (crate::style::COLOR_CURVE, pal.grid_base, POINT_RADIUS)
+                (pal.fan_curve, pal.grid_base, POINT_RADIUS)
             };
             let circle = iced::widget::canvas::Path::circle(center, r);
             f.fill(&circle, fill_color);

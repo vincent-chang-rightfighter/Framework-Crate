@@ -164,6 +164,9 @@ pub struct Palette {
     /// Slider filled rail and handle. Default is the verbatim legacy curve
     /// indigo; other themes use their own primary.
     pub slider_fill: iced::Color,
+    /// Fan-curve line and draggable points. Same derivation as the slider
+    /// accent; sensor-chart curves stay fixed and do not use this slot.
+    pub fan_curve: iced::Color,
     /// Temp-chart plot panel. Default is verbatim; other themes use a panel
     /// distinct from cards.
     pub temp_plot_bg: iced::Color,
@@ -228,6 +231,7 @@ pub fn palette(theme: &iced::Theme) -> Palette {
                 select_text: e.primary.strong.text,
                 slider_empty: e.background.strong.color,
                 slider_fill: e.primary.base.color,
+                fan_curve: e.primary.base.color,
                 temp_plot_bg: e.background.weakest.color,
                 curve_plot_bg: e.background.weakest.color,
                 temp_axis_text: p.text,
@@ -272,6 +276,7 @@ pub fn palette(theme: &iced::Theme) -> Palette {
             select_text: iced::Color::WHITE,
             slider_empty: COLOR_DARK,
             slider_fill: COLOR_CURVE,
+            fan_curve: COLOR_CURVE,
             temp_plot_bg: iced::Color::from_rgb(0.10, 0.10, 0.13),
             curve_plot_bg: iced::Color::from_rgb(0.12, 0.12, 0.15),
             temp_axis_text: iced::Color::from_rgb(0.5, 0.5, 0.5),
@@ -540,6 +545,7 @@ mod tests {
         assert_eq!(pal.select_bg, iced::Color::from_rgb(0.23, 0.51, 0.96));
         assert_eq!(pal.select_text, iced::Color::WHITE);
         assert_eq!(pal.slider_fill, COLOR_CURVE);
+        assert_eq!(pal.fan_curve, COLOR_CURVE);
         assert_eq!(pal.error, iced::Color::from_rgb(0.9, 0.3, 0.3));
         assert_eq!(pal.warning, iced::Color::from_rgb(0.9, 0.6, 0.0));
         assert_eq!(pal.warning_bg, iced::Color::from_rgba(0.9, 0.6, 0.0, 0.15));
