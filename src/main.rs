@@ -360,6 +360,25 @@ fn acquire_single_instance(minimized: bool) -> Option<system_info::SingleInstanc
     }
 }
 
+fn app_title(_app: &App) -> String {
+    "Framework Crate".to_string()
+}
+
+fn app_theme(app: &App) -> iced::Theme {
+    app.theme.iced()
+}
+
+fn app_style(app: &App, theme: &iced::Theme) -> iced::theme::Style {
+    use iced::theme::Base;
+    let mut style = theme.base();
+    // Black gets a true-black window background; Oxocarbon alone is
+    // dark gray. Every other theme keeps its own default untouched.
+    if app.theme == style::ThemeId::Black {
+        style.background_color = iced::Color::BLACK;
+    }
+    style
+}
+
 fn main() {
     let minimized = std::env::args().any(|a| a == "--minimized");
     // Log the launch itself: this is the first thing a user checks when a
@@ -405,18 +424,11 @@ fn main() {
             }
         };
 
-    fn app_title(_app: &App) -> String {
-        "Framework Crate".to_string()
-    }
-
-    fn app_theme(app: &App) -> iced::Theme {
-        app.theme.iced()
-    }
-
     let run_result = iced::application(move || App::new(minimized), App::update, App::view)
         .title(app_title)
         .subscription(App::subscription)
         .theme(app_theme)
+        .style(app_style)
         .executor::<SmallTokioExecutor>()
         .antialiasing(false)
         .window(iced::window::Settings {
@@ -802,6 +814,21 @@ mod tests {
         assert!(app.show_settings);
         let _ = app.update(Message::SettingsToggled);
         assert!(!app.show_settings);
+    }
+
+    #[tokio::test]
+    async fn black_theme_uses_true_black_window() {
+        use iced::theme::Base;
+        let _guard = app_config_lock();
+        let (mut app, _) = App::new(false);
+        app.theme = style::ThemeId::Black;
+        let styled = app_style(&app, &app_theme(&app));
+        assert_eq!(styled.background_color, iced::Color::BLACK);
+        // Other themes keep iced's own default window background.
+        app.theme = style::ThemeId::Dracula;
+        let theme = app_theme(&app);
+        let styled = app_style(&app, &theme);
+        assert_eq!(styled.background_color, theme.base().background_color);
     }
 
     #[tokio::test]
