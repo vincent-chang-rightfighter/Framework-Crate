@@ -193,7 +193,7 @@ pub fn palette(theme: &iced::Theme) -> Palette {
             // near-black on dark cards. Recompute against the card color.
             let card_bg = e.background.weak.color;
             let gray = iced::theme::palette::Pair::new(card_bg, p.text).text;
-            Palette {
+            let mut pal = Palette {
                 header: p.text,
                 gray,
                 green: e.success.base.color,
@@ -233,7 +233,18 @@ pub fn palette(theme: &iced::Theme) -> Palette {
                 temp_axis_text: p.text,
                 curve_axis_text: p.text,
                 grid_base: p.text,
+            };
+            // Black goes true-black on the large surfaces; controls keep
+            // Oxocarbon grays so they stay visible, and gray is recomputed
+            // against the black card.
+            if *theme == iced::Theme::Oxocarbon {
+                pal.settings_bg = iced::Color::BLACK;
+                pal.card_bg = iced::Color::BLACK;
+                pal.temp_plot_bg = iced::Color::BLACK;
+                pal.curve_plot_bg = iced::Color::BLACK;
+                pal.gray = iced::theme::palette::Pair::new(iced::Color::BLACK, p.text).text;
             }
+            pal
         }
         _ => Palette {
             header: COLOR_HEADER,
@@ -538,6 +549,16 @@ mod tests {
         assert_eq!(pal.temp_axis_text, iced::Color::from_rgb(0.5, 0.5, 0.5));
         assert_eq!(pal.curve_axis_text, iced::Color::from_rgb(0.6, 0.6, 0.6));
         assert_eq!(pal.grid_base, iced::Color::WHITE);
+    }
+
+    #[test]
+    fn black_scheme_uses_true_black_surfaces() {
+        // Oxocarbon alone is dark gray; Black forces pure black surfaces.
+        let pal = palette_for(ThemeId::Black);
+        assert_eq!(pal.settings_bg, iced::Color::BLACK);
+        assert_eq!(pal.card_bg, iced::Color::BLACK);
+        assert_eq!(pal.temp_plot_bg, iced::Color::BLACK);
+        assert_eq!(pal.curve_plot_bg, iced::Color::BLACK);
     }
 
     #[test]
