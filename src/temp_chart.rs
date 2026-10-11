@@ -314,7 +314,7 @@ fn draw_temp_chart_contents(
     frame.fill_text(iced::widget::canvas::Text {
         content: "now".to_string(),
         position: Point::new(origin.x + plot_w, origin.y + plot_h + 4.0),
-        color: Color::from_rgb(0.5, 0.5, 0.5),
+        color: pal.temp_axis_text,
         size: iced::Pixels(8.0),
         font,
         align_x: iced::alignment::Horizontal::Right.into(),
@@ -328,7 +328,7 @@ fn draw_temp_chart_contents(
         frame.fill_text(iced::widget::canvas::Text {
             content: "Waiting for data...".to_string(),
             position: Point::new(origin.x + plot_w / 2.0, origin.y + plot_h / 2.0),
-            color: Color::from_rgb(0.4, 0.4, 0.4),
+            color: pal.gray,
             size: iced::Pixels(11.0),
             font,
             align_x: iced::alignment::Horizontal::Center.into(),

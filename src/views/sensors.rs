@@ -118,7 +118,9 @@ pub(crate) fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
                     let color = chart_colors
                         .get(idx)
                         .copied()
-                        .unwrap_or_else(|| crate::style::palette_for(app.theme).gray);
+                        // Unreachable in practice (colors tracks the sorted
+                        // list); keep the legacy fallback verbatim.
+                        .unwrap_or(iced::Color::WHITE);
                     let row = row![
                         colored_dot(color, 10.0),
                         text(name.as_str()).size(FONT_BODY).width(Length::Fill),

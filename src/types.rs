@@ -29,8 +29,9 @@ pub struct Config {
     pub battery: BatteryConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
-    /// UI theme id ("default", "light", "dracula", "nord"). Unknown values
-    /// fall back to default on load so a typo never breaks the UI.
+    /// UI theme id ("default", "light", "dracula", "nord", "black",
+    /// "gruvbox", "mocha", "nightfly"). Unknown values fall back to
+    /// default on load so a typo never breaks the UI.
     #[serde(default = "default_theme")]
     pub theme: String,
 }

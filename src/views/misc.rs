@@ -219,7 +219,7 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
 
         for card in cards.iter().filter(|c| c.name.contains("Audio")) {
             let mut row_content = row![
-                colored_dot(COLOR_GREEN, 8.0),
+                colored_dot(pal.green, 8.0),
                 text(card.name.as_str()).size(FONT_BODY),
             ]
             .align_y(iced::Alignment::Center)
