@@ -33,7 +33,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             return Flow::Next;
         };
         let ec_clone = Arc::clone(ctx.ec);
-        match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
+        match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
             ec_clone.autofanctrl()
         })
         .await
@@ -72,7 +72,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             return Flow::Next;
         };
         let ec_clone = Arc::clone(ctx.ec);
-        let _ = crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
+        let _ = crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
             ec_clone.autofanctrl()
         })
         .await;
@@ -88,7 +88,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             };
             let ec_clone = Arc::clone(ctx.ec);
             let _ =
-                crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
+                crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
                     ec_clone.autofanctrl()
                 })
                 .await;
@@ -104,7 +104,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             };
             let ec_clone = Arc::clone(ctx.ec);
             let _ =
-                crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
+                crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
                     ec_clone.autofanctrl()
                 })
                 .await;
@@ -131,7 +131,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 return Flow::Next;
             };
             let ec_clone = Arc::clone(ctx.ec);
-            match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
+            match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
                 ec_clone.autofanctrl()
             })
             .await
@@ -210,7 +210,8 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                     return Flow::Next;
                 };
                 let ec_clone = Arc::clone(ctx.ec);
-                match crate::util::spawn_blocking_with_timeout(
+                match crate::util::spawn_ec_guarded(
+                    _ec_guard,
                     crate::util::EC_IO_TIMEOUT,
                     move || ec_clone.set_fan_duty(next, Some(fan_idx)),
                 )
@@ -272,7 +273,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 return Flow::Next;
             };
             let ec_clone = Arc::clone(ctx.ec);
-            match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
+            match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
                 ec_clone.set_fan_duty(next, None)
             })
             .await

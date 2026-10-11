@@ -21,13 +21,14 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             return Flow::Stop;
         }
         let mut backoff_ec = false;
+        let mut restore_failed = false;
         {
             let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
                 warn!("EC write lock contended, skipping this cycle");
                 return Flow::Next;
             };
             let ec_clone = Arc::clone(ctx.ec);
-            match crate::util::spawn_blocking_with_timeout(crate::util::EC_IO_TIMEOUT, move || {
+            match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
                 ec_clone.autofanctrl()
             })
             .await
@@ -42,6 +43,10 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                             // so other writers are not blocked for 3s.
                             backoff_ec = true;
                         }
+                        // Do NOT record last_fan_mode below: falling through
+                        // to Done would never retry, leaving the fans stuck
+                        // at the last manual duty.
+                        restore_failed = true;
                     } else {
                         ctx.consecutive_ec_write_failures = 0;
                         ctx.last_duty_write_ms = ctx.now_ms;
@@ -56,6 +61,10 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         }
         if backoff_ec {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            return Flow::Next;
+        }
+        if restore_failed {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             return Flow::Next;
         }
         let mode_now =

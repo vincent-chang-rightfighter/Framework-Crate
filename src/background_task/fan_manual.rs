@@ -34,7 +34,8 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                         return Flow::Next;
                     };
                     let ec_clone = Arc::clone(ctx.ec);
-                    match crate::util::spawn_blocking_with_timeout(
+                    match crate::util::spawn_ec_guarded(
+                        _ec_guard,
                         crate::util::EC_IO_TIMEOUT,
                         move || ec_clone.set_fan_duty(next, None),
                     )
@@ -139,7 +140,8 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                     };
                     let ec_clone = Arc::clone(ctx.ec);
                     let fan_idx = idx as u32;
-                    match crate::util::spawn_blocking_with_timeout(
+                    match crate::util::spawn_ec_guarded(
+                        _ec_guard,
                         crate::util::EC_IO_TIMEOUT,
                         move || ec_clone.set_fan_duty(next_i, Some(fan_idx)),
                     )

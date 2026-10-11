@@ -26,6 +26,19 @@ pub fn monotonic_ms() -> u64 {
     start.elapsed().as_millis() as u64
 }
 
+/// Absolute path to an exe under %SystemRoot%\System32.
+///
+/// An elevated process must never resolve system tools from PATH: any
+/// user-writable directory earlier in PATH would win the lookup.
+/// (winget is intentionally excluded: it is a store-managed execution
+/// alias with a versioned path, not a System32 binary.)
+pub fn system32_exe(name: &str) -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    root.join("System32").join(name)
+}
+
 /// Global serialized EC write mutex to prevent out-of-order hardware writes.
 pub fn ec_write_mutex() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -71,6 +84,35 @@ where
     match tokio::time::timeout(timeout, tokio::task::spawn_blocking(task)).await {
         Ok(Ok(val)) => Ok(val),
         Ok(Err(join_err)) => Err(format!("Task panicked: {}", join_err)),
+        Err(_) => Err(format!("Hardware I/O timed out after {:?}", timeout)),
+    }
+}
+
+/// Serialized EC write with timeout. Prefer over acquire + spawn pairs.
+///
+/// The write-mutex guard moves into a detached task and is held until the
+/// blocking thread FINISHES, so a timed-out call can never be overtaken by
+/// its own retry: EC writes stay FIFO even under timeouts. The caller still
+/// gets its timeout promptly; the orphaned thread completes in the
+/// background while still holding its place in line.
+pub async fn spawn_ec_guarded<T>(
+    guard: tokio::sync::MutexGuard<'static, ()>,
+    timeout: std::time::Duration,
+    task: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _held = guard;
+        let res = tokio::task::spawn_blocking(task).await;
+        let _ = tx.send(res);
+    });
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(Ok(val))) => Ok(val),
+        Ok(Ok(Err(join_err))) => Err(format!("Task panicked: {}", join_err)),
+        Ok(Err(_)) => Err("EC writer task vanished".to_string()),
         Err(_) => Err(format!("Hardware I/O timed out after {:?}", timeout)),
     }
 }

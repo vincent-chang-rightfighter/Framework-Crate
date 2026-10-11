@@ -573,6 +573,11 @@ impl EcClient {
                 min_pct, max_pct
             ));
         }
+        // Clamp at the API boundary: callers pass validated 25-100, but a
+        // future caller must never push >100 into the EC.
+        let max_pct = max_pct.min(100);
+        let min_pct = min_pct.min(100);
+        // Same clamp preserves min <= max, so no re-check is needed.
         self.ec
             .set_charge_limit(min_pct, max_pct)
             .map_err(|e| format!("Failed to set charge limit: {:?}", e))

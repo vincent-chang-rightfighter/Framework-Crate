@@ -25,7 +25,7 @@ pub(crate) fn run_ec_task(
             if let Some(ref ec) = *ec_opt {
                 let ec = ec.clone();
                 if let Err(e) =
-                    util::spawn_blocking_with_timeout(util::EC_IO_TIMEOUT, move || f(ec)).await
+                    util::spawn_ec_guarded(_guard, util::EC_IO_TIMEOUT, move || f(ec)).await
                 {
                     warn!("EC task failed: {}", e);
                 }
@@ -61,7 +61,7 @@ pub(crate) fn run_ec_task_result(
             let ec_opt = { util::read_lock(&ec_client) };
             let res = if let Some(ref ec) = *ec_opt {
                 let ec = ec.clone();
-                match util::spawn_blocking_with_timeout(util::EC_IO_TIMEOUT, move || f(ec)).await {
+                match util::spawn_ec_guarded(_guard, util::EC_IO_TIMEOUT, move || f(ec)).await {
                     Ok(r) => r,
                     Err(e) => Err(e),
                 }

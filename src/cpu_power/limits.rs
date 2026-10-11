@@ -328,8 +328,34 @@ struct LimitTarget<'a> {
     write_failed: &'static str,
 }
 
+/// Rejects non-finite or negative limit values before encoding.
+///
+/// `NaN as u32` is 0, so without this gate a NaN would encode as a 0W
+/// enabled limit and hard-throttle the CPU. Kept pure and unit-tested;
+/// the UI and BIOS-restore paths validate independently, this is the
+/// last line of defense at the write boundary.
+fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
+    for (name, v) in [
+        ("power_unit", params.power_unit),
+        ("time_unit", params.time_unit),
+        ("PL1 watts", params.pl1_watts),
+        ("PL2 watts", params.pl2_watts),
+        ("PL1 time", params.pl1_time_s),
+        ("PL2 time", params.pl2_time_s),
+    ] {
+        if !v.is_finite() {
+            return Err(format!("invalid {name}: not finite ({v})"));
+        }
+        if v < 0.0 {
+            return Err(format!("invalid {name}: negative ({v})"));
+        }
+    }
+    Ok(())
+}
+
 /// Encodes PL1/PL2, writes them to `target`, then verifies the write landed.
 fn write_power_limits(target: &LimitTarget<'_>, params: &PowerLimitParams) -> Result<(), String> {
+    validate_limit_params(params)?;
     if params.power_unit <= 0.0 || params.time_unit <= 0.0 {
         return Err("invalid RAPL units (power_unit or time_unit is zero)".to_string());
     }
@@ -528,6 +554,22 @@ mod tests {
             power_unit: POWER_UNIT,
             time_unit: TIME_UNIT,
         }
+    }
+
+    #[test]
+    fn validate_limit_params_rejects_non_finite_and_negative() {
+        assert!(validate_limit_params(&params(30.0, 60.0)).is_ok());
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let mut p = params(30.0, 60.0);
+            p.pl1_watts = bad;
+            assert!(validate_limit_params(&p).is_err(), "pl1={bad}");
+            let mut p = params(30.0, 60.0);
+            p.pl2_time_s = bad;
+            assert!(validate_limit_params(&p).is_err(), "pl2_time={bad}");
+        }
+        let mut p = params(30.0, 60.0);
+        p.power_unit = f64::NAN;
+        assert!(validate_limit_params(&p).is_err());
     }
 
     /// Encodes a PL1/PL2 pair the way the write path does.
