@@ -169,6 +169,11 @@ impl Config {
         for duty in &mut self.fan.per_fan_duty {
             *duty = (*duty).clamp(DUTY_PCT_MIN, DUTY_PCT_MAX);
         }
+        // Bound the vec: the manual loop iterates it every cycle (skipping
+        // past fan_count), so a crafted config would spin, not just sit.
+        // Real machines have a handful of fans; 8 leaves headroom.
+        const MAX_PER_FAN_ENTRIES: usize = 8;
+        self.fan.per_fan_duty.truncate(MAX_PER_FAN_ENTRIES);
 
         if let Some(ref mut limit) = self.battery.charge_limit_max_pct {
             limit.value = limit.value.clamp(
@@ -518,6 +523,14 @@ mod tests {
         c.fan.manual = Some(ManualConfig { duty_pct: 60 });
         c.validate();
         assert_eq!(c.fan.manual.as_ref().unwrap().duty_pct, 60);
+    }
+
+    #[test]
+    fn validate_per_fan_duty_truncates_long_vec() {
+        let mut c = Config::default();
+        c.fan.per_fan_duty = vec![50; 100];
+        c.validate();
+        assert_eq!(c.fan.per_fan_duty.len(), 8);
     }
 
     #[test]
