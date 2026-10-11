@@ -366,7 +366,7 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
             ps_escape(&zip_tmp.display().to_string()),
             ps_escape(&staging.display().to_string())
         );
-        let ps_out = std::process::Command::new(crate::util::system32_exe("powershell.exe"))
+        let ps_out = std::process::Command::new(crate::util::powershell_exe())
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
             .creation_flags(0x08000000)
             .output()
@@ -488,7 +488,7 @@ pub fn download_and_extract_modules() -> Result<(), String> {
         zip = ps_escape(&zip_tmp.display().to_string()),
     );
 
-    let output = std::process::Command::new(crate::util::system32_exe("powershell.exe"))
+    let output = std::process::Command::new(crate::util::powershell_exe())
         .args([
             "-NoProfile",
             "-ExecutionPolicy",

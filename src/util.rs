@@ -39,6 +39,14 @@ pub fn system32_exe(name: &str) -> std::path::PathBuf {
     root.join("System32").join(name)
 }
 
+/// Absolute path to Windows PowerShell 5.1. Note it does NOT live in the
+/// System32 root but in WindowsPowerShell\v1.0: pinning a bare
+/// "powershell.exe" under System32 breaks the call, and fail-closed
+/// checks (e.g. Authenticode) then refuse to run at all.
+pub fn powershell_exe() -> std::path::PathBuf {
+    system32_exe(r"WindowsPowerShell\v1.0\powershell.exe")
+}
+
 /// Global serialized EC write mutex to prevent out-of-order hardware writes.
 pub fn ec_write_mutex() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -125,6 +133,17 @@ mod tests {
     fn current_time_ms_returns_positive_value() {
         let ts = current_time_ms();
         assert!(ts > 0);
+    }
+
+    #[test]
+    fn pinned_system_tools_exist() {
+        // Guards the System32 pinning: a wrong subpath fails at runtime
+        // (powershell.exe is NOT in the System32 root, which once broke
+        // the Authenticode check and fail-closed refused the PawnIO DLL).
+        for name in ["schtasks.exe", "curl.exe", "tar.exe"] {
+            assert!(system32_exe(name).exists(), "{name} missing");
+        }
+        assert!(powershell_exe().exists(), "powershell missing");
     }
 
     #[test]

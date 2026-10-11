@@ -363,7 +363,7 @@ fn cached_authenticode_status(p: &std::path::Path) -> Result<(), &'static str> {
 }
 
 fn check_authenticode(p: &std::path::Path) -> Result<(), &'static str> {
-    let out = std::process::Command::new(crate::util::system32_exe("powershell.exe"))
+    let out = std::process::Command::new(crate::util::powershell_exe())
         .args([
             "-NoProfile",
             "-Command",
