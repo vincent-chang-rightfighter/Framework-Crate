@@ -15,7 +15,7 @@ pub const RELEASES_URL: &str =
 /// Fetches the latest release tag (e.g. "v0.6.2") via curl.exe, like the
 /// Modules download path. Returns None when unreachable.
 pub fn fetch_latest_tag() -> Option<String> {
-    let out = std::process::Command::new("curl.exe")
+    let out = std::process::Command::new(crate::util::system32_exe("curl.exe"))
         .args([
             "-s",
             "-L",

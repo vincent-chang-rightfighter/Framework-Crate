@@ -122,7 +122,7 @@ fn invalidate_modules_version() {
 /// Tries to fetch latest release asset download URL directly via GitHub API.
 /// Returns Some(url) if API succeeds, else None to use version-constructed URL.
 pub(super) fn latest_modules_download_url() -> Option<String> {
-    let out = std::process::Command::new("curl.exe")
+    let out = std::process::Command::new(crate::util::system32_exe("curl.exe"))
         .args([
             "-s",
             "-L",
@@ -319,7 +319,7 @@ fn validate_staging(staging: &std::path::Path) -> Result<(), String> {
 /// promotes only the two expected verified bins into `dir`.
 fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Result<(), String> {
     // 1. Pre-list members and reject traversal before extracting anything.
-    let list_out = std::process::Command::new("tar.exe")
+    let list_out = std::process::Command::new(crate::util::system32_exe("tar.exe"))
         .args(["-tf", &zip_tmp.display().to_string()])
         .creation_flags(0x08000000)
         .output()
@@ -350,7 +350,7 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
         let _ = std::fs::remove_file(zip);
         let _ = std::fs::remove_dir_all(staging);
     };
-    let tar_out = std::process::Command::new("tar.exe")
+    let tar_out = std::process::Command::new(crate::util::system32_exe("tar.exe"))
         .args([
             "-xf",
             &zip_tmp.display().to_string(),
@@ -366,7 +366,7 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
             ps_escape(&zip_tmp.display().to_string()),
             ps_escape(&staging.display().to_string())
         );
-        let ps_out = std::process::Command::new("powershell")
+        let ps_out = std::process::Command::new(crate::util::system32_exe("powershell.exe"))
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
             .creation_flags(0x08000000)
             .output()
@@ -488,7 +488,7 @@ pub fn download_and_extract_modules() -> Result<(), String> {
         zip = ps_escape(&zip_tmp.display().to_string()),
     );
 
-    let output = std::process::Command::new("powershell")
+    let output = std::process::Command::new(crate::util::system32_exe("powershell.exe"))
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -559,7 +559,7 @@ fn try_curl_download(url: &str, dir: &std::path::Path) -> Result<(), String> {
     }
     // Refuse oversized responses up front via Content-Length.
     let max_size = MAX_MODULES_ZIP_BYTES.to_string();
-    let curl_output = std::process::Command::new("curl.exe")
+    let curl_output = std::process::Command::new(crate::util::system32_exe("curl.exe"))
         .args([
             "-L",
             "--fail",

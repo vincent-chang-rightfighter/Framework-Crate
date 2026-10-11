@@ -645,7 +645,7 @@ fn schtasks_output(args: &[&str]) -> Result<std::process::Output, String> {
     use std::process::Stdio;
     // Own the arguments so nothing borrows the caller across the wait below.
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let mut cmd = std::process::Command::new("schtasks");
+    let mut cmd = std::process::Command::new(crate::util::system32_exe("schtasks.exe"));
     cmd.args(&args);
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());

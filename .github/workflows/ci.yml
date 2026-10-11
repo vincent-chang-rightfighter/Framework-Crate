@@ -50,6 +50,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Audit dependencies
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
       - name: Build release binary
         run: cargo build --release --verbose
 

@@ -100,7 +100,9 @@ pub(crate) fn view_battery_verbose(
         || battery.battery_type.is_some()
         || battery.remaining_capacity_wh.is_some()
         || battery.design_capacity_wh.is_some()
-        || battery.charger_temp_c.is_some();
+        || battery.charger_temp_c.is_some()
+        || battery.charger_voltage_mv.is_some()
+        || battery.charger_current_ma.is_some();
 
     if !has_verbose {
         return None;
