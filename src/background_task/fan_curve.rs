@@ -61,8 +61,11 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         }
         return Flow::Next;
     }
-    let thermal_clone = read_lock(&ctx.state.thermal.data);
-    let Some(ref thermal) = *thermal_clone else {
+    // Snapshot the sample and drop the lock: holding it across the EC
+    // awaits below blocks the thermal writer. ThermalData clones cheap
+    // (temps is already an Arc).
+    let thermal = read_lock(&ctx.state.thermal.data).as_ref().clone();
+    let Some(ref thermal) = thermal else {
         // No sample yet but not stale-timed out above? immediate handover.
         if shutdown_requested(ctx.state) {
             return Flow::Stop;
@@ -165,14 +168,14 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         return Flow::Next;
     }
     let control_temp = crate::types::curve_control_temp(&thermal.temps, &ctx.curve_sensors);
-    let full_pts_arc = read_lock(&ctx.state.fan.curve_full_points);
-    let full_pts: &[[u32; 2]] = &full_pts_arc;
+    // Snapshot the points and drop the lock before any EC await below.
+    let full_pts: Vec<[u32; 2]> = read_lock(&ctx.state.fan.curve_full_points).as_ref().clone();
     let mut next = ctx.curve_stepper.next(
         control_temp,
         hyst,
         rate,
         ctx.curve_rate_limit_down,
-        full_pts,
+        &full_pts,
     );
     // Even when the stepper has converged, periodically
     // re-assert the last duty. This recovers from a

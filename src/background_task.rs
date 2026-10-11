@@ -996,13 +996,40 @@ pub fn spawn(state: AppState) {
                     }
                 }
             });
-            if let Err(e) = handle.await {
+            if let Some(e) = handle.await.err() {
                 consecutive_failures += 1;
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                    warn!(
-                        "Background task failed {} times consecutively, giving up",
-                        consecutive_failures
-                    );
+                    // Hand the fans back to firmware before dying: without
+                    // the loop nothing re-asserts duties, so a stuck manual
+                    // duty would persist indefinitely with no UI to fix it.
+                    let ec_opt = { read_lock(&state.system.ec_client) };
+                    if let Some(ec) = ec_opt.as_ref().as_ref() {
+                        let ec_clone = Arc::clone(ec);
+                        match crate::util::spawn_blocking_with_timeout(
+                            crate::util::EC_IO_TIMEOUT,
+                            move || ec_clone.autofanctrl(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => warn!(
+                                "Background task failed {} times consecutively, giving up; fans returned to firmware control",
+                                consecutive_failures
+                            ),
+                            Ok(Err(e)) => warn!(
+                                "Background task failed {} times consecutively, giving up; firmware handover also failed ({}): fans stuck at last duty",
+                                consecutive_failures, e
+                            ),
+                            Err(e) => warn!(
+                                "Background task failed {} times consecutively, giving up; firmware handover timed out ({}): fans stuck at last duty",
+                                consecutive_failures, e
+                            ),
+                        }
+                    } else {
+                        warn!(
+                            "Background task failed {} times consecutively, giving up with no EC client; fans stuck at last duty",
+                            consecutive_failures
+                        );
+                    }
                     break;
                 }
                 // Exponential backoff: 3s, 6s, 12s, 24s, ... capped at 60s

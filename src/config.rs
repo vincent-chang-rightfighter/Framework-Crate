@@ -49,9 +49,9 @@ pub fn config_path() -> Result<PathBuf, String> {
                 config_dir.display()
             ));
         }
-        if meta.file_type().is_symlink() {
+        if meta.file_type().is_symlink() || dir_has_reparse_point(&config_dir) {
             return Err(format!(
-                "config directory is a symlink, refusing: {}",
+                "config directory is a symlink or junction, refusing: {}",
                 config_dir.display()
             ));
         }
@@ -82,7 +82,42 @@ fn validate_config_dir(path: &std::path::Path) -> Result<(), String> {
             path.display()
         ));
     }
+    // Reject UNC paths: a network config dir leaks NTLM auth and lives
+    // outside every local ACL check below.
+    if path.components().any(|c| {
+        matches!(
+            c,
+            Component::Prefix(p)
+                if matches!(
+                    p.kind(),
+                    std::path::Prefix::UNC(..) | std::path::Prefix::VerbatimUNC(..)
+                )
+        )
+    }) {
+        return Err(format!(
+            "FRAMEWORK_CONTROL_CONFIG_DIR must not be a UNC path: {}",
+            path.display()
+        ));
+    }
     Ok(())
+}
+
+/// True when the path is a symlink or junction: both carry
+/// FILE_ATTRIBUTE_REPARSE_POINT, while Rust's is_symlink misses junctions.
+fn dir_has_reparse_point(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+    };
+    use windows_sys::core::PCWSTR;
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: null-terminated path buffer.
+    let attrs = unsafe { GetFileAttributesW(wide.as_ptr() as PCWSTR) };
+    attrs != INVALID_FILE_ATTRIBUTES && attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 fn default_config_dir() -> PathBuf {
@@ -110,33 +145,40 @@ const WORLD_WRITE_MASK: u32 = {
     FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | WRITE_DAC | WRITE_OWNER
 };
 
-/// Checks the file DACL for an allow-ACE granting write-like rights to the
-/// Everyone SID (S-1-1-0). Returns false on any query failure (fail-open:
-/// inspection errors must not block saves).
+/// Checks the file DACL for an allow-ACE granting write-like rights to a
+/// broad SID (Everyone, Users, Authenticated Users). Returns false on any
+/// query failure (fail-open: inspection errors must not block saves).
 fn file_has_world_write_ace(path: &std::path::Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION, PSID,
-        SECURITY_MAX_SID_SIZE, WinWorldSid,
+        SECURITY_MAX_SID_SIZE, WinAuthenticatedUserSid, WinBuiltinUsersSid, WinWorldSid,
     };
     use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
     use windows_sys::core::PCWSTR;
 
-    // Everyone SID for comparison.
-    let mut everyone = [0u8; SECURITY_MAX_SID_SIZE as usize];
-    let mut everyone_len = everyone.len() as u32;
-    // SAFETY: buffer is SECURITY_MAX_SID_SIZE bytes, the documented maximum.
-    let ok = unsafe {
-        CreateWellKnownSid(
-            WinWorldSid,
-            std::ptr::null_mut(),
-            everyone.as_mut_ptr() as PSID,
-            &mut everyone_len,
-        )
-    };
-    if ok == 0 {
+    // SIDs whose write access is dangerous: Everyone plus the broad
+    // built-in groups a per-user admin file must never grant.
+    let mut watched: Vec<(Vec<u8>, usize)> = Vec::new();
+    for well_known in [WinWorldSid, WinBuiltinUsersSid, WinAuthenticatedUserSid] {
+        let mut buf = [0u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut len = buf.len() as u32;
+        // SAFETY: buffer is SECURITY_MAX_SID_SIZE bytes, the documented maximum.
+        let ok = unsafe {
+            CreateWellKnownSid(
+                well_known,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr() as PSID,
+                &mut len,
+            )
+        };
+        if ok != 0 {
+            watched.push((buf.to_vec(), len as usize));
+        }
+    }
+    if watched.is_empty() {
         return false;
     }
 
@@ -189,11 +231,10 @@ fn file_has_world_write_ace(path: &std::path::Path) -> bool {
                 let sid = &ace.SidStart as *const u32 as *const u8;
                 // SID length is 8 header bytes plus 4 per sub-authority.
                 let sid_len = 8 + 4 * (*sid.add(1) as usize);
-                if sid_len == everyone_len as usize
-                    && core::slice::from_raw_parts(sid, sid_len)
-                        == &everyone[..everyone_len as usize]
-                    && ace.Mask & WORLD_WRITE_MASK != 0
-                {
+                let watched_hit = watched.iter().any(|(buf, len)| {
+                    sid_len == *len && core::slice::from_raw_parts(sid, sid_len) == &buf[..*len]
+                });
+                if watched_hit && ace.Mask & WORLD_WRITE_MASK != 0 {
                     hit = true;
                     break;
                 }
@@ -650,6 +691,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         (dir, path)
+    }
+
+    #[test]
+    fn world_write_detects_builtin_users_ace() {
+        // Same end-to-end as above but with the Users group ACE.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("acl-users.toml");
+        std::fs::write(&path, "x = 1").unwrap();
+        let grant = std::process::Command::new("icacls")
+            .arg(&path)
+            .args(["/grant", "Users:W"])
+            .output();
+        let Ok(out) = grant else { return };
+        if !out.status.success() {
+            return;
+        }
+        assert!(
+            file_has_world_write_ace(&path),
+            "Users write ACE must be detected"
+        );
+    }
+
+    #[test]
+    fn validate_config_dir_rejects_unc() {
+        assert!(validate_config_dir(std::path::Path::new(r"\\server\share\cfg")).is_err());
+        assert!(validate_config_dir(std::path::Path::new(r"C:\cfg")).is_ok());
+    }
+
+    #[test]
+    fn reparse_check_passes_plain_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!dir_has_reparse_point(dir.path()));
     }
 
     #[test]
