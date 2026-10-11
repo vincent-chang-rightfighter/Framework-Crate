@@ -180,6 +180,12 @@ pub struct Palette {
     pub grid_base: iced::Color,
 }
 
+/// Secondary text: primary text dimmed so subtitles sit below headers.
+/// The contrast regression test composites this alpha before measuring.
+fn dim_text(c: iced::Color) -> iced::Color {
+    iced::Color { a: 0.7, ..c }
+}
+
 pub fn palette(theme: &iced::Theme) -> Palette {
     match theme {
         iced::Theme::Light
@@ -193,9 +199,10 @@ pub fn palette(theme: &iced::Theme) -> Palette {
             let e = theme.extended_palette();
             // Secondary text must be readable on CARD backgrounds, not on
             // some other swatch: borrowing secondary.weak.text renders
-            // near-black on dark cards. Recompute against the card color.
+            // near-black on dark cards. Recompute against the card color,
+            // then dim so it sits below headers.
             let card_bg = e.background.weak.color;
-            let gray = iced::theme::palette::Pair::new(card_bg, p.text).text;
+            let gray = dim_text(iced::theme::palette::Pair::new(card_bg, p.text).text);
             let mut pal = Palette {
                 header: p.text,
                 gray,
@@ -246,16 +253,19 @@ pub fn palette(theme: &iced::Theme) -> Palette {
                 pal.card_bg = iced::Color::BLACK;
                 pal.temp_plot_bg = iced::Color::BLACK;
                 pal.curve_plot_bg = iced::Color::BLACK;
-                pal.gray = iced::theme::palette::Pair::new(iced::Color::BLACK, p.text).text;
+                pal.gray =
+                    dim_text(iced::theme::palette::Pair::new(iced::Color::BLACK, p.text).text);
             }
             // Gruvbox's signature accent is orange; iced's built-in primary
             // is aqua. Bright orange needs dark text to stay readable.
+            // Green takes the bright variant; iced's olive reads muddy.
             if *theme == iced::Theme::GruvboxDark {
                 let orange = iced::Color::from_rgb8(0xFE, 0x80, 0x19);
                 pal.select_bg = orange;
                 pal.select_text = iced::Color::BLACK;
                 pal.slider_fill = orange;
                 pal.fan_curve = orange;
+                pal.green = iced::Color::from_rgb8(0xB8, 0xBB, 0x26);
             }
             pal
         }
@@ -575,6 +585,7 @@ mod tests {
         assert_eq!(pal.select_text, iced::Color::BLACK);
         assert_eq!(pal.slider_fill, orange);
         assert_eq!(pal.fan_curve, orange);
+        assert_eq!(pal.green, iced::Color::from_rgb8(0xB8, 0xBB, 0x26));
     }
 
     #[test]
@@ -599,6 +610,7 @@ mod tests {
     fn gray_contrasts_with_card_in_every_theme() {
         // Regression: borrowing secondary.weak.text rendered near-black on
         // dark cards. Gray must always stand clearly off the surface behind it.
+        // Composite the dim alpha first: blended text leans toward the card.
         fn lum(c: iced::Color) -> f32 {
             0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
         }
@@ -607,11 +619,31 @@ mod tests {
                 continue;
             }
             let pal = palette_for(id);
-            let gap = (lum(pal.gray) - lum(pal.card_bg)).abs();
+            let eff = iced::Color {
+                r: pal.gray.r * pal.gray.a + pal.card_bg.r * (1.0 - pal.gray.a),
+                g: pal.gray.g * pal.gray.a + pal.card_bg.g * (1.0 - pal.gray.a),
+                b: pal.gray.b * pal.gray.a + pal.card_bg.b * (1.0 - pal.gray.a),
+                a: 1.0,
+            };
+            let gap = (lum(eff) - lum(pal.card_bg)).abs();
             assert!(
                 gap > 0.3,
                 "{id:?}: gray too close to card bg (gap {gap:.2})"
             );
+        }
+    }
+
+    #[test]
+    fn secondary_text_is_dimmed_outside_default() {
+        // Subtitles sit below headers everywhere except Default, which is
+        // frozen verbatim.
+        for id in ThemeId::ALL {
+            let pal = palette_for(id);
+            if id == ThemeId::Default {
+                assert_eq!(pal.gray.a, 1.0);
+            } else {
+                assert_eq!(pal.gray.a, 0.7, "{id:?}: gray should be dimmed");
+            }
         }
     }
 }
