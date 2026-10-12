@@ -16,6 +16,21 @@ fn section_title(id: crate::style::ThemeId, label: &str) -> Element<'_, Message>
         .into()
 }
 
+/// Two-column band: one shared card background forces both sides onto a
+/// single bottom edge. Independent cards can never align with dynamic
+/// content (iced flex cannot stretch shrink-wrapped siblings), so the
+/// pair shares a band instead of two cards.
+fn two_col<'a>(left: Element<'a, Message>, right: Element<'a, Message>) -> Element<'a, Message> {
+    card(
+        row![
+            container(left).width(Length::FillPortion(1)),
+            container(right).width(Length::FillPortion(1)),
+        ]
+        .spacing(16)
+        .into(),
+    )
+}
+
 pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     let versions = read_lock(&app.state.system.versions);
 
@@ -159,17 +174,12 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         .align_y(iced::Alignment::Center),
     ]
     .spacing(8);
-    content = content.push(
-        row![
-            card(
-                column![section_title(app.theme, "Device"), hw_content]
-                    .spacing(4)
-                    .into()
-            ),
-            card(diagnostics.into()),
-        ]
-        .spacing(8),
-    );
+    content = content.push(two_col(
+        column![section_title(app.theme, "Device"), hw_content]
+            .spacing(4)
+            .into(),
+        diagnostics.into(),
+    ));
     let mut updates = column![
         section_title(app.theme, "Updates"),
         update_check_row(app),
@@ -198,17 +208,14 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
             }
         }));
     }
-    content = content.push(
-        row![
-            card(
-                column![section_title(app.theme, "Software"), sw_content]
-                    .spacing(4)
-                    .into()
-            ),
-            column![card(theme_picker(app)), card(updates.into()),].spacing(8),
-        ]
-        .spacing(8),
-    );
+    content = content.push(two_col(
+        column![section_title(app.theme, "Software"), sw_content]
+            .spacing(4)
+            .into(),
+        column![theme_picker(app), Element::from(updates)]
+            .spacing(8)
+            .into(),
+    ));
     if let Some(ref err) = app.cpu_power_error {
         content = content.push(card(
             text(err.as_str())
