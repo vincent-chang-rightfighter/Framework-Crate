@@ -201,13 +201,17 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
             }
         }));
     }
-    content = content.push(card(
-        column![section_title(app.theme, "Software"), sw_content]
-            .spacing(4)
-            .into(),
-    ));
-    content = content.push(card(theme_picker(app)));
-    content = content.push(card(Element::from(updates)));
+    content = content.push(
+        row![
+            card(
+                column![section_title(app.theme, "Software"), sw_content]
+                    .spacing(4)
+                    .into()
+            ),
+            column![card(theme_picker(app)), card(Element::from(updates)),].spacing(8),
+        ]
+        .spacing(8),
+    );
     if let Some(ref err) = app.cpu_power_error {
         content = content.push(card(
             text(err.as_str())
