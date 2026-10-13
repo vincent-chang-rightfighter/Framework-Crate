@@ -9,7 +9,7 @@ use iced::{Element, Length};
 /// them) to the Software card height. Independent cards cannot stretch to
 /// match (flex limitation inside the scrollable), so match with a fixed
 /// pad; retune if section contents change shape.
-const THEME_UPDATES_MATCH_PAD: f32 = 64.0;
+const THEME_UPDATES_MATCH_PAD: f32 = 12.0;
 
 /// About page reads `App` live; modal and infrequent so it bypasses snapshot cache.
 /// Section header matching the CPU Power card style.
