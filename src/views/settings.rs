@@ -5,6 +5,12 @@ use crate::util::read_lock;
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length};
 
+/// Bottom pad tuning the Theme+Updates column (cards plus the gap between
+/// them) to the Software card height. Independent cards cannot stretch to
+/// match (flex limitation inside the scrollable), so match with a fixed
+/// pad; retune if section contents change shape.
+const THEME_UPDATES_MATCH_PAD: f32 = 64.0;
+
 /// About page reads `App` live; modal and infrequent so it bypasses snapshot cache.
 /// Section header matching the CPU Power card style.
 fn section_title(id: crate::style::ThemeId, label: &str) -> Element<'_, Message> {
@@ -208,7 +214,12 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
                     .spacing(4)
                     .into()
             ),
-            column![card(theme_picker(app)), card(Element::from(updates)),].spacing(8),
+            column![
+                card(theme_picker(app)),
+                card(Element::from(updates)),
+                space::vertical().height(THEME_UPDATES_MATCH_PAD),
+            ]
+            .spacing(8),
         ]
         .spacing(8),
     );
