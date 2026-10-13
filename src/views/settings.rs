@@ -159,14 +159,20 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         .align_y(iced::Alignment::Center),
     ]
     .spacing(8);
-    // Single full-width column: independent cards with dynamic content
-    // cannot share a bottom edge side by side, so stack them instead.
-    content = content.push(card(
-        column![section_title(app.theme, "Device"), hw_content]
-            .spacing(4)
-            .into(),
-    ));
-    content = content.push(card(diagnostics.into()));
+    // Device and Diagnostics stay side by side as independent cards;
+    // uneven bottoms are inherent to dynamic content, accepted here
+    // for adjacency.
+    content = content.push(
+        row![
+            card(
+                column![section_title(app.theme, "Device"), hw_content]
+                    .spacing(4)
+                    .into()
+            ),
+            card(diagnostics.into()),
+        ]
+        .spacing(8),
+    );
     let mut updates = column![
         section_title(app.theme, "Updates"),
         update_check_row(app),
