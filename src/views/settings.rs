@@ -5,11 +5,13 @@ use crate::util::read_lock;
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length};
 
-/// Bottom pad for the Theme+Updates column. Independent cards cannot
-/// stretch to match (flex limitation inside the scrollable); a constant
-/// can only chase a moving target, so keep it zero unless a systematic
-/// offset is confirmed across themes and content states.
-const THEME_UPDATES_MATCH_PAD: f32 = 0.0;
+/// Bottom pad inside the Software card so its bottom edge meets the
+/// Theme+Updates column. Measured steady-state (Paint coordinates):
+/// right column ran 54px long with a 12px right pad, i.e. naturally 42px
+/// longer; 42 minus the 4px column spacing gives 38. Independent cards
+/// cannot stretch (flex limitation inside the scrollable), so match with
+/// a constant tuned to the steady state (versions loaded, no error rows).
+const SOFTWARE_MATCH_PAD: f32 = 38.0;
 
 /// About page reads `App` live; modal and infrequent so it bypasses snapshot cache.
 /// Section header matching the CPU Power card style.
@@ -210,16 +212,15 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     content = content.push(
         row![
             card(
-                column![section_title(app.theme, "Software"), sw_content]
-                    .spacing(4)
-                    .into()
+                column![
+                    section_title(app.theme, "Software"),
+                    sw_content,
+                    space::vertical().height(SOFTWARE_MATCH_PAD),
+                ]
+                .spacing(4)
+                .into()
             ),
-            column![
-                card(theme_picker(app)),
-                card(Element::from(updates)),
-                space::vertical().height(THEME_UPDATES_MATCH_PAD),
-            ]
-            .spacing(8),
+            column![card(theme_picker(app)), card(Element::from(updates)),].spacing(8),
         ]
         .spacing(8),
     );
