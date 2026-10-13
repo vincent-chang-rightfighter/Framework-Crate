@@ -5,11 +5,11 @@ use crate::util::read_lock;
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length};
 
-/// Bottom pad tuning the Theme+Updates column (cards plus the gap between
-/// them) to the Software card height. Independent cards cannot stretch to
-/// match (flex limitation inside the scrollable), so match with a fixed
-/// pad; retune if section contents change shape.
-const THEME_UPDATES_MATCH_PAD: f32 = 12.0;
+/// Bottom pad for the Theme+Updates column. Independent cards cannot
+/// stretch to match (flex limitation inside the scrollable); a constant
+/// can only chase a moving target, so keep it zero unless a systematic
+/// offset is confirmed across themes and content states.
+const THEME_UPDATES_MATCH_PAD: f32 = 0.0;
 
 /// About page reads `App` live; modal and infrequent so it bypasses snapshot cache.
 /// Section header matching the CPU Power card style.
