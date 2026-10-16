@@ -258,7 +258,7 @@ pub(crate) fn warn_if_world_writable(path: &std::path::Path) {
         }
         if file_has_world_write_ace(path) {
             tracing::warn!(
-                "Config file {} grants write access to Everyone — consider removing the permissive ACE",
+                "Config file {} grants write access to a broad group — consider removing the permissive ACE",
                 path.display()
             );
         } else {
@@ -280,11 +280,11 @@ pub(crate) fn harden_file_acl(path: &std::path::Path) {
     }
     match revoke_everyone_write(path) {
         Ok(true) => tracing::warn!(
-            "Removed permissive Everyone write ACE from {}",
+            "Removed permissive broad-group write ACEs from {}",
             path.display()
         ),
         Ok(false) => tracing::warn!(
-            "Config file {} has an inherited Everyone write ACE, leaving it (parent dir out of scope)",
+            "Config file {} has an inherited broad-group write ACE, leaving it (parent dir out of scope)",
             path.display()
         ),
         Err(e) => tracing::warn!(
@@ -295,8 +295,8 @@ pub(crate) fn harden_file_acl(path: &std::path::Path) {
     }
 }
 
-/// Revokes Everyone's write-like rights on `path` via an explicit REVOKE
-/// entry, then re-verifies. Only explicit ACEs are touched: inherited ones
+/// Revokes broad-group write-like rights on `path` via explicit REVOKE
+/// entries, then re-verifies. Only explicit ACEs are touched: inherited ones
 /// belong to the parent directory and are reported, not modified.
 /// Returns Ok(true) when the file verifies clean afterwards.
 fn revoke_everyone_write(path: &std::path::Path) -> Result<bool, &'static str> {
@@ -309,25 +309,35 @@ fn revoke_everyone_write(path: &std::path::Path) -> Result<bool, &'static str> {
     };
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
-        INHERITED_ACE, NO_INHERITANCE, PSID, SECURITY_MAX_SID_SIZE, WinWorldSid,
+        INHERITED_ACE, NO_INHERITANCE, PSID, SECURITY_MAX_SID_SIZE, WinAuthenticatedUserSid,
+        WinBuiltinUsersSid, WinWorldSid,
     };
     use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
     use windows_sys::core::{PCWSTR, PWSTR};
 
-    // Everyone SID for the trustee and for comparison.
-    let mut everyone = [0u8; SECURITY_MAX_SID_SIZE as usize];
-    let mut everyone_len = everyone.len() as u32;
-    // SAFETY: buffer is SECURITY_MAX_SID_SIZE bytes, the documented maximum.
-    let ok = unsafe {
-        CreateWellKnownSid(
-            WinWorldSid,
-            std::ptr::null_mut(),
-            everyone.as_mut_ptr() as PSID,
-            &mut everyone_len,
-        )
-    };
-    if ok == 0 {
-        return Err("could not build Everyone SID");
+    // Scrub the same broad SIDs the detector watches. Skipping e.g. Users
+    // here would leave the file writable while detection keeps firing.
+    let mut sid_bufs: Vec<Vec<u8>> = Vec::new();
+    let mut sid_lens: Vec<usize> = Vec::new();
+    for well_known in [WinWorldSid, WinBuiltinUsersSid, WinAuthenticatedUserSid] {
+        let mut buf = [0u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut len = buf.len() as u32;
+        // SAFETY: buffer is SECURITY_MAX_SID_SIZE bytes, the documented maximum.
+        let ok = unsafe {
+            CreateWellKnownSid(
+                well_known,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr() as PSID,
+                &mut len,
+            )
+        };
+        if ok != 0 {
+            sid_lens.push(len as usize);
+            sid_bufs.push(buf.to_vec());
+        }
+    }
+    if sid_bufs.is_empty() {
+        return Err("could not build well-known SIDs");
     }
 
     let wide: Vec<u16> = path
@@ -374,9 +384,10 @@ fn revoke_everyone_write(path: &std::path::Path) -> Result<bool, &'static str> {
                 let ace = &*((dacl as *const u8).add(offset) as *const ACCESS_ALLOWED_ACE);
                 let sid = &ace.SidStart as *const u32 as *const u8;
                 let sid_len = 8 + 4 * (*sid.add(1) as usize);
-                if sid_len == everyone_len as usize
-                    && core::slice::from_raw_parts(sid, sid_len)
-                        == &everyone[..everyone_len as usize]
+                let watched = sid_bufs.iter().zip(sid_lens.iter()).any(|(buf, len)| {
+                    sid_len == *len && core::slice::from_raw_parts(sid, sid_len) == &buf[..*len]
+                });
+                if watched
                     && ace.Mask & WORLD_WRITE_MASK != 0
                     && (header.AceFlags as u32) & INHERITED_ACE != 0
                 {
@@ -393,22 +404,30 @@ fn revoke_everyone_write(path: &std::path::Path) -> Result<bool, &'static str> {
         unsafe { LocalFree(sd) };
         return Ok(false);
     }
-    let trustee = TRUSTEE_W {
-        pMultipleTrustee: std::ptr::null_mut(),
-        MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
-        TrusteeForm: TRUSTEE_IS_SID,
-        TrusteeType: TRUSTEE_IS_USER,
-        ptstrName: everyone.as_mut_ptr() as PWSTR,
-    };
-    let explicit = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: WORLD_WRITE_MASK,
-        grfAccessMode: REVOKE_ACCESS,
-        grfInheritance: NO_INHERITANCE,
-        Trustee: trustee,
-    };
+    let mut trustees: Vec<TRUSTEE_W> = Vec::with_capacity(sid_bufs.len());
+    for buf in sid_bufs.iter_mut() {
+        trustees.push(TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: buf.as_mut_ptr() as PWSTR,
+        });
+    }
+    let entries: Vec<EXPLICIT_ACCESS_W> = trustees
+        .iter()
+        .map(|trustee| EXPLICIT_ACCESS_W {
+            grfAccessPermissions: WORLD_WRITE_MASK,
+            grfAccessMode: REVOKE_ACCESS,
+            grfInheritance: NO_INHERITANCE,
+            Trustee: *trustee,
+        })
+        .collect();
     let mut new_dacl: *mut ACL = std::ptr::null_mut();
-    // SAFETY: explicit entry and old DACL are valid; new DACL freed below.
-    let err = unsafe { SetEntriesInAclW(1, &explicit, dacl, &mut new_dacl) };
+    // SAFETY: explicit entries and old DACL are valid; new DACL freed below.
+    // sid_bufs outlives the call, so trustee pointers stay valid.
+    let err =
+        unsafe { SetEntriesInAclW(entries.len() as u32, entries.as_ptr(), dacl, &mut new_dacl) };
     // SAFETY: SD was allocated above.
     unsafe { LocalFree(sd) };
     if err != 0 || new_dacl.is_null() {
@@ -684,6 +703,32 @@ mod tests {
         assert!(
             !file_has_world_write_ace(&path),
             "permissive ACE must be revoked"
+        );
+    }
+
+    #[test]
+    fn harden_removes_explicit_users_write_ace() {
+        // Same end-to-end as above but with the Users group: detection
+        // already watched it, and revoke must now clear it too.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("acl-users.toml");
+        std::fs::write(&path, "x = 1").unwrap();
+        let grant = std::process::Command::new("icacls")
+            .arg(&path)
+            .args(["/grant", "Users:W"])
+            .output();
+        let Ok(out) = grant else { return };
+        if !out.status.success() {
+            return;
+        }
+        assert!(
+            file_has_world_write_ace(&path),
+            "planted Users ACE must be detected"
+        );
+        harden_file_acl(&path);
+        assert!(
+            !file_has_world_write_ace(&path),
+            "Users write ACE must be revoked"
         );
     }
 
