@@ -1,8 +1,7 @@
 name: Rust CI
 
-permissions:
-  contents: write
-
+# No workflow-wide permissions: each job declares the minimum it needs, so a
+# compromised third-party action cannot escalate beyond its own job.
 on:
   push:
     branches: [ master ]
@@ -21,6 +20,9 @@ on:
 
 jobs:
   build-and-test:
+    permissions:
+      contents: read
+      actions: write # upload-artifact
     runs-on: windows-latest
 
     steps:
@@ -42,21 +44,23 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Build debug binary
-        run: cargo build --verbose
+        run: cargo build --locked --verbose
 
       - name: Test
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Audit dependencies
+        # Pinned deliberately: unpinned installs drift with upstream and can
+        # break the pipeline (or worse) without a local change. Bump by hand.
         run: |
-          cargo install cargo-audit --locked
+          cargo install cargo-audit --version 0.22.2 --locked
           cargo audit
 
       - name: Build release binary
-        run: cargo build --release --verbose
+        run: cargo build --locked --release --verbose
 
       - name: Upload release EXE artifact
         uses: actions/upload-artifact@v4
@@ -64,8 +68,35 @@ jobs:
           name: framework-crate-windows-release
           path: target/release/framework-crate.exe
 
+  release:
+    needs: [build-and-test]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+      actions: read # download-artifact
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download release EXE artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: framework-crate-windows-release
+          path: dist
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist\framework-crate.exe -Algorithm SHA256).Hash
+          "$hash  framework-crate.exe" | Out-File -Encoding ascii SHA256SUMS
+          Get-Content SHA256SUMS
+
       - name: Install git-cliff
-        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
           $ver = "2.13.1"
@@ -81,7 +112,6 @@ jobs:
           Write-Output "git-cliff installed at $($exe.DirectoryName)"
 
       - name: Generate changelog
-        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
           $exe = Get-ChildItem -Recurse -Filter git-cliff.exe gitcliff | Select-Object -First 1
@@ -89,10 +119,9 @@ jobs:
           Get-Content release_notes.md
 
       - name: Append contributors
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
         run: |
           $tag = $env:GITHUB_REF_NAME
           $prev = git describe --tags --abbrev=0 "$tag^" 2>$null
@@ -108,10 +137,11 @@ jobs:
           }
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/framework-crate.exe
+          files: |
+            dist/framework-crate.exe
+            SHA256SUMS
           body_path: release_notes.md
           generate_release_notes: false
           make_latest: true
