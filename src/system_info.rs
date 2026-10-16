@@ -13,6 +13,7 @@ type LPCWSTR = *const u16;
 
 const HKEY_LOCAL_MACHINE: HKEY = 0x80000002 as HKEY;
 const KEY_READ: u32 = 0x20019;
+const KEY_WOW64_64KEY: u32 = 0x0100;
 const REG_SZ: u32 = 1;
 const REG_DWORD: u32 = 4;
 const ERROR_SUCCESS: u32 = 0;
@@ -321,12 +322,14 @@ pub fn os_version() -> String {
     // Query registry once to avoid redundant syscalls.
     let key_path = to_wide("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion");
     let mut hkey: HKEY = std::ptr::null_mut();
+    // Pin the 64-bit view: a 32-bit build would otherwise be redirected to
+    // Wow6432Node and report the wrong system version.
     let key_opened = unsafe {
         RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
             key_path.as_ptr(),
             0,
-            KEY_READ,
+            KEY_READ | KEY_WOW64_64KEY,
             &mut hkey,
         ) == ERROR_SUCCESS
     };
@@ -484,7 +487,12 @@ fn registry_query_value(hkey: HKEY, value_name: *const u16) -> Option<String> {
         )
     };
 
-    if (rc != ERROR_SUCCESS && rc != ERROR_MORE_DATA) || data_type != REG_SZ || buf_size < 4 {
+    if (rc != ERROR_SUCCESS && rc != ERROR_MORE_DATA) || data_type != REG_SZ {
+        return None;
+    }
+    // An empty REG_SZ is just the nul terminator (2 bytes); it is a valid
+    // empty string, not a read failure. Anything smaller is malformed.
+    if buf_size < 2 {
         return None;
     }
 
@@ -1568,6 +1576,51 @@ mod tests {
             } else {
                 std::env::remove_var("USERDOMAIN");
             }
+        }
+    }
+
+    #[test]
+    fn registry_empty_sz_reads_as_empty_string() {
+        // Round-trips an empty REG_SZ through HKCU: exercises the
+        // sub-nul-size path that used to be misreported as missing.
+        use windows_sys::Win32::System::Registry::{
+            RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW,
+        };
+        const HKEY_CURRENT_USER: HKEY = 0x80000001 as HKEY;
+        const KEY_SET_VALUE: u32 = 0x0002;
+        let sub = to_wide(&format!(
+            "SOFTWARE\\FrameworkCrateRegTest{}",
+            std::process::id()
+        ));
+        let name = to_wide("EmptyValue");
+        let mut hkey: HKEY = std::ptr::null_mut();
+        // SAFETY: null class/security/disposition; handle closed + key deleted below.
+        let rc = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                sub.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                KEY_READ | KEY_SET_VALUE,
+                std::ptr::null_mut(),
+                &mut hkey,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ERROR_SUCCESS, "create test key");
+        let nul = [0u16; 1];
+        let rc =
+            unsafe { RegSetValueExW(hkey, name.as_ptr(), 0, REG_SZ, nul.as_ptr() as *const u8, 2) };
+        assert_eq!(rc, ERROR_SUCCESS, "write empty REG_SZ");
+        assert_eq!(
+            registry_query_value(hkey, name.as_ptr()),
+            Some(String::new()),
+            "empty REG_SZ is empty, not missing"
+        );
+        unsafe { RegCloseKey(hkey) };
+        unsafe {
+            RegDeleteKeyW(HKEY_CURRENT_USER, sub.as_ptr());
         }
     }
 
