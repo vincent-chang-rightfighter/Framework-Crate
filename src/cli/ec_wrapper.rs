@@ -511,6 +511,10 @@ impl EcClient {
         Ok(data)
     }
 
+    /// Sets fan duty, clamped to 100. Zero is allowed and means fan-off:
+    /// callers pass it only from explicit user intent (Manual 0% target,
+    /// quit duty) or user-configured curve points; stale-thermal paths
+    /// hand back to firmware instead of writing a blind duty.
     pub fn set_fan_duty(&self, percent: u32, fan_index: Option<u32>) -> Result<(), String> {
         // Clamp at wrapper so no caller can send >100 to EC.
         let percent = percent.min(100);

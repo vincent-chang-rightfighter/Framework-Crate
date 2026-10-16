@@ -5,13 +5,59 @@ use std::sync::atomic::Ordering;
 use tracing::warn;
 
 use super::{
-    FAN_REASSERT_INTERVAL_MS, FanCtx, Flow, MAX_EC_WRITE_FAILURES, estimate_duty_from_thermal,
-    reset_ec_after_failures, reset_ec_on_panic, shutdown_requested,
+    FAN_REASSERT_INTERVAL_MS, FanCtx, Flow, MAX_EC_IO_FAILURES, MAX_EC_WRITE_FAILURES,
+    THERMAL_STALE_MS, estimate_duty_from_thermal, reset_ec_after_failures, reset_ec_on_panic,
+    shutdown_requested,
 };
 use crate::util::read_lock;
 
 /// Drives Manual mode: unified single ramp, or one ramp per fan.
 pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
+    // Same stale-thermal handover as Curve: driving blind on dead readings
+    // risks holding a low duty into rising heat, so hand back to firmware.
+    let last_ok = ctx.state.thermal.last_success_ms.load(Ordering::Acquire);
+    if last_ok == 0 || ctx.now_ms.saturating_sub(last_ok) > THERMAL_STALE_MS {
+        ctx.consecutive_ec_failures += 1;
+        if ctx.consecutive_ec_failures >= MAX_EC_IO_FAILURES {
+            reset_ec_after_failures(ctx.state, ctx.consecutive_ec_failures);
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            return Flow::Next;
+        }
+        if shutdown_requested(ctx.state) {
+            return Flow::Stop;
+        }
+        let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
+            warn!("EC write lock contended, skipping this cycle");
+            return Flow::Next;
+        };
+        let ec_clone = Arc::clone(ctx.ec);
+        match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
+            ec_clone.autofanctrl()
+        })
+        .await
+        {
+            Ok(Ok(())) => {
+                tracing::warn!(
+                    "Manual mode: stale thermal ({}ms), handed fan control to firmware",
+                    ctx.now_ms.saturating_sub(last_ok)
+                );
+            }
+            Ok(Err(e)) => {
+                warn!("Manual stale fail-safe autofanctrl failed: {}", e);
+                ctx.consecutive_ec_failures += 1;
+                if ctx.consecutive_ec_failures >= MAX_EC_IO_FAILURES {
+                    reset_ec_after_failures(ctx.state, ctx.consecutive_ec_failures);
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    return Flow::Next;
+                }
+            }
+            Err(join_err) => {
+                warn!("EC spawn panicked (manual stale fail-safe): {}", join_err);
+                reset_ec_on_panic(ctx.state);
+            }
+        }
+        return Flow::Next;
+    }
     let unified = ctx.state.fan.unified_duty.load(Ordering::Acquire);
     if unified {
         if let Some(target) = ctx.manual_duty {
