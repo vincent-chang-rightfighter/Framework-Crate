@@ -328,12 +328,17 @@ struct LimitTarget<'a> {
     write_failed: &'static str,
 }
 
-/// Rejects non-finite or negative limit values before encoding.
+/// Rejects non-finite, negative, or out-of-range limit values before encoding.
 ///
 /// `NaN as u32` is 0, so without this gate a NaN would encode as a 0W
-/// enabled limit and hard-throttle the CPU. Kept pure and unit-tested;
-/// the UI and BIOS-restore paths validate independently, this is the
-/// last line of defense at the write boundary.
+/// enabled limit and hard-throttle the CPU. Upper bounds match the UI caps:
+/// beyond the 15-bit RAPL field the encoder silently clamps, which then
+/// surfaces as a confusing read-back mismatch. Zero stays allowed for a
+/// disabled limit. Kept pure and unit-tested; this is the last line of
+/// defense at the write boundary for UI, BIOS-restore, and sync paths.
+pub const LIMIT_MAX_WATTS: f64 = 1024.0;
+pub const LIMIT_MAX_TIME_S: f64 = 120.0;
+
 fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
     for (name, v) in [
         ("power_unit", params.power_unit),
@@ -348,6 +353,22 @@ fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
         }
         if v < 0.0 {
             return Err(format!("invalid {name}: negative ({v})"));
+        }
+    }
+    for (name, v) in [
+        ("PL1 watts", params.pl1_watts),
+        ("PL2 watts", params.pl2_watts),
+    ] {
+        if v > LIMIT_MAX_WATTS {
+            return Err(format!("invalid {name}: exceeds {LIMIT_MAX_WATTS}W ({v})"));
+        }
+    }
+    for (name, v) in [
+        ("PL1 time", params.pl1_time_s),
+        ("PL2 time", params.pl2_time_s),
+    ] {
+        if v > LIMIT_MAX_TIME_S {
+            return Err(format!("invalid {name}: exceeds {LIMIT_MAX_TIME_S}s ({v})"));
         }
     }
     Ok(())
@@ -570,6 +591,27 @@ mod tests {
         let mut p = params(30.0, 60.0);
         p.power_unit = f64::NAN;
         assert!(validate_limit_params(&p).is_err());
+    }
+
+    #[test]
+    fn validate_limit_params_rejects_over_ui_caps() {
+        let mut p = params(30.0, 60.0);
+        p.pl1_watts = LIMIT_MAX_WATTS + 1.0;
+        assert!(validate_limit_params(&p).is_err());
+        let mut p = params(30.0, 60.0);
+        p.pl2_watts = LIMIT_MAX_WATTS + 1.0;
+        assert!(validate_limit_params(&p).is_err());
+        let mut p = params(30.0, 60.0);
+        p.pl1_time_s = LIMIT_MAX_TIME_S + 1.0;
+        assert!(validate_limit_params(&p).is_err());
+        let mut p = params(30.0, 60.0);
+        p.pl2_time_s = LIMIT_MAX_TIME_S + 1.0;
+        assert!(validate_limit_params(&p).is_err());
+        // Zero stays allowed for a disabled limit.
+        let mut p = params(30.0, 60.0);
+        p.pl1_watts = 0.0;
+        p.pl1_enabled = false;
+        assert!(validate_limit_params(&p).is_ok());
     }
 
     /// Encodes a PL1/PL2 pair the way the write path does.
