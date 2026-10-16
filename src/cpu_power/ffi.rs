@@ -537,17 +537,17 @@ fn init_dll_fns() -> Result<(), &'static str> {
 
 /// Resets DLL function pointers so next call to init_dll_fns re-loads from disk.
 /// Called after PawnIO upgrade to pick up the new DLL.
+///
+/// Deliberately does NOT FreeLibrary the old image: outstanding
+/// PawnioHandles hold copied function pointers that may still be in use on
+/// another thread, and unloading under them is use-after-free. The stale
+/// mapping leaks until process exit; upgrades are rare user-initiated
+/// events, so one mapping per upgrade is negligible and always safe.
 pub fn reset_dll_fns() {
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn FreeLibrary(hLibModule: *mut core::ffi::c_void) -> i32;
-    }
     let _init = DLL_INIT_LOCK.lock();
-    if let Some(raw) = DLL_MODULE.lock().take() {
-        unsafe {
-            FreeLibrary(raw as *mut core::ffi::c_void);
-        }
-    }
+    // Drop the module record without unloading: the image stays mapped for
+    // any in-flight users. Re-init below overwrites it with the new image.
+    *DLL_MODULE.lock() = None;
     *DLL_OPEN.lock() = None;
     *DLL_LOAD.lock() = None;
     *DLL_EXEC.lock() = None;
