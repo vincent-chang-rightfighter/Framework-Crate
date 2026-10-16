@@ -98,11 +98,13 @@ where
 
 /// Serialized EC write with timeout. Prefer over acquire + spawn pairs.
 ///
-/// The write-mutex guard moves into a detached task and is held until the
-/// blocking thread FINISHES, so a timed-out call can never be overtaken by
-/// its own retry: EC writes stay FIFO even under timeouts. The caller still
-/// gets its timeout promptly; the orphaned thread completes in the
-/// background while still holding its place in line.
+/// The mutex guard is held only until completion OR timeout, whichever
+/// comes first. On timeout the mutex is released so later writes are not
+/// stuck behind a hung driver; the orphaned thread keeps running without
+/// the guard (drivers offer no cancellation) and its late result is
+/// discarded. A timed-out write may therefore still land out of order —
+/// the periodic re-assert loops (fan duties, PL sync) heal that — but it
+/// can never wedge the write path.
 pub async fn spawn_ec_guarded<T>(
     guard: tokio::sync::MutexGuard<'static, ()>,
     timeout: std::time::Duration,
@@ -112,12 +114,16 @@ where
     T: Send + 'static,
 {
     let (tx, rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::task::spawn_blocking(task);
+    // Forward completion; the receiver is gone after a timeout, in which
+    // case the late result is dropped here instead of updating state.
     tokio::spawn(async move {
-        let _held = guard;
-        let res = tokio::task::spawn_blocking(task).await;
+        let res = handle.await;
         let _ = tx.send(res);
     });
-    match tokio::time::timeout(timeout, rx).await {
+    let result = tokio::time::timeout(timeout, rx).await;
+    drop(guard);
+    match result {
         Ok(Ok(Ok(val))) => Ok(val),
         Ok(Ok(Err(join_err))) => Err(format!("Task panicked: {}", join_err)),
         Ok(Err(_)) => Err("EC writer task vanished".to_string()),
@@ -169,6 +175,26 @@ mod tests {
         .await;
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn ec_guarded_timeout_releases_mutex() {
+        // The orphaned thread still sleeps 200ms, but the mutex must be
+        // free again right after the 10ms timeout, not held hostage.
+        let guard = ec_write_mutex().lock().await;
+        let res = spawn_ec_guarded(guard, std::time::Duration::from_millis(10), || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            1u32
+        })
+        .await;
+        assert!(res.is_err());
+        let relock = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            ec_write_mutex().lock(),
+        )
+        .await
+        .expect("mutex must be released on timeout while orphan still runs");
+        drop(relock);
     }
 
     #[tokio::test]
