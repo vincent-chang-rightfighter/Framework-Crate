@@ -174,11 +174,15 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                             ));
                     }
                 } else if port.dp_alt_mode {
-                    row_content = row_content.push(text("DP").size(FONT_SMALL).style(|_theme| {
-                        iced::widget::text::Style {
-                            color: Some(SENSOR_COLORS[0]),
-                        }
-                    }));
+                    let badge = pal.header;
+                    row_content =
+                        row_content.push(text("DP").size(FONT_SMALL).style(move |_theme| {
+                            iced::widget::text::Style {
+                                // Badge text follows the theme header instead of
+                                // fixed sensor blue (low contrast on Light).
+                                color: Some(badge),
+                            }
+                        }));
                 }
             }
             content = content.push(row_content);

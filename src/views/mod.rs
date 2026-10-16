@@ -54,6 +54,9 @@ pub(crate) struct ViewSnapshot {
     pub cpu_power_error: Option<Arc<String>>,
     pub ec_op_error: Option<Arc<String>>,
     pub intel_cpu: bool,
+    /// Active theme preference, alongside the resolved `palette`, for slots
+    /// that need the id itself (e.g. theme-dependent sensor tints).
+    pub theme: crate::style::ThemeId,
     /// Resolved UI colors for the active theme. Style closures read from
     /// here instead of hardcoded constants so every theme renders fully.
     pub palette: crate::style::Palette,
@@ -116,8 +119,7 @@ impl ViewSnapshot {
                             let idx = keys.iter().position(|k| k == name).unwrap_or(0);
                             marks.push(crate::curve_canvas::SensorMark {
                                 temp: *t,
-                                color: crate::style::SENSOR_COLORS
-                                    [idx % crate::style::SENSOR_COLORS.len()],
+                                color: crate::style::sensor_tint(app.theme, idx),
                             });
                         }
                     }
@@ -164,6 +166,7 @@ impl ViewSnapshot {
             cpu_power_error: app.cpu_power_error.as_ref().map(|s| Arc::new(s.clone())),
             ec_op_error: app.ec_op_error.as_ref().map(|s| Arc::new(s.clone())),
             intel_cpu: app.state.system.intel_cpu.load(Ordering::Acquire),
+            theme: app.theme,
             palette: crate::style::palette_for(app.theme),
             curve_points,
             curve_marks,

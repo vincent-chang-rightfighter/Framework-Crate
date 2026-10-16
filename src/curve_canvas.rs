@@ -1,5 +1,5 @@
 use iced::widget::canvas::Cache;
-use iced::{Color, Element, Length, Point, Size};
+use iced::{Element, Length, Point, Size};
 use std::cell::Cell;
 use std::sync::Arc;
 
@@ -354,12 +354,18 @@ fn draw_curve_contents(
         f.fill_rectangle(
             Point::new(lock_x0, layout.origin.y),
             Size::new(lock_w, layout.plot_h),
-            Color::from_rgba(0.9, 0.3, 0.1, 0.08),
+            iced::Color {
+                a: 0.08,
+                ..pal.warning
+            },
         );
         f.fill_rectangle(
             Point::new(lock_x0, layout.origin.y),
             Size::new(lock_w, layout.plot_h),
-            Color::from_rgba(0.9, 0.3, 0.1, 0.03),
+            iced::Color {
+                a: 0.03,
+                ..pal.warning
+            },
         );
 
         let grid_stroke = iced::widget::canvas::Stroke::default()
@@ -410,11 +416,10 @@ fn draw_curve_contents(
             let center = to_screen(p[0] as f32, p[1] as f32);
             let is_locked = p[0] >= crate::types::CURVE_TEMP_LOCK_START;
             let (fill_color, stroke_color, r) = if is_locked {
-                (
-                    Color::from_rgb(0.6, 0.6, 0.6),
-                    Color::from_rgba(1.0, 1.0, 1.0, 0.5),
-                    POINT_RADIUS,
-                )
+                // Locked points read as disabled in every theme: dimmed
+                // text fill with a theme-contrasting ring (hardcoded gray
+                // and white wash out on Light).
+                (pal.gray, pal.grid_base, POINT_RADIUS)
             } else if drag_idx == Some(config_idx) {
                 (pal.fan_curve, pal.grid_base, POINT_RADIUS + 2.0)
             } else if hover_idx == Some(config_idx) {
@@ -439,7 +444,10 @@ fn draw_curve_contents(
             f.fill_text(iced::widget::canvas::Text {
                 content: "LOCK 100%".to_string(),
                 position: Point::new(cx, layout.origin.y + 2.0),
-                color: Color::from_rgba(0.9, 0.4, 0.2, 0.45),
+                color: iced::Color {
+                    a: 0.45,
+                    ..pal.warning
+                },
                 size: iced::Pixels(7.0),
                 font: iced::Font::with_name("Consolas"),
                 align_x: iced::alignment::Horizontal::Center.into(),

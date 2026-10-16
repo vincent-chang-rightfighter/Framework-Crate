@@ -583,6 +583,20 @@ impl App {
     }
 
     fn rebuild_header_info(&mut self) {
+        // Elide the two free-form vendor strings: the header row is a fixed
+        // 900px single line, and an unclamped CPU/OS string pushes the info
+        // text past the window edge (clipped, not wrapped).
+        fn elide(s: &str, max_chars: usize) -> String {
+            let count = s.chars().count();
+            if count <= max_chars {
+                s.to_string()
+            } else {
+                s.chars()
+                    .take(max_chars.saturating_sub(1))
+                    .collect::<String>()
+                    + "…"
+            }
+        }
         let versions = read_lock(&self.state.system.versions);
         self.system_info.header_device_name = versions
             .as_ref()
@@ -600,7 +614,7 @@ impl App {
         let mut info = String::with_capacity(128);
         if !self.system_info.cpu.is_empty() {
             use std::fmt::Write;
-            let _ = write!(info, "CPU: {}", self.system_info.cpu);
+            let _ = write!(info, "CPU: {}", elide(&self.system_info.cpu, 48));
         }
         if self.system_info.mem != "N/A" {
             if !info.is_empty() {
@@ -614,7 +628,7 @@ impl App {
                 info.push_str("  |  ");
             }
             use std::fmt::Write;
-            let _ = write!(info, "OS: {}", self.system_info.os);
+            let _ = write!(info, "OS: {}", elide(&self.system_info.os, 48));
         }
         if !bios.is_empty() {
             if !info.is_empty() {

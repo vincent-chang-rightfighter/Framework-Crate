@@ -55,7 +55,7 @@ pub(crate) fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
 
                 for (idx, name) in cache.keys.iter().enumerate() {
                     // Small Vec: linear search is cheaper than HashSet with no allocation.
-                    let color = SENSOR_COLORS[idx % SENSOR_COLORS.len()];
+                    let color = crate::style::sensor_tint(app.theme, idx);
                     let is_on = all_empty || config.telemetry.selected_sensors.contains(name);
                     let on_off = if is_on { "On" } else { "Off" };
                     let on_color = if is_on { pal.green } else { pal.gray };
@@ -70,10 +70,11 @@ pub(crate) fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
                                     .center_y(14)
                                     .style(move |_theme| iced::widget::container::Style {
                                         background: Some(bg_color.into()),
-                                        // White ring matches slider thumbs and curve points.
+                                        // Ring follows the theme instead of
+                                        // hardcoded white (invisible on Light).
                                         border: iced::Border::default()
                                             .rounded(7)
-                                            .color(iced::Color::WHITE)
+                                            .color(pal.grid_base)
                                             .width(1),
                                         ..Default::default()
                                     })

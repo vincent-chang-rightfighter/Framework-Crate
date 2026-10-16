@@ -211,7 +211,7 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                     } else {
                         for (idx, name) in cache.keys.iter().enumerate() {
                             let is_on = curve_sensor == Some(name.as_str());
-                            let color = SENSOR_COLORS[idx % SENSOR_COLORS.len()];
+                            let color = crate::style::sensor_tint(snap.theme, idx);
                             let on_off = if is_on { "On" } else { "Off" };
                             let on_color = if is_on { pal.green } else { pal.gray };
                             let bg_color = if is_on { color } else { pal.dark };
@@ -225,10 +225,11 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                                             .center_y(14)
                                             .style(move |_theme| iced::widget::container::Style {
                                                 background: Some(bg_color.into()),
-                                                // White ring matches sensor toggles.
+                                                // Ring follows the theme instead of
+                                                // hardcoded white (invisible on Light).
                                                 border: iced::Border::default()
                                                     .rounded(7)
-                                                    .color(iced::Color::WHITE)
+                                                    .color(pal.grid_base)
                                                     .width(1),
                                                 ..Default::default()
                                             })

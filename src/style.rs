@@ -241,18 +241,20 @@ pub fn palette(theme: &iced::Theme) -> Palette {
                 fan_curve: e.primary.base.color,
                 temp_plot_bg: e.background.weakest.color,
                 curve_plot_bg: e.background.weakest.color,
-                temp_axis_text: p.text,
-                curve_axis_text: p.text,
+                temp_axis_text: dim_text(p.text),
+                curve_axis_text: dim_text(p.text),
                 grid_base: p.text,
             };
             // Black goes true-black on the large surfaces; controls keep
             // Oxocarbon grays so they stay visible, and gray is recomputed
-            // against the black card.
+            // against the black card. Plots sit one lift above pure black
+            // so panels read as panels, not holes.
             if *theme == iced::Theme::Oxocarbon {
                 pal.settings_bg = iced::Color::BLACK;
                 pal.card_bg = iced::Color::BLACK;
-                pal.temp_plot_bg = iced::Color::BLACK;
-                pal.curve_plot_bg = iced::Color::BLACK;
+                let plot_lift = iced::Color::from_rgb8(0x0A, 0x0A, 0x0C);
+                pal.temp_plot_bg = plot_lift;
+                pal.curve_plot_bg = plot_lift;
                 pal.gray =
                     dim_text(iced::theme::palette::Pair::new(iced::Color::BLACK, p.text).text);
             }
@@ -402,6 +404,26 @@ pub const SENSOR_COLORS: [iced::Color; 10] = [
     },
 ];
 
+/// Sensor data color for UI chrome (chips, dots, toggles) under a theme
+/// preference. Verbatim on every theme except Light, where saturated
+/// yellows/cyans wash out on white plots and are darkened to hold
+/// contrast. Sensor identity (index → hue) never changes, only the Light
+/// luminance. History chart lines intentionally stay verbatim via
+/// `sensor_color`: sensor curves are frozen by user directive.
+pub fn sensor_tint(id: ThemeId, idx: usize) -> iced::Color {
+    let c = SENSOR_COLORS[idx % SENSOR_COLORS.len()];
+    if id == ThemeId::Light {
+        iced::Color {
+            r: c.r * 0.55,
+            g: c.g * 0.55,
+            b: c.b * 0.55,
+            a: c.a,
+        }
+    } else {
+        c
+    }
+}
+
 pub fn card<'a>(content: iced::Element<'a, crate::Message>) -> iced::Element<'a, crate::Message> {
     iced::widget::container(content)
         .padding(12)
@@ -500,7 +522,9 @@ pub fn slider_style(
             shape: HandleShape::Circle { radius },
             background: pal.slider_fill.into(),
             border_width,
-            border_color: iced::Color::WHITE,
+            // Ring follows the theme: Default's grid_base is white, so the
+            // long-standing look is unchanged; Light gets a dark ring.
+            border_color: pal.grid_base,
         },
     }
 }
@@ -590,12 +614,14 @@ mod tests {
 
     #[test]
     fn black_scheme_uses_true_black_surfaces() {
-        // Oxocarbon alone is dark gray; Black forces pure black surfaces.
+        // Oxocarbon alone is dark gray; Black forces pure black surfaces,
+        // with plots one lift above so panels read as panels, not holes.
         let pal = palette_for(ThemeId::Black);
+        let plot_lift = iced::Color::from_rgb8(0x0A, 0x0A, 0x0C);
         assert_eq!(pal.settings_bg, iced::Color::BLACK);
         assert_eq!(pal.card_bg, iced::Color::BLACK);
-        assert_eq!(pal.temp_plot_bg, iced::Color::BLACK);
-        assert_eq!(pal.curve_plot_bg, iced::Color::BLACK);
+        assert_eq!(pal.temp_plot_bg, plot_lift);
+        assert_eq!(pal.curve_plot_bg, plot_lift);
     }
 
     #[test]
@@ -643,6 +669,30 @@ mod tests {
                 assert_eq!(pal.gray.a, 1.0);
             } else {
                 assert_eq!(pal.gray.a, 0.7, "{id:?}: gray should be dimmed");
+            }
+        }
+    }
+
+    #[test]
+    fn axis_text_is_dimmed_outside_default() {
+        // Axis labels sit below plot data like subtitles sit below headers.
+        let pal = palette_for(ThemeId::Dracula);
+        assert_eq!(pal.temp_axis_text.a, 0.7);
+        assert_eq!(pal.curve_axis_text.a, 0.7);
+    }
+
+    #[test]
+    fn sensor_colors_verbatim_except_light() {
+        // Identity (index → hue) never changes; only Light luminance does.
+        for id in ThemeId::ALL {
+            for (idx, expected) in SENSOR_COLORS.iter().enumerate() {
+                let c = sensor_tint(id, idx);
+                if id == ThemeId::Light {
+                    assert_ne!(c, *expected, "Light must tint sensor {idx}");
+                    assert!(c.r <= expected.r);
+                } else {
+                    assert_eq!(c, *expected, "{id:?} must keep sensor {idx}");
+                }
             }
         }
     }
