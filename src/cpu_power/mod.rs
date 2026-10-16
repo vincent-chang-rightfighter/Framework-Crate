@@ -41,7 +41,19 @@ pub struct CpuPowerState {
     sync_start_ms: Arc<std::sync::atomic::AtomicU64>,
     bios: Arc<parking_lot::RwLock<Arc<Option<BiosDefaults>>>>,
     desired_sync: Arc<parking_lot::RwLock<Option<PowerLimitParams>>>,
+    /// Set by the sync worker itself on permanent failure (MSR breaker).
+    /// Auto-restart watches it; a manual Sync start clears it.
+    sync_broken: Arc<AtomicBool>,
+    /// Consecutive auto-restart failures; manual start resets.
+    sync_restart_failures: Arc<std::sync::atomic::AtomicU32>,
+    /// Latched after too many failed auto-restarts; only a manual
+    /// Sync start clears it, so a BIOS-locked register stops spawning
+    /// threads forever.
+    sync_restart_disabled: Arc<AtomicBool>,
 }
+
+/// Auto-restarts give up after this many consecutive failures.
+const MAX_SYNC_RESTART_FAILURES: u32 = 5;
 
 impl Default for CpuPowerState {
     fn default() -> Self {
@@ -54,6 +66,9 @@ impl Default for CpuPowerState {
             sync_start_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             bios: Arc::new(parking_lot::RwLock::new(Arc::new(None))),
             desired_sync: Arc::new(parking_lot::RwLock::new(None)),
+            sync_broken: Arc::new(AtomicBool::new(false)),
+            sync_restart_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            sync_restart_disabled: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -178,8 +193,19 @@ impl CpuPowerState {
     pub fn start_sync(&self, params: PowerLimitParams) -> Result<(), &'static str> {
         let mut thread = self.sync_thread.lock();
         thread.join_running();
-        thread.start(params, Arc::clone(&self.sync_alive))?;
+        thread.start(
+            params,
+            Arc::clone(&self.sync_alive),
+            Arc::clone(&self.sync_broken),
+        )?;
         self.sync_enabled.store(true, Ordering::Release);
+        // Successful (re)start clears the auto-restart latch and its
+        // counter, so a manual Sync press re-arms auto-restart. Cleared
+        // here rather than on entry so consecutive auto-restart failures
+        // still accumulate across try_restart_if_dead calls.
+        self.sync_broken.store(false, Ordering::Release);
+        self.sync_restart_disabled.store(false, Ordering::Release);
+        self.sync_restart_failures.store(0, Ordering::Release);
         self.sync_start_ms
             .store(crate::util::monotonic_ms(), Ordering::Release);
         *self.desired_sync.write() = Some(params);
@@ -211,9 +237,25 @@ impl CpuPowerState {
     /// Returns true if a restart was actually initiated on this call. Throttled
     /// to once per 5s so a persistently failing handle init does not spawn a
     /// new thread every UI tick. No-ops (returns false) during the 1.5s startup
-    /// grace period or while a restart is still in progress.
+    /// grace period or while a restart is still in progress. After
+    /// MAX_SYNC_RESTART_FAILURES consecutive failures the latch trips and
+    /// only a manual Sync start re-arms auto-restart.
     pub fn try_restart_if_dead(&self) -> bool {
         if !self.is_sync_dead() {
+            return false;
+        }
+        // The worker raised permanent failure: latch once (single warn)
+        // and wait for a manual Sync start instead of respawning forever.
+        if self.sync_broken.load(Ordering::Acquire) {
+            if !self.sync_restart_disabled.load(Ordering::Acquire) {
+                self.sync_restart_disabled.store(true, Ordering::Release);
+                warn!(
+                    "Sync thread hit a permanent failure (likely BIOS-locked); auto-restart disabled until manual Sync start"
+                );
+            }
+            return false;
+        }
+        if self.sync_restart_disabled.load(Ordering::Acquire) {
             return false;
         }
         let now = crate::util::monotonic_ms();
@@ -231,10 +273,24 @@ impl CpuPowerState {
                 true
             }
             Err(e) => {
-                warn!("Failed to restart CPU power sync thread: {}", e);
+                let failures = self.sync_restart_failures.fetch_add(1, Ordering::AcqRel) + 1;
+                if failures >= MAX_SYNC_RESTART_FAILURES {
+                    self.sync_restart_disabled.store(true, Ordering::Release);
+                    warn!(
+                        "Sync auto-restart failed {} times; giving up until manual Sync start: {}",
+                        failures, e
+                    );
+                } else {
+                    warn!("Failed to restart CPU power sync thread: {}", e);
+                }
                 false
             }
         }
+    }
+
+    /// Whether auto-restart gave up and waits for a manual Sync start.
+    pub fn sync_restart_latched(&self) -> bool {
+        self.sync_restart_disabled.load(Ordering::Acquire)
     }
 
     /// Stops sync thread. Holds the `sync_thread` lock across the whole teardown
@@ -324,6 +380,21 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Acquire),
             "a no-op restart must leave the flag alone"
         );
+    }
+
+    #[test]
+    fn broken_flag_latches_restart_until_manual_start() {
+        use std::sync::atomic::Ordering;
+        let state = CpuPowerState::default();
+        state.sync_enabled.store(true, Ordering::Release);
+        assert!(state.is_sync_dead(), "precondition: sync must look dead");
+        // Worker raised permanent failure: no respawn, latch trips once.
+        state.sync_broken.store(true, Ordering::Release);
+        assert!(!state.try_restart_if_dead());
+        assert!(state.sync_restart_latched());
+        // Stays latched without re-warning or respawning.
+        assert!(!state.try_restart_if_dead());
+        assert!(state.sync_restart_latched());
     }
 
     // The 5s restart throttle has no test. Both guards compare against

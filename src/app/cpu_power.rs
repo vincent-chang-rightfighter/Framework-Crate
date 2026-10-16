@@ -364,11 +364,19 @@ impl App {
                 match result {
                     Ok(crate::cpu_power::BiosRestore::Full) => {
                         self.cpu_power_error = None;
+                        self.state
+                            .lifecycle
+                            .pl_reset_pending
+                            .store(false, Ordering::Release);
                     }
                     Ok(crate::cpu_power::BiosRestore::Partial(e)) => {
                         warn!("CPU power reset partial: {}", e);
                         self.cpu_power_error =
                             Some(format!("MSR reset done; MMIO mirror may differ: {}", e));
+                        self.state
+                            .lifecycle
+                            .pl_reset_pending
+                            .store(false, Ordering::Release);
                     }
                     Err(e) => {
                         warn!("CPU power reset failed: {}", e);

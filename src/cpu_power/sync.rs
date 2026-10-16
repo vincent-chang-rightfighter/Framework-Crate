@@ -26,10 +26,13 @@ impl SyncThread {
     }
 
     /// Starts sync thread; `external_alive` tracks liveness without locking.
+    /// `broken` is set by the worker itself when it hits a permanent
+    /// failure (MSR breaker), so auto-restart stops respawning it.
     pub(super) fn start(
         &mut self,
         params: PowerLimitParams,
         external_alive: Arc<AtomicBool>,
+        broken: Arc<AtomicBool>,
     ) -> Result<(), &'static str> {
         // The caller has already joined any previous worker while holding the
         // lock, so there is nothing left to tear down here.
@@ -42,12 +45,19 @@ impl SyncThread {
         let alive_for_thread = alive.clone();
         let external_clone = external_alive.clone();
         let external_for_thread = external_alive.clone();
+        let broken_for_thread = broken.clone();
 
         let handle = std::thread::Builder::new()
             .name("cpu-power-sync".to_string())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    sync_thread_main(running_clone, alive_for_thread, external_for_thread, params);
+                    sync_thread_main(
+                        running_clone,
+                        alive_for_thread,
+                        external_for_thread,
+                        params,
+                        broken_for_thread,
+                    );
                 }));
                 if result.is_err() {
                     warn!("Sync thread panicked");
@@ -141,12 +151,23 @@ impl FailureCounter {
     }
 }
 
+/// Consecutive-failure limits for the sync loop breakers.
+const MSR_BREAKER_LIMIT: u32 = 30;
+const MMIO_DISABLE_LIMIT: u32 = 30;
+
+/// Whether a persistently failing MMIO leg should be disabled so the loop
+/// stops burning an ioctl on it every pass. MSR keeps asserting.
+fn should_disable_mmio(consecutive_failures: u32) -> bool {
+    consecutive_failures >= MMIO_DISABLE_LIMIT
+}
+
 /// Sync thread main loop; writes MSR and MMIO every 250ms.
 fn sync_thread_main(
     running: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     external_alive: Arc<AtomicBool>,
     params: PowerLimitParams,
+    broken: Arc<AtomicBool>,
 ) {
     // Load IntelMSR module and open a persistent handle.
     let msr_blob = match load_intel_msr_blob() {
@@ -166,7 +187,7 @@ fn sync_thread_main(
     };
 
     // Load IntelMCHBAR for MMIO write (may fail).
-    let mchbar_handle = match load_intel_mchbar_blob().and_then(|b| open_handle(&b)) {
+    let mut mchbar_handle = match load_intel_mchbar_blob().and_then(|b| open_handle(&b)) {
         Ok(h) => Some(h),
         Err(e) => {
             warn!(
@@ -208,9 +229,18 @@ fn sync_thread_main(
         // then a failing MMIO path is not costing the user their limit, and the
         // MMIO blob may legitimately lack qword write support on some models.
         let write_failures = msr_failures.consecutive();
-        if write_failures >= 30 {
+        if write_failures >= MSR_BREAKER_LIMIT {
             warn!("Sync thread giving up after 30 consecutive MSR failures (likely BIOS-locked)");
+            // Permanent: re-spawning would fail identically, so raise the
+            // flag auto-restart watches instead of dying silently.
+            broken.store(true, Ordering::Release);
             break;
+        }
+        // Independent MMIO breaker: a dead MMIO path must not spin its ioctl
+        // every 250ms forever. Disable the leg, keep MSR asserting.
+        if mchbar_handle.is_some() && should_disable_mmio(mmio_failures.consecutive()) {
+            warn!("Sync thread disabling MMIO path after 30 consecutive failures; MSR continues");
+            mchbar_handle = None;
         }
         // Back off on persistent failures; cap at 30s.
         // BIOS-locked register will otherwise spin forever; 30s reduces thermal contention.
@@ -242,6 +272,13 @@ fn sync_thread_main(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mmio_leg_disables_after_limit() {
+        assert!(!should_disable_mmio(0));
+        assert!(!should_disable_mmio(MMIO_DISABLE_LIMIT - 1));
+        assert!(should_disable_mmio(MMIO_DISABLE_LIMIT));
+    }
 
     #[test]
     fn failure_log_level_logs_each_error_for_the_first_five() {

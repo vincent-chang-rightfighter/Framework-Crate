@@ -53,7 +53,9 @@ impl App {
             }
         }
 
-        // AC→battery: reset PL1/PL2 to BIOS defaults. Only clear pending after successful schedule.
+        // AC→battery: reset PL1/PL2 to BIOS defaults. The pending flag is
+        // cleared by CpuPowerResetDone on success, so a failed reset keeps
+        // retrying instead of silently dropping the restore.
         if self.cpu_power_supported()
             && self
                 .state
@@ -67,10 +69,6 @@ impl App {
                     "AC→battery reset pending but BIOS defaults unavailable, will retry"
                 );
             } else {
-                self.state
-                    .lifecycle
-                    .pl_reset_pending
-                    .store(false, Ordering::Release);
                 tracing::info!("AC→battery: resetting PL1/PL2 to BIOS defaults");
                 return Task::batch([
                     self.handle_cpu_power_sync_reset(),
@@ -189,6 +187,13 @@ impl App {
                     .sync_enabled
                     .store(false, Ordering::Release);
                 warn!("Sync thread exited and cannot be restarted (no desired params)");
+            }
+            // Auto-restart gave up permanently: surface it once so the user
+            // knows Sync needs a manual press. Cleared by the next
+            // successful apply/sync/reset, which resets cpu_power_error.
+            if self.state.cpu_power.sync_restart_latched() && self.cpu_power_error.is_none() {
+                self.cpu_power_error =
+                    Some("Sync failed repeatedly and stopped; press Sync to retry".to_string());
             }
             // Reflect state change (or pending retry) in the UI.
             self.mark_dirty();
