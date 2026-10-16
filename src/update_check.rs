@@ -19,6 +19,9 @@ pub fn fetch_latest_tag() -> Option<String> {
         .args([
             "-s",
             "-L",
+            "--fail",
+            "--proto",
+            "=https",
             "--max-time",
             "15",
             "--retry",
@@ -48,11 +51,22 @@ pub fn fetch_latest_tag() -> Option<String> {
             continue;
         };
         let tag = val[..q2].trim().to_string();
-        if !tag.is_empty() {
+        // Strict shape gate: a 404 HTML page or API error body must never
+        // become a "new version" nag. is_newer is conservative too, but
+        // reject garbage at the source.
+        if valid_tag(&tag) {
             return Some(tag);
         }
     }
     None
+}
+
+/// Whether a fetched tag has release-tag shape (`v1.2.3`, digits only).
+fn valid_tag(tag: &str) -> bool {
+    let s = tag.trim().trim_start_matches('v');
+    !s.is_empty()
+        && s.split('.')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Whether `latest_tag` (e.g. "v0.6.2") is newer than `current` (e.g.
@@ -115,5 +129,18 @@ mod tests {
         assert!(!is_newer("0.6.1", ""));
         assert!(!is_newer("", "v0.6.2"));
         assert!(!is_newer("0.6.1", "v0.6.x"));
+    }
+
+    #[test]
+    fn valid_tag_accepts_only_release_shapes() {
+        assert!(valid_tag("v0.6.2"));
+        assert!(valid_tag("0.6.2"));
+        assert!(valid_tag("v10.20.30"));
+        assert!(!valid_tag(""));
+        assert!(!valid_tag("latest"));
+        assert!(!valid_tag("v0.6.x"));
+        assert!(!valid_tag("v1..2"));
+        assert!(!valid_tag("<html>"));
+        assert!(!valid_tag("v"));
     }
 }
