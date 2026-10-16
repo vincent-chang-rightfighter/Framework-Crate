@@ -332,7 +332,11 @@ fn chrono_like_timestamp() -> String {
 
 /// Single-instance guard; prevents parallel EC I/O and tray/config races from second process.
 fn acquire_single_instance(minimized: bool) -> Option<system_info::SingleInstanceGuard> {
-    match system_info::SingleInstanceGuard::acquire("FrameworkCrateSingleInstance") {
+    // Local\ scopes the mutex to this logon session: unprefixed names are
+    // per-session anyway, and Global\ would fail closed without
+    // SeCreateGlobalPrivilege. Cross-user races need two elevated
+    // sessions racing EC writes; documented, accepted.
+    match system_info::SingleInstanceGuard::acquire("Local\\FrameworkCrateSingleInstance") {
         Ok(Some(guard)) => Some(guard),
         Ok(None) => {
             fallback_log(&format!(

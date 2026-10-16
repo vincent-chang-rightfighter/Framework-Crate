@@ -831,14 +831,98 @@ pub fn is_elevated() -> bool {
 
 /// Account for the task principal. Task Scheduler resolves `DOMAIN\user` to a
 /// SID while registering, so a later account rename does not break the task.
+///
+/// Resolved from the process token, never from `USERNAME`/`USERDOMAIN`:
+/// environment variables are caller-controlled and must not name the account
+/// an elevated task runs as.
 fn current_user_id() -> Result<String, String> {
-    let user = std::env::var("USERNAME").unwrap_or_default();
+    use windows_sys::Win32::Security::{LookupAccountSidW, SID_NAME_USE, TOKEN_USER, TokenUser};
+    use windows_sys::core::{PCWSTR, PWSTR};
+
+    const TOKEN_QUERY: u32 = 0x0008;
+    // SAFETY: pseudo-handle is always valid; the token handle is closed below.
+    let mut token: HANDLE = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err("cannot open process token for startup task".to_string());
+    }
+    // Size query first: expected to fail with ERROR_INSUFFICIENT_BUFFER.
+    let mut len: u32 = 0;
+    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+    if len == 0 {
+        // SAFETY: token was opened above and is not used afterwards.
+        unsafe { CloseHandle(token) };
+        return Err("cannot size token user for startup task".to_string());
+    }
+    // u64 backing keeps the TOKEN_USER struct aligned.
+    let mut buf = vec![0u64; len as usize / 8 + 1];
+    // SAFETY: buffer sized by the query above; token is live.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            buf.as_mut_ptr() as *mut core::ffi::c_void,
+            (buf.len() * 8) as u32,
+            &mut len,
+        )
+    };
+    if ok == 0 {
+        // SAFETY: token was opened above and is not used afterwards.
+        unsafe { CloseHandle(token) };
+        return Err("cannot read token user for startup task".to_string());
+    }
+    // SAFETY: buffer holds a valid TOKEN_USER per the successful call above.
+    let sid = unsafe { (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid };
+    // SAFETY: token was opened above and is not used afterwards.
+    unsafe { CloseHandle(token) };
+
+    let mut name_len: u32 = 0;
+    let mut domain_len: u32 = 0;
+    let mut sid_use: SID_NAME_USE = 0;
+    // SAFETY: null buffers query the required lengths; may fail, ignored.
+    unsafe {
+        LookupAccountSidW(
+            std::ptr::null() as PCWSTR,
+            sid,
+            std::ptr::null_mut(),
+            &mut name_len,
+            std::ptr::null_mut(),
+            &mut domain_len,
+            &mut sid_use,
+        )
+    };
+    if name_len == 0 {
+        return Err("cannot resolve account name for startup task".to_string());
+    }
+    let mut name = vec![0u16; name_len as usize];
+    let mut domain = vec![0u16; domain_len as usize];
+    // SAFETY: buffers sized by the query above; sid came from our own token.
+    let ok = unsafe {
+        LookupAccountSidW(
+            std::ptr::null() as PCWSTR,
+            sid,
+            name.as_mut_ptr() as PWSTR,
+            &mut name_len,
+            domain.as_mut_ptr() as PWSTR,
+            &mut domain_len,
+            &mut sid_use,
+        )
+    };
+    if ok == 0 {
+        return Err("cannot resolve account name for startup task".to_string());
+    }
+    let trim_nul = |v: &[u16]| {
+        let n = v.iter().position(|&c| c == 0).unwrap_or(v.len());
+        String::from_utf16_lossy(&v[..n])
+    };
+    let user = trim_nul(&name);
     if user.is_empty() {
         return Err("cannot determine current user for startup task".to_string());
     }
-    match std::env::var("USERDOMAIN").ok().filter(|d| !d.is_empty()) {
-        Some(domain) => Ok(format!("{domain}\\{user}")),
-        None => Ok(user),
+    let domain = trim_nul(&domain);
+    if domain.is_empty() {
+        Ok(user)
+    } else {
+        Ok(format!("{domain}\\{user}"))
     }
 }
 
@@ -1455,6 +1539,36 @@ mod tests {
         )
         .expect("valid UTF-16");
         assert_eq!(text, "<?xml version=\"1.0\" encoding=\"UTF-16\"?>");
+    }
+
+    #[test]
+    fn current_user_id_ignores_spoofed_env() {
+        // The task principal must come from the token: poison the env
+        // first and prove the result is unaffected.
+        let prev_user = std::env::var_os("USERNAME");
+        let prev_domain = std::env::var_os("USERDOMAIN");
+        unsafe {
+            std::env::set_var("USERNAME", "spoofed-user-xyz");
+            std::env::set_var("USERDOMAIN", "SPOOFED-DOMAIN-XYZ");
+        }
+        let id = super::current_user_id().expect("token user must resolve");
+        assert!(!id.is_empty());
+        assert!(
+            !id.to_lowercase().contains("spoofed"),
+            "principal must not trust env, got {id}"
+        );
+        unsafe {
+            if let Some(v) = prev_user {
+                std::env::set_var("USERNAME", v);
+            } else {
+                std::env::remove_var("USERNAME");
+            }
+            if let Some(v) = prev_domain {
+                std::env::set_var("USERDOMAIN", v);
+            } else {
+                std::env::remove_var("USERDOMAIN");
+            }
+        }
     }
 
     #[test]
