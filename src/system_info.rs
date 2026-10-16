@@ -845,6 +845,39 @@ fn current_user_id() -> Result<String, String> {
 /// Prefix of the temporary task document written for `schtasks /Create /XML`.
 const TASK_XML_PREFIX: &str = "framework-crate-task-";
 
+/// Per-process counter so concurrent toggles and PID reuse never map two
+/// task documents onto one path.
+static TASK_XML_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Writes the task document to a uniquely-named temp file.
+///
+/// `create_new` refuses a pre-existing path instead of following it, so a
+/// planted symlink or file can only fail the toggle, never redirect the
+/// import schtasks performs as HighestAvailable.
+fn write_task_xml(xml: &str) -> Result<String, String> {
+    use std::io::Write;
+    for _ in 0..5 {
+        let xml_path = std::env::temp_dir().join(format!(
+            "{TASK_XML_PREFIX}{}-{}.xml",
+            std::process::id(),
+            TASK_XML_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let mut f = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&xml_path)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("cannot write startup task xml: {e}")),
+        };
+        f.write_all(&utf16le_with_bom(xml))
+            .map_err(|e| format!("cannot write startup task xml: {e}"))?;
+        return Ok(xml_path.to_string_lossy().into_owned());
+    }
+    Err("cannot allocate a unique startup task xml path".to_string())
+}
+
 /// Removes task documents left behind by a previous run.
 ///
 /// The release profile uses `panic = "abort"`, so a process killed mid-write
@@ -916,14 +949,7 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
         let exe_str = exe.to_str().ok_or("exe path is not valid UTF-8")?;
         // Bounded by schtasks_output timeout so a hung Task Scheduler cannot freeze the UI.
         let xml = build_startup_task(exe_str, &current_user_id()?)?;
-        // Unique per process so a concurrent toggle cannot clobber the file
-        // another instance is importing.
-        let xml_path = std::env::temp_dir()
-            .join(format!("{TASK_XML_PREFIX}{}.xml", std::process::id()))
-            .to_string_lossy()
-            .into_owned();
-        std::fs::write(&xml_path, utf16le_with_bom(&xml))
-            .map_err(|e| format!("cannot write startup task xml: {e}"))?;
+        let xml_path = write_task_xml(&xml)?;
         let created =
             schtasks_output(&["/Create", "/TN", STARTUP_TASK_NAME, "/XML", &xml_path, "/F"]);
         // Remove the temp document whether or not registration succeeded.
@@ -1429,6 +1455,19 @@ mod tests {
         )
         .expect("valid UTF-16");
         assert_eq!(text, "<?xml version=\"1.0\" encoding=\"UTF-16\"?>");
+    }
+
+    #[test]
+    fn task_xml_paths_are_unique_per_call() {
+        // create_new refuses planted paths, so uniqueness must come from
+        // the name itself (pid + counter), not from overwriting. Assert
+        // only the names: file-existence checks would race the stale-file
+        // sweeper that other tests trigger in parallel.
+        let a = super::write_task_xml("<a/>").expect("first write");
+        let b = super::write_task_xml("<b/>").expect("second write");
+        assert_ne!(a, b, "two task documents must not share a path");
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
     }
 
     #[test]
