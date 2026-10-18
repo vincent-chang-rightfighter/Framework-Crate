@@ -488,11 +488,37 @@ pub fn spawn(state: AppState) {
                 let mut versions_scan_attempts: u32 = 0;
                 let mut last_cpu_power_poll: u64 = 0;
                 let mut last_resume_ts: u64 = 0;
+                // Wall-clock fallback for missed tray resume events: if the
+                // wall clock jumps >60s while monotonic barely moves, the
+                // machine slept without a PowerResumed pump.
+                let mut last_wall_ms = crate::util::current_time_ms();
                 'poll_loop: loop {
                     let resume_ts = bg_state2.lifecycle.last_resume_ts.load(Ordering::Acquire);
                     // Skip resume handling if shutdown requested.
                     if bg_state2.lifecycle.shutdown.load(Ordering::Acquire) {
                         return;
+                    }
+                    {
+                        let wall_now = crate::util::current_time_ms();
+                        // Sleep/resume: wall jumps forward while this loop
+                        // was parked in sleep; monotonic sleep time is not
+                        // visible here, so a large wall delta alone signals
+                        // a missed resume. Threshold 60s avoids DST noise.
+                        // NOTE: last_resume_ts and last_fan_rpm_reset are
+                        // monotonic-domain; store monotonic_ms() here, never
+                        // the wall epoch, or the 60s re-baseline breaks.
+                        if wall_now.saturating_sub(last_wall_ms) > 60_000 {
+                            tracing::warn!(
+                                "[RESUME] wall-clock jump detected ({}ms), forcing EC re-init as resume fallback",
+                                wall_now.saturating_sub(last_wall_ms)
+                            );
+                            // Synthesize a resume_ts so the block below runs.
+                            bg_state2
+                                .lifecycle
+                                .last_resume_ts
+                                .store(crate::util::monotonic_ms(), Ordering::Release);
+                        }
+                        last_wall_ms = wall_now;
                     }
                     if resume_ts != 0 && resume_ts != last_resume_ts {
                         last_resume_ts = resume_ts;
@@ -662,16 +688,19 @@ pub fn spawn(state: AppState) {
                         }
                         Err(e) => {
                             // Overload skips are intentional backpressure,
-                            // not hardware failures: don't trip the reset.
+                            // not hardware failures: fall through so fan
+                            // modes still run on the last sample instead of
+                            // skipping the whole round.
                             if e.contains("overloaded") {
-                                continue;
-                            }
-                            warn!("EC thermal spawn failed: {}", e);
-                            consecutive_ec_failures += 1;
-                            if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-                                reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
-                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                continue;
+                                // Fall through to fan modes below.
+                            } else {
+                                warn!("EC thermal spawn failed: {}", e);
+                                consecutive_ec_failures += 1;
+                                if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
+                                    reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -721,11 +750,14 @@ pub fn spawn(state: AppState) {
                                 consecutive_battery_failures += 1;
                                 // Battery is UI-only: never reset the EC
                                 // client for it (that would needlessly drop
-                                // healthy fan/thermal state). Back off and
-                                // let staleness expiry clear the UI below.
+                                // healthy fan/thermal state), and never
+                                // `continue` the poll loop (that would skip
+                                // PD/expansion/fan). Fall through to the
+                                // staleness check and the rest of the round.
                                 if consecutive_battery_failures >= MAX_EC_IO_FAILURES {
-                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                    continue;
+                                    // No sleep here: sleeping would delay the
+                                    // fan fail-safe below. Staleness expiry
+                                    // below already clears a dead battery UI.
                                 }
                                 let last_ok =
                                     bg_state2.battery.last_success_ms.load(Ordering::Acquire);
@@ -740,16 +772,16 @@ pub fn spawn(state: AppState) {
                                 }
                             }
                             Err(e) => {
-                                // Overload skips are backpressure, not failure.
+                                // Overload skips are backpressure, not
+                                // failure: fall through to the rest of the
+                                // round instead of skipping PD/fan.
                                 if e.contains("overloaded") {
-                                    continue;
-                                }
-                                warn!("Battery spawn failed: {}", e);
-                                consecutive_battery_failures += 1;
-                                // UI-only: back off without EC reset.
-                                if consecutive_battery_failures >= MAX_EC_IO_FAILURES {
-                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                    continue;
+                                } else {
+                                    warn!("Battery spawn failed: {}", e);
+                                    consecutive_battery_failures += 1;
+                                    // UI-only: no sleep/continue and no EC
+                                    // reset; staleness expiry below handles
+                                    // a dead battery UI.
                                 }
                                 let last_ok =
                                     bg_state2.battery.last_success_ms.load(Ordering::Acquire);
@@ -777,7 +809,7 @@ pub fn spawn(state: AppState) {
                     if now_ms.saturating_sub(last_expansion_scan) >= expansion_interval {
                         last_expansion_scan = now_ms;
                         let ec_clone = Arc::clone(&ec);
-                        match crate::util::spawn_blocking_with_timeout(
+                        match crate::util::spawn_ec_read_with_timeout(
                             crate::util::EC_IO_TIMEOUT,
                             move || ec_clone.pd_ports(),
                         )
@@ -805,23 +837,30 @@ pub fn spawn(state: AppState) {
                                 );
                             }
                             Err(e) => {
-                                warn!("PD ports read failed: {}", e);
-                                if last_pd_success_ms != 0
-                                    && crate::util::monotonic_ms()
-                                        .saturating_sub(last_pd_success_ms)
-                                        > 30_000
-                                {
-                                    with_write_lock(&bg_state2.peripherals.pd_ports, |guard| {
-                                        if !guard.is_empty() {
-                                            *guard = Arc::new(smallvec::SmallVec::new());
-                                            mark_view_dirty(&bg_state2);
-                                        }
-                                    });
+                                // Overload skips are backpressure: fall
+                                // through to expansion/fan instead of
+                                // skipping the round.
+                                if e.contains("overloaded") {
+                                    // No warning, no staleness change.
+                                } else {
+                                    warn!("PD ports read failed: {}", e);
+                                    if last_pd_success_ms != 0
+                                        && crate::util::monotonic_ms()
+                                            .saturating_sub(last_pd_success_ms)
+                                            > 30_000
+                                    {
+                                        with_write_lock(&bg_state2.peripherals.pd_ports, |guard| {
+                                            if !guard.is_empty() {
+                                                *guard = Arc::new(smallvec::SmallVec::new());
+                                                mark_view_dirty(&bg_state2);
+                                            }
+                                        });
+                                    }
                                 }
                             }
                         }
                         let ec_clone = Arc::clone(&ec);
-                        match crate::util::spawn_blocking_with_timeout(
+                        match crate::util::spawn_ec_read_with_timeout(
                             crate::util::EC_IO_TIMEOUT,
                             move || ec_clone.expansion_cards(),
                         )
@@ -864,7 +903,7 @@ pub fn spawn(state: AppState) {
                         last_versions_scan = now_ms;
                         versions_scan_attempts += 1;
                         let ec_clone = Arc::clone(&ec);
-                        if let Ok(Ok(v)) = crate::util::spawn_blocking_with_timeout(
+                        if let Ok(Ok(v)) = crate::util::spawn_ec_read_with_timeout(
                             crate::util::EC_IO_TIMEOUT,
                             move || ec_clone.versions(),
                         )

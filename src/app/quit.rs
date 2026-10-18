@@ -74,10 +74,15 @@ impl App {
                     &self.state.system.ec_client,
                     Message::QuitShutdown,
                     move |ec| {
-                        // last_duty==0 means EC is already stopped or never
-                        // asserted: hand back to firmware instead of
-                        // explicitly writing 0% and leaving it fanless.
-                        if last_duty == 0 {
+                        // Any zero in the persisted duties means some fan
+                        // would be left fanless after exit: hand the whole
+                        // machine back to firmware instead.
+                        let any_zero = last_duty == 0
+                            || (!unified
+                                && fan_count > 1
+                                && !per_fan.is_empty()
+                                && per_fan.iter().take(fan_count).any(|&d| d == 0));
+                        if any_zero {
                             let _ = ec.autofanctrl();
                         } else if !unified && fan_count > 1 && !per_fan.is_empty() {
                             for (idx, &duty) in per_fan.iter().enumerate() {

@@ -13,18 +13,25 @@ use crate::util::read_lock;
 
 /// Drives Manual mode: unified single ramp, or one ramp per fan.
 pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
-    // High-temp guard: Manual low duty with fresh 95C+ readings would cook
+    // High-temp guard: Manual low duty with fresh hot readings would cook
     // the machine while stale detection stays quiet. Hand back to firmware.
     // Checked before the stale path so fresh-hot still trips. Threshold
-    // mirrors the curve 80C/60% floor: below 60% at 95C+ is unsafe.
+    // mirrors the curve 80C/60% floor (non-battery max): below 60% at 80C+
+    // is unsafe. Battery sensors are excluded so charging heat can't trip it.
     {
         if shutdown_requested(ctx.state) {
             return Flow::Stop;
         }
         let thermal = crate::util::read_lock(&ctx.state.thermal.data);
         if let Some(info) = thermal.as_ref().as_ref() {
-            let max_temp = info.temps.values().copied().fold(0, i32::max);
-            if max_temp >= 95 {
+            let max_temp = info
+                .temps
+                .iter()
+                .filter(|(n, _)| !crate::types::is_battery_sensor(n))
+                .map(|(_, t)| *t)
+                .max()
+                .unwrap_or(0);
+            if max_temp >= 80 {
                 let unified_low = ctx.manual_duty.is_none_or(|d| d < 60);
                 // Per-fan path uses per_fan_duty, not manual_duty.
                 let per_fan_low = {
@@ -33,7 +40,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 };
                 if unified_low || per_fan_low {
                     tracing::warn!(
-                        "Manual mode: {}C with sub-60% duty, handing to firmware",
+                        "Manual mode: {}C (non-battery max) with sub-60% duty, handing to firmware",
                         max_temp
                     );
                     if let Some(_ec_guard) = crate::util::acquire_ec_write().await {

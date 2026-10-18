@@ -308,6 +308,13 @@ pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
     // BTreeMap sorted by temp; keep max duty on duplicates to match validate.
     // High-temp floor lives here (not only in validate) so runtime drags
     // can't hold 80C+ at 0%: every write path goes through this function.
+    // Truncate first: a crafted config with millions of points would spin
+    // the BTreeMap insert loop (DoS via config file).
+    let points: &[[u32; 2]] = if points.len() > 1024 {
+        &points[..1024]
+    } else {
+        points
+    };
     let mut map: BTreeMap<u32, u32> = BTreeMap::new();
     let has_zero = points.iter().any(|p| p[0] == 0);
     if !has_zero {

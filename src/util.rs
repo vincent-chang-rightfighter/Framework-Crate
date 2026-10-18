@@ -41,6 +41,7 @@ pub fn system32_exe(name: &str) -> std::path::PathBuf {
     if let Some(dir) = windows_system32_dir() {
         return dir.join(name);
     }
+    tracing::warn!("GetSystemDirectoryW failed, falling back to SystemRoot env (spoofable)");
     let root = std::env::var_os("SystemRoot")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));

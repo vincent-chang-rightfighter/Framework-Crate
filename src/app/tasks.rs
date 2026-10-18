@@ -55,16 +55,22 @@ pub(crate) fn run_ec_task_quit(
                     continue;
                 };
                 let ec_opt = { util::read_lock(&ec_client) };
-                if let Some(ref ec) = *ec_opt {
-                    let ec = ec.clone();
-                    let task_f = f.clone();
-                    if let Err(e) =
-                        util::spawn_ec_guarded(guard, util::EC_IO_TIMEOUT, move || task_f(ec)).await
-                    {
-                        warn!("Quit EC handover failed (attempt {attempt}/3): {}", e);
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                        continue;
-                    }
+                let Some(ref ec) = *ec_opt else {
+                    // EC client is None during resume re-init: transient,
+                    // not a reason to skip the handover silently.
+                    warn!("Quit EC handover no client (attempt {attempt}/3), retrying");
+                    drop(guard);
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    continue;
+                };
+                let ec = ec.clone();
+                let task_f = f.clone();
+                if let Err(e) =
+                    util::spawn_ec_guarded(guard, util::EC_IO_TIMEOUT, move || task_f(ec)).await
+                {
+                    warn!("Quit EC handover failed (attempt {attempt}/3): {}", e);
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    continue;
                 }
                 return done;
             }
