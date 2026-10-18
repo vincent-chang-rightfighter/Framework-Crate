@@ -13,23 +13,27 @@ use crate::util::read_lock;
 
 /// Drives Manual mode: unified single ramp, or one ramp per fan.
 pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
-    // High-temp guard: Manual 0% with fresh 95C+ readings would cook the
-    // machine while stale detection stays quiet. Hand back to firmware.
-    // Checked before the stale path so fresh-hot still trips.
+    // High-temp guard: Manual low duty with fresh 95C+ readings would cook
+    // the machine while stale detection stays quiet. Hand back to firmware.
+    // Checked before the stale path so fresh-hot still trips. Threshold
+    // mirrors the curve 80C/60% floor: below 60% at 95C+ is unsafe.
     {
+        if shutdown_requested(ctx.state) {
+            return Flow::Stop;
+        }
         let thermal = crate::util::read_lock(&ctx.state.thermal.data);
         if let Some(info) = thermal.as_ref().as_ref() {
             let max_temp = info.temps.values().copied().fold(0, i32::max);
             if max_temp >= 95 {
-                let unified_zero = ctx.manual_duty == Some(0) || ctx.manual_duty.is_none();
+                let unified_low = ctx.manual_duty.is_none_or(|d| d < 60);
                 // Per-fan path uses per_fan_duty, not manual_duty.
-                let per_fan_zero = {
+                let per_fan_low = {
                     let per_fan = crate::util::read_lock(&ctx.state.fan.per_fan_duty);
-                    !per_fan.is_empty() && per_fan.iter().all(|&d| d == 0)
+                    !per_fan.is_empty() && per_fan.iter().any(|&d| d < 60)
                 };
-                if unified_zero || per_fan_zero {
+                if unified_low || per_fan_low {
                     tracing::warn!(
-                        "Manual mode: {}C with 0% duty, handing to firmware",
+                        "Manual mode: {}C with sub-60% duty, handing to firmware",
                         max_temp
                     );
                     if let Some(_ec_guard) = crate::util::acquire_ec_write().await {

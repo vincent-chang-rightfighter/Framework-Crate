@@ -66,7 +66,12 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     // (temps is already an Arc).
     let thermal = read_lock(&ctx.state.thermal.data).as_ref().clone();
     let Some(ref thermal) = thermal else {
-        // No sample yet but not stale-timed out above? immediate handover.
+        // No sample yet but not stale-timed out above? Throttled handover
+        // like the empty-temps path below so a missing sample can't spam
+        // autofanctrl every poll (min 200ms).
+        if ctx.now_ms.saturating_sub(ctx.last_curve_failover_ms) < CURVE_TEMP_FAILOVER_MS {
+            return Flow::Next;
+        }
         if shutdown_requested(ctx.state) {
             return Flow::Stop;
         }
@@ -75,10 +80,22 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             return Flow::Next;
         };
         let ec_clone = Arc::clone(ctx.ec);
-        let _ = crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
+        if crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
             ec_clone.autofanctrl()
         })
-        .await;
+        .await
+        .is_ok()
+        {
+            ctx.last_curve_failover_ms = ctx.now_ms;
+            ctx.consecutive_ec_failures = 0;
+        } else {
+            ctx.consecutive_ec_failures += 1;
+            if ctx.consecutive_ec_failures >= MAX_EC_IO_FAILURES {
+                reset_ec_after_failures(ctx.state, ctx.consecutive_ec_failures);
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                return Flow::Next;
+            }
+        }
         return Flow::Next;
     };
     // avoid unwrap panic if curve config is corrupted/missing

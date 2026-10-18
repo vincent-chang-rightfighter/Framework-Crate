@@ -28,15 +28,52 @@ pub fn monotonic_ms() -> u64 {
 
 /// Absolute path to an exe under %SystemRoot%\System32.
 ///
-/// An elevated process must never resolve system tools from PATH: any
-/// user-writable directory earlier in PATH would win the lookup.
+/// An elevated process must never resolve system tools from PATH or from
+/// attacker-controlled env: any user-writable directory earlier in PATH
+/// would win the lookup, and a spoofed SystemRoot would redirect every
+/// tool. Prefer the OS-known System32 directory; env is only a fallback
+/// and the result is validated to end in System32\<name>.
 /// (winget is intentionally excluded: it is a store-managed execution
 /// alias with a versioned path, not a System32 binary.)
 pub fn system32_exe(name: &str) -> std::path::PathBuf {
+    // Prefer the OS API over env: GetSystemDirectoryW cannot be spoofed
+    // via SystemRoot like getenv can.
+    if let Some(dir) = windows_system32_dir() {
+        return dir.join(name);
+    }
     let root = std::env::var_os("SystemRoot")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
     root.join("System32").join(name)
+}
+
+fn windows_system32_dir() -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    // MAX_PATH-sized buffer is enough for the system directory.
+    let mut buf = vec![0u16; 260];
+    // SAFETY: GetSystemDirectoryW writes up to the buffer length and
+    // returns the length excluding nul; no other global state is touched.
+    let len = unsafe {
+        windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW(
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+        )
+    };
+    if len == 0 || (len as usize) >= buf.len() {
+        return None;
+    }
+    let os = std::ffi::OsString::from_wide(&buf[..len as usize]);
+    let dir = std::path::PathBuf::from(os);
+    // Sanity: must end in System32 (case-insensitive) or refuse.
+    if dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("System32"))
+    {
+        Some(dir)
+    } else {
+        None
+    }
 }
 
 /// Absolute path to Windows PowerShell 5.1. Note it does NOT live in the
@@ -122,18 +159,25 @@ where
     T: Send + 'static,
 {
     let seq = next_ec_write_seq();
+    tracing::trace!("EC write dispatch ec_seq={seq}");
     let (tx, rx) = tokio::sync::oneshot::channel();
     let handle = tokio::task::spawn_blocking(task);
     // Forward completion; the receiver is gone after a timeout, in which
     // case the late result is dropped here instead of updating state.
+    // Late arrivals are still traced so out-of-order landings are provable.
     tokio::spawn(async move {
         let res = handle.await;
-        let _ = tx.send(res);
+        if tx.send(res).is_err() {
+            tracing::trace!("EC write late arrival ec_seq={seq} (receiver gone)");
+        }
     });
     let result = tokio::time::timeout(timeout, rx).await;
     drop(guard);
     match result {
-        Ok(Ok(Ok(val))) => Ok(val),
+        Ok(Ok(Ok(val))) => {
+            tracing::trace!("EC write complete ec_seq={seq}");
+            Ok(val)
+        }
         Ok(Ok(Err(join_err))) => Err(format!("Task panicked: {}", join_err)),
         Ok(Err(_)) => Err("EC writer task vanished".to_string()),
         Err(_) => Err(format!(

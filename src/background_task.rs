@@ -714,11 +714,11 @@ pub fn spawn(state: AppState) {
                             Ok(Err(e)) => {
                                 tracing::debug!("Battery read failed: {}", e);
                                 consecutive_battery_failures += 1;
+                                // Battery is UI-only: never reset the EC
+                                // client for it (that would needlessly drop
+                                // healthy fan/thermal state). Back off and
+                                // let staleness expiry clear the UI below.
                                 if consecutive_battery_failures >= MAX_EC_IO_FAILURES {
-                                    reset_ec_after_failures(
-                                        &bg_state2,
-                                        consecutive_battery_failures,
-                                    );
                                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                     continue;
                                 }
@@ -737,11 +737,8 @@ pub fn spawn(state: AppState) {
                             Err(e) => {
                                 warn!("Battery spawn panicked: {}", e);
                                 consecutive_battery_failures += 1;
+                                // UI-only: back off without EC reset.
                                 if consecutive_battery_failures >= MAX_EC_IO_FAILURES {
-                                    reset_ec_after_failures(
-                                        &bg_state2,
-                                        consecutive_battery_failures,
-                                    );
                                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                     continue;
                                 }
@@ -1022,19 +1019,25 @@ pub fn spawn(state: AppState) {
                     // duty would persist indefinitely with no UI to fix it.
                     // Take the write lock so we don't race an in-flight
                     // orphan duty write that could land after the handover.
+                    // Retry like the quit path instead of giving up on the
+                    // first contended lock.
                     let ec_opt = { read_lock(&state.system.ec_client) };
                     if let Some(ec) = ec_opt.as_ref().as_ref() {
-                        let ec_clone = Arc::clone(ec);
-                        let handover = if let Some(guard) = crate::util::acquire_ec_write().await {
-                            crate::util::spawn_ec_guarded(
-                                guard,
-                                crate::util::EC_IO_TIMEOUT,
-                                move || ec_clone.autofanctrl(),
-                            )
-                            .await
-                        } else {
-                            Err("EC write lock contended during final handover".to_string())
-                        };
+                        let mut handover: Result<Result<(), String>, String> =
+                            Err("EC write lock contended during final handover".to_string());
+                        for _ in 0..3 {
+                            if let Some(guard) = crate::util::acquire_ec_write().await {
+                                let ec_clone = Arc::clone(ec);
+                                handover = crate::util::spawn_ec_guarded(
+                                    guard,
+                                    crate::util::EC_IO_TIMEOUT,
+                                    move || ec_clone.autofanctrl(),
+                                )
+                                .await;
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        }
                         match handover {
                             Ok(Ok(())) => warn!(
                                 "Background task failed {} times consecutively, giving up; fans returned to firmware control",

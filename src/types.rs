@@ -306,6 +306,8 @@ fn default_rate_limit_pct_per_step() -> u32 {
 
 pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
     // BTreeMap sorted by temp; keep max duty on duplicates to match validate.
+    // High-temp floor lives here (not only in validate) so runtime drags
+    // can't hold 80C+ at 0%: every write path goes through this function.
     let mut map: BTreeMap<u32, u32> = BTreeMap::new();
     let has_zero = points.iter().any(|p| p[0] == 0);
     if !has_zero {
@@ -316,6 +318,7 @@ pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
         if temp >= CURVE_TEMP_LOCK_START {
             continue;
         }
+        let duty = if temp >= 80 { duty.max(60) } else { duty };
         map.entry(temp)
             .and_modify(|e| *e = (*e).max(duty))
             .or_insert(duty);

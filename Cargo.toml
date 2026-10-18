@@ -57,4 +57,6 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-panic = "abort"
+# Unwind (not abort) so the background supervisor and quit/final fan
+# handover can run after a panic instead of killing the process with
+# fans stuck on a manual duty.

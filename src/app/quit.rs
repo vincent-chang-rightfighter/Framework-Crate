@@ -40,11 +40,17 @@ impl App {
                     .battery
                     .charge_limit_max_pct;
                 // Write quit duty before quitting; also flush charge limit.
+                // A 0% quit duty with no firmware fallback would leave the
+                // machine fanless after exit, so hand back to firmware.
                 Some(run_ec_task_quit(
                     &self.state.system.ec_client,
                     Message::QuitShutdown,
                     move |ec| {
-                        if let Err(e) = ec.set_fan_duty(duty, None) {
+                        if duty == 0 {
+                            if let Err(e) = ec.autofanctrl() {
+                                warn!("Failed to restore auto fan on 0% quit: {}", e);
+                            }
+                        } else if let Err(e) = ec.set_fan_duty(duty, None) {
                             warn!("Failed to set quit fan duty: {}", e);
                         }
                         apply_quit_charge_limit(&ec, &limit);
@@ -68,17 +74,20 @@ impl App {
                     &self.state.system.ec_client,
                     Message::QuitShutdown,
                     move |ec| {
-                        if last_duty > 0 {
-                            if !unified && fan_count > 1 && !per_fan.is_empty() {
-                                for (idx, &duty) in per_fan.iter().enumerate() {
-                                    if idx >= fan_count {
-                                        continue;
-                                    }
-                                    let _ = ec.set_fan_duty(duty, Some(idx as u32));
+                        // last_duty==0 means EC is already stopped or never
+                        // asserted: hand back to firmware instead of
+                        // explicitly writing 0% and leaving it fanless.
+                        if last_duty == 0 {
+                            let _ = ec.autofanctrl();
+                        } else if !unified && fan_count > 1 && !per_fan.is_empty() {
+                            for (idx, &duty) in per_fan.iter().enumerate() {
+                                if idx >= fan_count {
+                                    continue;
                                 }
-                            } else {
-                                let _ = ec.set_fan_duty(last_duty, None);
+                                let _ = ec.set_fan_duty(duty, Some(idx as u32));
                             }
+                        } else {
+                            let _ = ec.set_fan_duty(last_duty, None);
                         }
                         apply_quit_charge_limit(&ec, &limit);
                     },
