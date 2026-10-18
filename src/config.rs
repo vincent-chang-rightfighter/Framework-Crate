@@ -478,11 +478,24 @@ fn backup_corrupt_config(path: &std::path::Path) {
     }
 }
 
+fn refuse_symlink(path: &std::path::Path) -> Result<(), String> {
+    if let Ok(meta) = std::fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        return Err(format!(
+            "refusing to read through symlink: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 pub fn load() -> Result<Config, String> {
     let path = config_path()?;
     tracing::debug!("Loading config from: {}", path.display());
     if path.exists() {
         warn_if_world_writable(&path);
+        refuse_symlink(&path)?;
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {

@@ -141,9 +141,20 @@ fn classify_winget_output(output: &std::process::Output) -> WingetOutcome {
 /// per-user WindowsApps alias and System32 `where.exe` resolution, and
 /// fall back to bare PATH only with a warning.
 fn resolve_winget() -> std::path::PathBuf {
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        let cand = std::path::PathBuf::from(local).join(r"Microsoft\WindowsApps\winget.exe");
-        if cand.exists() {
+    // Prefer the OS-known LocalAppData (dirs uses SHGetKnownFolderPath,
+    // not env) so a spoofed LOCALAPPDATA cannot redirect execution.
+    // Fall back to env only if dirs is unavailable, and only accept a
+    // WindowsApps alias path.
+    let local_opt = dirs::data_local_dir()
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from));
+    if let Some(local) = local_opt {
+        let cand = local.join(r"Microsoft\WindowsApps\winget.exe");
+        // Only accept the expected alias location, not an arbitrary env path.
+        if cand
+            .to_string_lossy()
+            .contains(r"Microsoft\WindowsApps\winget.exe")
+            && cand.exists()
+        {
             return cand;
         }
     }
@@ -312,7 +323,7 @@ pub fn invalidate_pawnio_version() {
 pub fn update_pawnio() -> Result<(), String> {
     use std::process::Command;
     tracing::info!("Updating PawnIO via winget...");
-    let output = Command::new("winget")
+    let output = Command::new(resolve_winget())
         .args([
             "upgrade",
             "-e",

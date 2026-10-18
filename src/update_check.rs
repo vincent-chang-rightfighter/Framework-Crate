@@ -24,6 +24,8 @@ pub fn fetch_latest_tag() -> Option<String> {
             "=https",
             "--max-time",
             "15",
+            "--max-filesize",
+            "1048576",
             "--retry",
             "1",
             "--retry-delay",
@@ -34,6 +36,10 @@ pub fn fetch_latest_tag() -> Option<String> {
         .output()
         .ok()?;
     if !out.status.success() {
+        return None;
+    }
+    // Bound buffering on MITM/hijack: 1M cap like the modules path.
+    if out.stdout.len() > 1024 * 1024 {
         return None;
     }
     let body = String::from_utf8_lossy(&out.stdout);

@@ -267,7 +267,10 @@ impl App {
                     tracing::error!("Failed to write debug report {}: {}", path.display(), e);
                 }
                 prune_debug_reports(std::env::temp_dir(), MAX_DEBUG_REPORTS);
-                if let Err(e) = std::process::Command::new("notepad.exe").arg(&path).spawn() {
+                if let Err(e) = std::process::Command::new(crate::util::system32_exe("notepad.exe"))
+                    .arg(&path)
+                    .spawn()
+                {
                     tracing::error!(
                         "Failed to open debug report {} in notepad: {}",
                         path.display(),

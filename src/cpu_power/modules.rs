@@ -509,9 +509,11 @@ pub fn download_and_extract_modules() -> Result<(), String> {
 
     // Download via inline -Command (no script file, no script-path race).
     // Escape single quotes for PowerShell single-quoted strings.
+    // Timeout caps a hung CDN; pre-size check is done by the caller via
+    // Content-Length where available, with a 32M post-check below.
     let ps_command = format!(
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
-         Invoke-WebRequest -Uri '{url}' -OutFile '{zip}' -UseBasicParsing -ErrorAction Stop",
+         Invoke-WebRequest -Uri '{url}' -OutFile '{zip}' -UseBasicParsing -ErrorAction Stop -TimeoutSec 30",
         url = ps_escape(&url),
         zip = ps_escape(&zip_tmp.display().to_string()),
     );
@@ -681,7 +683,7 @@ pub fn pawnio_modules_version() -> String {
 pub fn open_modules_dir() -> Result<(), String> {
     let dir = modules_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::process::Command::new("explorer.exe")
+    std::process::Command::new(crate::util::system32_exe("explorer.exe"))
         .arg(&dir)
         .spawn()
         .map_err(|e| e.to_string())?;
