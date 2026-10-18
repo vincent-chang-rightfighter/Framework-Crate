@@ -299,17 +299,21 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 text("  PL1:").size(FONT_BODY),
                 text_input("W", &snap.pl1_edit)
                     .width(Length::Fixed(60.0))
-                    .on_input(Message::CpuPowerPl1Changed),
+                    .on_input(Message::CpuPowerPl1Changed)
+                    .style(input_style),
                 iced::widget::checkbox(snap.pl1_enabled)
-                    .on_toggle(Message::CpuPowerPl1EnabledToggled),
+                    .on_toggle(Message::CpuPowerPl1EnabledToggled)
+                    .style(checkbox_style),
                 text("En").size(FONT_SMALL),
                 iced::widget::checkbox(snap.pl1_clamped)
-                    .on_toggle(Message::CpuPowerPl1ClampedToggled),
+                    .on_toggle(Message::CpuPowerPl1ClampedToggled)
+                    .style(checkbox_style),
                 text("Cl").size(FONT_SMALL),
                 text("T:").size(FONT_SMALL),
                 text_input("s", &snap.pl1_time_edit)
                     .width(Length::Fixed(50.0))
-                    .on_input(Message::CpuPowerPl1TimeChanged),
+                    .on_input(Message::CpuPowerPl1TimeChanged)
+                    .style(input_style),
             ]
             .spacing(4)
             .align_y(iced::Alignment::Center),
@@ -319,12 +323,15 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 text("  PL2:").size(FONT_BODY),
                 text_input("W", &snap.pl2_edit)
                     .width(Length::Fixed(60.0))
-                    .on_input(Message::CpuPowerPl2Changed),
+                    .on_input(Message::CpuPowerPl2Changed)
+                    .style(input_style),
                 iced::widget::checkbox(snap.pl2_enabled)
-                    .on_toggle(Message::CpuPowerPl2EnabledToggled),
+                    .on_toggle(Message::CpuPowerPl2EnabledToggled)
+                    .style(checkbox_style),
                 text("En").size(FONT_SMALL),
                 iced::widget::checkbox(snap.pl2_clamped)
-                    .on_toggle(Message::CpuPowerPl2ClampedToggled),
+                    .on_toggle(Message::CpuPowerPl2ClampedToggled)
+                    .style(checkbox_style),
                 text("Cl").size(FONT_SMALL),
             ]
             .spacing(4)

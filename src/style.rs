@@ -474,28 +474,97 @@ pub fn info_row(label: &str, value: &str) -> iced::Element<'static, crate::Messa
     .into()
 }
 
-pub fn mode_style(theme: &iced::Theme, selected: bool) -> iced::widget::button::Style {
+pub fn mode_style(
+    theme: &iced::Theme,
+    status: iced::widget::button::Status,
+    selected: bool,
+) -> iced::widget::button::Style {
+    use iced::widget::button::Status;
     let pal = palette(theme);
     if selected {
+        // Selected keeps the accent fill; hover/pressed brighten text
+        // border slightly instead of going invisible.
+        let hovered = matches!(status, Status::Hovered | Status::Pressed);
         iced::widget::button::Style {
             background: Some(pal.select_bg.into()),
-            text_color: pal.select_text,
+            text_color: if hovered {
+                iced::Color::WHITE
+            } else {
+                pal.select_text
+            },
             border: iced::Border::default()
                 .rounded(6)
                 .width(1)
-                .color(pal.select_bg),
+                .color(if hovered { pal.btn_text } else { pal.select_bg }),
             ..iced::widget::button::Style::default()
         }
     } else {
+        let (bg, text) = match status {
+            Status::Hovered => (Some(pal.btn_hover_bg.into()), pal.btn_hover_text),
+            Status::Pressed => (Some(pal.btn_pressed_bg.into()), pal.btn_hover_text),
+            Status::Disabled => (Some(iced::Color::TRANSPARENT.into()), pal.btn_text_dim),
+            _ => (Some(iced::Color::TRANSPARENT.into()), pal.toggle_off_text),
+        };
         iced::widget::button::Style {
-            background: Some(iced::Color::TRANSPARENT.into()),
-            text_color: pal.toggle_off_text,
+            background: bg,
+            text_color: text,
             border: iced::Border::default()
                 .rounded(6)
                 .width(1)
                 .color(pal.toggle_off_border),
             ..iced::widget::button::Style::default()
         }
+    }
+}
+
+/// Back-compat wrapper for call sites that ignore Status. Prefer
+/// `mode_style(theme, status, selected)` so hover/pressed give feedback.
+pub fn mode_style_selected(theme: &iced::Theme, selected: bool) -> iced::widget::button::Style {
+    mode_style(theme, iced::widget::button::Status::Active, selected)
+}
+
+pub fn rule_style(theme: &iced::Theme) -> iced::widget::rule::Style {
+    let pal = palette(theme);
+    iced::widget::rule::Style {
+        color: pal.card_border,
+        radius: 0.0.into(),
+        fill_mode: iced::widget::rule::FillMode::Full,
+        snap: true,
+    }
+}
+
+pub fn scrollable_style(
+    theme: &iced::Theme,
+    status: iced::widget::scrollable::Status,
+) -> iced::widget::scrollable::Style {
+    use iced::widget::scrollable::Status;
+    let pal = palette(theme);
+    // Start from the theme default (rails, gap, auto_scroll) so iced
+    // upgrades don't rot this override, then pin our rail colors so
+    // Black-theme scrollbars don't stay invisible on pure BLACK.
+    let mut style = iced::widget::scrollable::default(theme, status);
+    let rail_bg: iced::Background = pal.card_bg.into();
+    let scroller_bg: iced::Background = pal.btn_border.into();
+    style.vertical_rail.background = Some(rail_bg);
+    style.horizontal_rail.background = Some(rail_bg);
+    style.vertical_rail.scroller.background = scroller_bg;
+    style.horizontal_rail.scroller.background = scroller_bg;
+    match status {
+        Status::Hovered {
+            is_horizontal_scrollbar_hovered,
+            is_vertical_scrollbar_hovered,
+            ..
+        } => {
+            // Highlight the hovered scroller so Black-theme scrollbars
+            // don't stay invisible.
+            if is_horizontal_scrollbar_hovered || is_vertical_scrollbar_hovered {
+                let hl: iced::Background = pal.toggle_off_border.into();
+                style.vertical_rail.scroller.background = hl;
+                style.horizontal_rail.scroller.background = hl;
+            }
+            style
+        }
+        _ => style,
     }
 }
 
@@ -526,6 +595,162 @@ pub fn slider_style(
             // long-standing look is unchanged; Light gets a dark ring.
             border_color: pal.grid_base,
         },
+    }
+}
+
+/// Disabled fill shared by inputs and checkboxes. Normally the plot panel
+/// (weakest) so it differs from both the active card (weak) and the
+/// settings container (weaker). Black forces card and settings to pure
+/// BLACK, where the plot lift (#0A0A0C) is nearly invisible, so Black
+/// gets a one-step brighter lift (#1A1A1E) to keep disabled boxes visible.
+fn disabled_bg(theme: &iced::Theme, pal: &Palette) -> iced::Color {
+    if *theme == iced::Theme::Oxocarbon {
+        iced::Color::from_rgb8(0x1A, 0x1A, 0x1E)
+    } else {
+        pal.temp_plot_bg
+    }
+}
+
+/// Text input style from the app palette so inputs match cards instead of
+/// iced stock. Default shifts a hair versus stock Dark (card-tinted
+/// surfaces instead of theme background).
+/// Hover uses the text color so it stays visible on every theme
+/// (`card_border` and `toggle_off_border` both resolve to
+/// `background.strong` outside Default, so a border-to-border hover would
+/// be a no-op). Focus uses the select accent; focus wins over hover.
+pub fn input_style(
+    theme: &iced::Theme,
+    status: iced::widget::text_input::Status,
+) -> iced::widget::text_input::Style {
+    use iced::widget::text_input::Status;
+    let pal = palette(theme);
+    let border = |c: iced::Color| iced::Border {
+        color: c,
+        width: 1.0,
+        radius: 6.0.into(),
+    };
+    let active = iced::widget::text_input::Style {
+        background: pal.card_bg.into(),
+        border: border(pal.card_border),
+        icon: pal.gray,
+        placeholder: pal.btn_text_dim,
+        value: pal.btn_text,
+        selection: pal.select_bg,
+    };
+    match status {
+        Status::Active => active,
+        Status::Hovered => iced::widget::text_input::Style {
+            border: border(pal.btn_text),
+            ..active
+        },
+        // Focus wins over hover: a focused field keeps the accent border
+        // even while the mouse is over it.
+        Status::Focused { .. } => iced::widget::text_input::Style {
+            border: border(pal.select_bg),
+            ..active
+        },
+        Status::Disabled => iced::widget::text_input::Style {
+            // Disabled uses the plot panel (weakest) so it differs from
+            // both the active card (weak) and the settings container
+            // (weaker), including Black where card and settings are both
+            // pure BLACK (lifted to #1A1A1E so the box doesn't vanish).
+            // `pal.dark` would melt into the border outside Default.
+            // Selection is unreachable when disabled, so it intentionally
+            // inherits the active accent via `..active`.
+            background: disabled_bg(theme, &pal).into(),
+            border: border(pal.card_border),
+            icon: pal.toggle_off_text,
+            value: pal.btn_text_dim,
+            placeholder: pal.toggle_off_text,
+            ..active
+        },
+    }
+}
+
+/// Checkbox style from the app palette; the tick box tracks the select
+/// accent so it matches mode buttons instead of iced stock.
+/// Note: the current call sites use label-less `checkbox(bool)`, so
+/// `text_color` has no visible effect yet; it is kept for future
+/// `.label()` uses. Likewise the unchecked `icon_color` never renders
+/// (the tick only shows when checked) and is kept for exhaustiveness.
+pub fn checkbox_style(
+    theme: &iced::Theme,
+    status: iced::widget::checkbox::Status,
+) -> iced::widget::checkbox::Style {
+    use iced::widget::checkbox::Status;
+    let pal = palette(theme);
+    let border = |c: iced::Color| iced::Border {
+        color: c,
+        width: 1.0,
+        radius: 4.0.into(),
+    };
+    let (box_bg, box_border, icon, text) = match status {
+        Status::Active { is_checked } => (
+            if is_checked {
+                pal.select_bg
+            } else {
+                pal.card_bg
+            },
+            if is_checked {
+                pal.select_bg
+            } else {
+                pal.toggle_off_border
+            },
+            if is_checked {
+                pal.select_text
+            } else {
+                pal.gray
+            },
+            Some(pal.btn_text),
+        ),
+        Status::Hovered { is_checked } => (
+            if is_checked {
+                pal.select_bg
+            } else {
+                pal.card_bg
+            },
+            if is_checked {
+                pal.select_bg
+            } else {
+                pal.btn_text
+            },
+            if is_checked {
+                pal.select_text
+            } else {
+                pal.btn_text
+            },
+            Some(pal.btn_text),
+        ),
+        Status::Disabled { is_checked } => (
+            // Unchecked disabled uses the lifted plot panel so it differs
+            // from both the active card and the settings container,
+            // including Black where card and settings are both pure BLACK.
+            // `pal.dark` equals the border color outside Default and would
+            // hide the outline. Checked disabled keeps the accent fill so
+            // state stays readable.
+            if is_checked {
+                pal.select_bg
+            } else {
+                disabled_bg(theme, &pal)
+            },
+            if is_checked {
+                pal.select_bg
+            } else {
+                pal.toggle_off_border
+            },
+            if is_checked {
+                pal.select_text
+            } else {
+                pal.toggle_off_text
+            },
+            Some(pal.btn_text_dim),
+        ),
+    };
+    iced::widget::checkbox::Style {
+        background: iced::Background::Color(box_bg),
+        icon_color: icon,
+        border: border(box_border),
+        text_color: text,
     }
 }
 
@@ -694,6 +919,150 @@ mod tests {
                     assert_eq!(c, *expected, "{id:?} must keep sensor {idx}");
                 }
             }
+        }
+    }
+
+    #[track_caller]
+    fn bg_color(bg: &iced::Background) -> iced::Color {
+        match *bg {
+            iced::Background::Color(c) => c,
+            _ => panic!("expected solid color background, got {bg:?}"),
+        }
+    }
+
+    fn unchecked_of(status: iced::widget::checkbox::Status) -> iced::widget::checkbox::Status {
+        use iced::widget::checkbox::Status;
+        match status {
+            Status::Active { .. } => Status::Active { is_checked: false },
+            Status::Hovered { .. } => Status::Hovered { is_checked: false },
+            Status::Disabled { .. } => Status::Disabled { is_checked: false },
+        }
+    }
+
+    #[test]
+    fn input_hover_differs_from_active_in_every_theme() {
+        // Regression: card_border and toggle_off_border both resolve to
+        // background.strong outside Default, so a border-to-border hover
+        // would be invisible. Hover must use the text color instead.
+        use iced::widget::text_input::Status;
+        for id in ThemeId::ALL {
+            let theme = id.iced();
+            let active = input_style(&theme, Status::Active);
+            let hovered = input_style(&theme, Status::Hovered);
+            assert_ne!(
+                hovered.border.color, active.border.color,
+                "{id:?}: hover border must differ from active"
+            );
+        }
+    }
+
+    #[test]
+    fn input_focus_uses_accent_in_every_theme() {
+        use iced::widget::text_input::Status;
+        for id in ThemeId::ALL {
+            let theme = id.iced();
+            let pal = palette(&theme);
+            let active = input_style(&theme, Status::Active);
+            for is_hovered in [false, true] {
+                let focused = input_style(&theme, Status::Focused { is_hovered });
+                assert_eq!(
+                    focused.border.color, pal.select_bg,
+                    "{id:?} hovered={is_hovered}: focus must use accent"
+                );
+                assert_ne!(
+                    focused.border.color, active.border.color,
+                    "{id:?} hovered={is_hovered}: focus must differ from active"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn input_disabled_keeps_visible_border() {
+        // Regression: `pal.dark` equals the border color outside Default,
+        // so a dark-on-dark disabled field would lose its outline.
+        // Disabled uses the plot panel instead.
+        use iced::widget::text_input::Status;
+        for id in ThemeId::ALL {
+            let theme = id.iced();
+            let disabled = input_style(&theme, Status::Disabled);
+            let bg = bg_color(&disabled.background);
+            assert_ne!(
+                bg, disabled.border.color,
+                "{id:?}: disabled bg must differ from border"
+            );
+        }
+    }
+
+    #[test]
+    fn input_disabled_differs_from_active_in_every_theme() {
+        // Regression: Black forces both card_bg and settings_bg to pure
+        // BLACK, so a settings_bg disabled fill would be identical to the
+        // active fill. Disabled uses temp_plot_bg (weakest) instead.
+        use iced::widget::text_input::Status;
+        for id in ThemeId::ALL {
+            let theme = id.iced();
+            let active = input_style(&theme, Status::Active);
+            let disabled = input_style(&theme, Status::Disabled);
+            assert_ne!(
+                bg_color(&disabled.background),
+                bg_color(&active.background),
+                "{id:?}: disabled bg must differ from active bg"
+            );
+        }
+    }
+
+    #[test]
+    fn checkbox_checked_differs_from_unchecked() {
+        use iced::widget::checkbox::Status;
+        for id in ThemeId::ALL {
+            let theme = id.iced();
+            for checked_status in [
+                Status::Active { is_checked: true },
+                Status::Hovered { is_checked: true },
+                Status::Disabled { is_checked: true },
+            ] {
+                let checked = checkbox_style(&theme, checked_status);
+                let unchecked = checkbox_style(&theme, unchecked_of(checked_status));
+                assert_ne!(
+                    bg_color(&checked.background),
+                    bg_color(&unchecked.background),
+                    "{id:?} {checked_status:?}: box bg must differ"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checkbox_unchecked_disabled_keeps_visible_border() {
+        // Same dark-on-dark trap as inputs: unchecked disabled must not
+        // reuse `pal.dark` as the fill.
+        use iced::widget::checkbox::Status;
+        for id in ThemeId::ALL {
+            let theme = id.iced();
+            let s = checkbox_style(&theme, Status::Disabled { is_checked: false });
+            assert_ne!(
+                bg_color(&s.background),
+                s.border.color,
+                "{id:?}: unchecked disabled bg must differ from border"
+            );
+        }
+    }
+
+    #[test]
+    fn checkbox_unchecked_disabled_differs_from_active() {
+        // Same Black collision as inputs: card_bg and settings_bg are both
+        // BLACK, so disabled must use the plot lift instead.
+        use iced::widget::checkbox::Status;
+        for id in ThemeId::ALL {
+            let theme = id.iced();
+            let active = checkbox_style(&theme, Status::Active { is_checked: false });
+            let disabled = checkbox_style(&theme, Status::Disabled { is_checked: false });
+            assert_ne!(
+                bg_color(&disabled.background),
+                bg_color(&active.background),
+                "{id:?}: unchecked disabled bg must differ from active bg"
+            );
         }
     }
 }

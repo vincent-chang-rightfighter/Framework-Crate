@@ -48,7 +48,7 @@ pub(crate) fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
                     window_row = window_row.push(
                         button(text(format!("{}s", opt)).size(FONT_SMALL))
                             .on_press(Message::ChartWindowChanged(opt))
-                            .style(move |theme, _status| mode_style(theme, selected)),
+                            .style(move |theme, status| mode_style(theme, status, selected)),
                     );
                 }
                 settings_content = settings_content.push(window_row);
@@ -146,7 +146,11 @@ pub(crate) fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
                 .height(150),
             );
 
-            content = content.push(scrollable(list_content).height(Length::Shrink));
+            content = content.push(
+                scrollable(list_content)
+                    .height(Length::Shrink)
+                    .style(scrollable_style),
+            );
 
             content.into()
         }

@@ -223,7 +223,10 @@ pub(crate) fn not_supported_section(
     .width(Length::Fill)
     .style(move |_theme| iced::widget::container::Style {
         background: Some(pal.not_supported_bg.into()),
-        border: iced::Border::default().rounded(4),
+        border: iced::Border::default()
+            .rounded(4)
+            .width(1)
+            .color(pal.card_border),
         ..Default::default()
     })
     .into()
@@ -233,9 +236,9 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     if let Some(ref err) = app.startup_error {
         let mut content = column![].spacing(8).padding(20);
         content = content.push(text("Framework Crate").size(20));
-        content = content.push(rule::horizontal(1));
+        content = content.push(rule::horizontal(1).style(rule_style));
         content = content.push(text(err.as_str()).size(FONT_BODY));
-        content = content.push(rule::horizontal(1));
+        content = content.push(rule::horizontal(1).style(rule_style));
         content = content
             .push(text("Close this window and run the app as administrator.").size(FONT_BODY));
         return container(content)
@@ -247,7 +250,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
     if !app.init_complete {
         let content = column![
             text("Framework Crate").size(20),
-            rule::horizontal(1),
+            rule::horizontal(1).style(rule_style),
             text("Connecting to hardware...").size(FONT_BODY),
         ]
         .spacing(8)
@@ -335,6 +338,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
             .scroller_width(6.0)
             .spacing(4.0),
     ))
+    .style(scrollable_style)
     .height(Length::Fill);
 
     let content = container(

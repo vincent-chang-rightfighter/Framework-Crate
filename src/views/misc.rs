@@ -68,10 +68,14 @@ pub(crate) fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
     } else {
         MISC_SECTION_MAX_HEIGHT
     };
-    container(scrollable(container(content).padding(right_pad)).height(Length::Shrink))
-        .width(Length::Fill)
-        .max_height(max_h)
-        .into()
+    container(
+        scrollable(container(content).padding(right_pad))
+            .height(Length::Shrink)
+            .style(scrollable_style),
+    )
+    .width(Length::Fill)
+    .max_height(max_h)
+    .into()
 }
 
 pub(crate) fn kblight_section(snap: &ViewSnapshot) -> Element<'_, Message> {

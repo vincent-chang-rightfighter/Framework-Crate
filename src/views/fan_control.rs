@@ -68,13 +68,13 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
         row![
             button(text("Auto").size(FONT_BODY))
                 .on_press(Message::FanModeChanged(FanControlMode::Disabled))
-                .style(move |theme, _status| mode_style(theme, is_disabled)),
+                .style(move |theme, status| mode_style(theme, status, is_disabled)),
             button(text("Manual").size(FONT_BODY))
                 .on_press(Message::FanModeChanged(FanControlMode::Manual))
-                .style(move |theme, _status| mode_style(theme, is_manual)),
+                .style(move |theme, status| mode_style(theme, status, is_manual)),
             button(text("Curve").size(FONT_BODY))
                 .on_press(Message::FanModeChanged(FanControlMode::Curve))
-                .style(move |theme, _status| mode_style(theme, is_curve)),
+                .style(move |theme, status| mode_style(theme, status, is_curve)),
         ]
         .spacing(8)
     };

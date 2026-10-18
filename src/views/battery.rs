@@ -7,7 +7,9 @@ use iced::{Element, Length};
 pub(crate) fn view_charge_limit_section(enabled: bool, value: u32) -> Element<'static, Message> {
     column![
         row![
-            iced::widget::checkbox(enabled).on_toggle(Message::ChargeLimitToggled),
+            iced::widget::checkbox(enabled)
+                .on_toggle(Message::ChargeLimitToggled)
+                .style(checkbox_style),
             text("Max Charge Limit (%):").size(FONT_BODY),
             space::horizontal(),
             text(format!("{}%", value)).size(FONT_BODY),
@@ -200,10 +202,14 @@ pub(crate) fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
 
         let right_pad = iced::Padding::ZERO.right(14.0);
         // Height cap keeps card compact; scrollable when details expand.
-        container(scrollable(container(content).padding(right_pad)).height(Length::Shrink))
-            .width(Length::Fill)
-            .max_height(BATTERY_SECTION_MAX_HEIGHT)
-            .into()
+        container(
+            scrollable(container(content).padding(right_pad))
+                .height(Length::Shrink)
+                .style(scrollable_style),
+        )
+        .width(Length::Fill)
+        .max_height(BATTERY_SECTION_MAX_HEIGHT)
+        .into()
     } else {
         text(if app.cli_present {
             "Waiting for battery data..."

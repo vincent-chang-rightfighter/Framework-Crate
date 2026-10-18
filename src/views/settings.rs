@@ -138,7 +138,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
             text("Launch at Startup:").size(FONT_BODY),
             button(text(if startup_enabled { "ON" } else { "OFF" }).size(FONT_BODY))
                 .on_press(Message::StartupLaunchToggled(!startup_enabled))
-                .style(move |theme, _status| mode_style(theme, startup_enabled)),
+                .style(move |theme, status| mode_style(theme, status, startup_enabled)),
             startup_err_el,
         ]
         .spacing(8)
@@ -153,7 +153,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
             text("Expansion Card Debug Mode:").size(FONT_BODY),
             button(text(if ec_debug { "ON" } else { "OFF" }).size(FONT_BODY))
                 .on_press(Message::ToggleExpansionCardDebug)
-                .style(move |theme, _status| mode_style(theme, ec_debug)),
+                .style(move |theme, status| mode_style(theme, status, ec_debug)),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
@@ -297,6 +297,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
                 .scroller_width(6.0)
                 .spacing(4.0),
         ))
+        .style(scrollable_style)
         .height(Length::Fill),
     ]
     .spacing(5)
@@ -315,7 +316,7 @@ fn theme_picker(app: &App) -> Element<'_, Message> {
             row = row.push(
                 button(text(id.label()).size(FONT_SMALL))
                     .on_press(Message::ThemeChanged(*id))
-                    .style(move |theme, _status| mode_style(theme, selected)),
+                    .style(move |theme, status| mode_style(theme, status, selected)),
             );
         }
         rows = rows.push(row);

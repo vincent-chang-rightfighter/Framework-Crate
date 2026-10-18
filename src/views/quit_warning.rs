@@ -15,7 +15,7 @@ pub(crate) fn view_quit_warning(app: &App) -> Element<'_, Message> {
 
     let mut content = column![].spacing(12).padding(20);
     content = content.push(text("Framework Crate").size(20));
-    content = content.push(rule::horizontal(1));
+    content = content.push(rule::horizontal(1).style(rule_style));
     let is_curve = config.fan.mode == FanControlMode::Curve;
     let mode_label = if is_curve {
         "Fan is in curve mode (temperature-controlled)"
@@ -34,7 +34,7 @@ pub(crate) fn view_quit_warning(app: &App) -> Element<'_, Message> {
         .size(FONT_BODY),
     );
     content = content.push(text("Choose how to handle the fan before closing:").size(FONT_BODY));
-    content = content.push(rule::horizontal(1));
+    content = content.push(rule::horizontal(1).style(rule_style));
 
     content = content.push(
         iced::widget::row![
