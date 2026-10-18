@@ -12,14 +12,17 @@ pub use ffi::{
 };
 pub use limits::{
     BiosRestore, CpuPowerInfo, CpuPowerUnavailable, LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS,
-    PowerLimitParams, write_bios_defaults, write_msr_pl1_pl2_public,
+    LIMIT_MIN_ENABLED_WATTS, PowerLimitParams, validate_limit_params, write_bios_defaults,
+    write_msr_pl1_pl2_public,
 };
 pub use modules::{
     download_and_extract_modules, modules_downloaded, open_modules_dir, pawnio_modules_version,
     redetect_modules,
 };
 
-use bios::{PersistedBios, load_persisted_bios_defaults, persist_bios_defaults};
+use bios::{
+    PersistedBios, bios_defaults_valid, load_persisted_bios_defaults, persist_bios_defaults,
+};
 use read::read_cpu_power;
 use sync::SyncThread;
 
@@ -133,6 +136,35 @@ impl CpuPowerState {
         if !info.available {
             return;
         }
+        // Validate live values before persisting: a tainted overclocked
+        // snapshot must not become the permanent "factory" Reset target.
+        {
+            let probe = BiosDefaults {
+                pl1_watts: info.pl1_msr,
+                pl1_enabled: info.pl1_msr_enabled,
+                pl1_clamped: info.pl1_msr_clamped,
+                pl1_time_s: info.pl1_time_s,
+                pl2_watts: info.pl2_msr,
+                pl2_enabled: info.pl2_msr_enabled,
+                pl2_clamped: info.pl2_msr_clamped,
+                pl2_time_s: info.pl2_time_s,
+                pl1_mmio_watts: info.pl1_mmio,
+                pl1_mmio_enabled: info.pl1_mmio_enabled,
+                pl1_mmio_clamped: info.pl1_mmio_clamped,
+                pl1_mmio_time_s: info.pl1_mmio_time_s,
+                pl2_mmio_watts: info.pl2_mmio,
+                pl2_mmio_enabled: info.pl2_mmio_enabled,
+                pl2_mmio_clamped: info.pl2_mmio_clamped,
+                pl2_mmio_time_s: info.pl2_mmio_time_s,
+                power_unit: info.power_unit,
+                time_unit: info.time_unit,
+                captured_on_ac: true,
+            };
+            if !bios_defaults_valid(&probe) {
+                tracing::warn!("Live PL values out of range, refusing to persist as BIOS defaults");
+                return;
+            }
+        }
         // Record power source to prevent cross-source restore on resume.
         let captured_on_ac = read_ac_present();
         let defaults = BiosDefaults {
@@ -190,7 +222,16 @@ impl CpuPowerState {
     /// taking the old handle and starting a new one and spawn two sync threads
     /// writing MSR/MMIO at once. The sync loop never takes this lock, so
     /// joining under it cannot deadlock.
-    pub fn start_sync(&self, params: PowerLimitParams) -> Result<(), &'static str> {
+    pub fn start_sync(&self, mut params: PowerLimitParams) -> Result<(), &'static str> {
+        // Fail fast instead of spinning 30 breaker trips: validate before
+        // spawning. pl2_time_s comes from hardware and may exceed the UI
+        // cap; clamp it so a large BIOS value doesn't permanently fail sync.
+        if params.pl2_time_s > LIMIT_MAX_TIME_S {
+            params.pl2_time_s = LIMIT_MAX_TIME_S;
+        }
+        if validate_limit_params(&params).is_err() {
+            return Err("invalid power limit params");
+        }
         let mut thread = self.sync_thread.lock();
         thread.join_running();
         thread.start(

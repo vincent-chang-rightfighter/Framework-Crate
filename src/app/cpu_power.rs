@@ -470,11 +470,19 @@ impl App {
         if !pl1_time.is_finite() {
             return Err("PL1 time must be a finite number".to_string());
         }
-        if pl1 <= 0.0 {
-            return Err("PL1 must be greater than 0W".to_string());
+        // Enabled floor mirrors the write boundary: sub-5W enabled
+        // limits would hard-throttle into an apparent hang.
+        if pl1 < crate::cpu_power::LIMIT_MIN_ENABLED_WATTS {
+            return Err(format!(
+                "PL1 must be at least {:.0}W",
+                crate::cpu_power::LIMIT_MIN_ENABLED_WATTS
+            ));
         }
-        if pl2 <= 0.0 {
-            return Err("PL2 must be greater than 0W".to_string());
+        if pl2 < crate::cpu_power::LIMIT_MIN_ENABLED_WATTS {
+            return Err(format!(
+                "PL2 must be at least {:.0}W",
+                crate::cpu_power::LIMIT_MIN_ENABLED_WATTS
+            ));
         }
         // Upper bounds: beyond the 15-bit RAPL field the encoder silently
         // clamps, which then surfaces as a confusing read-back mismatch.

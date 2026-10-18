@@ -346,7 +346,7 @@ pub const LIMIT_MAX_TIME_S: f64 = 120.0;
 /// progress and the machine appears hung.
 pub const LIMIT_MIN_ENABLED_WATTS: f64 = 5.0;
 
-fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
+pub fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
     for (name, v) in [
         ("power_unit", params.power_unit),
         ("time_unit", params.time_unit),

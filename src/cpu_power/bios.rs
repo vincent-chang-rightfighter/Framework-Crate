@@ -79,18 +79,25 @@ pub(super) enum PersistedBios {
     Unavailable,
 }
 
-fn bios_defaults_valid(d: &BiosDefaults) -> bool {
+pub(super) fn bios_defaults_valid(d: &BiosDefaults) -> bool {
     // Restored values go straight into register encoding, so they get the
     // same finite/range guarantees as UI input. Zero watts is allowed for a
-    // disabled limit; NaN/inf/negative is not. Upper bounds match the write
-    // boundary so a corrupt huge snapshot is quarantined, never encoded.
-    use super::limits::{LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS};
+    // disabled limit, but an enabled limit must meet the 5W floor or the
+    // CPU would hard-throttle; PL1 must not exceed PL2. Upper bounds match
+    // the write boundary so a corrupt huge snapshot is quarantined.
+    use super::limits::{LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS, LIMIT_MIN_ENABLED_WATTS};
     let watts = [d.pl1_watts, d.pl2_watts, d.pl1_mmio_watts, d.pl2_mmio_watts];
     let times = [
         d.pl1_time_s,
         d.pl2_time_s,
         d.pl1_mmio_time_s,
         d.pl2_mmio_time_s,
+    ];
+    let enabled = [
+        d.pl1_enabled,
+        d.pl2_enabled,
+        d.pl1_mmio_enabled,
+        d.pl2_mmio_enabled,
     ];
     watts
         .iter()
@@ -102,6 +109,11 @@ fn bios_defaults_valid(d: &BiosDefaults) -> bool {
         && d.power_unit > 0.0
         && d.time_unit.is_finite()
         && d.time_unit > 0.0
+        && watts
+            .iter()
+            .zip(enabled)
+            .all(|(w, en)| !en || *w >= LIMIT_MIN_ENABLED_WATTS)
+        && (!d.pl1_enabled || !d.pl2_enabled || d.pl1_watts <= d.pl2_watts)
 }
 
 /// Backs up a corrupt or invalid snapshot aside and refuses to overwrite it.
