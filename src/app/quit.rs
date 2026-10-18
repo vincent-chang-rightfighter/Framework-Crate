@@ -1,4 +1,4 @@
-use super::{App, Message, apply_quit_charge_limit, run_ec_task};
+use super::{App, Message, apply_quit_charge_limit, run_ec_task_quit};
 use crate::util::read_lock;
 use iced::Task;
 use std::sync::atomic::Ordering;
@@ -15,7 +15,8 @@ impl App {
                     .battery
                     .charge_limit_max_pct;
                 // Restore fan before quitting; also flush charge limit to EC.
-                Some(run_ec_task(
+                // Quit path retries the lock instead of skipping silently.
+                Some(run_ec_task_quit(
                     &self.state.system.ec_client,
                     Message::QuitShutdown,
                     move |ec| {
@@ -39,7 +40,7 @@ impl App {
                     .battery
                     .charge_limit_max_pct;
                 // Write quit duty before quitting; also flush charge limit.
-                Some(run_ec_task(
+                Some(run_ec_task_quit(
                     &self.state.system.ec_client,
                     Message::QuitShutdown,
                     move |ec| {
@@ -63,7 +64,7 @@ impl App {
                     .battery
                     .charge_limit_max_pct;
                 // Keep current duty explicitly so it persists after exit (EC duty is volatile)
-                Some(run_ec_task(
+                Some(run_ec_task_quit(
                     &self.state.system.ec_client,
                     Message::QuitShutdown,
                     move |ec| {

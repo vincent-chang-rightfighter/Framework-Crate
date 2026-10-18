@@ -306,6 +306,13 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
         }
     };
     if !changed {
+        // EC is alive even when temps are stable: record liveness before
+        // throttling the chart push, otherwise a stable machine starves
+        // last_success_ms and trips THERMAL_STALE_MS failover.
+        state
+            .thermal
+            .last_success_ms
+            .store(now as u64, Ordering::Release);
         // Push periodic sample to keep chart window sliding; throttle to 1/s when idle.
         let history = read_lock(&state.thermal.history);
         if let Some(last_ts) = history.last_timestamp() {
@@ -446,6 +453,11 @@ pub fn spawn(state: AppState) {
                     };
                 let mut last_manual_duty: Option<u32> = None;
                 let mut consecutive_ec_failures: u32 = 0;
+                // Battery reads share the EC but must not wash out thermal
+                // failures (or vice versa): a healthy battery would hide a
+                // dead thermal sensor and delay reset, while battery jitter
+                // would needlessly reset a healthy thermal path.
+                let mut consecutive_battery_failures: u32 = 0;
                 let mut consecutive_ec_write_failures: u32 = 0;
                 // Last successful duty write time for periodic re-assert.
                 let mut last_duty_write_ms: u64 = 0;
@@ -668,7 +680,7 @@ pub fn spawn(state: AppState) {
                         .await
                         {
                             Ok(Ok(bat)) => {
-                                consecutive_ec_failures = 0;
+                                consecutive_battery_failures = 0;
                                 let ac_now = bat.ac_present == Some(true);
                                 // Signal PL reset on AC->battery transition (only on success to avoid spurious).
                                 let ac_was =
@@ -701,9 +713,12 @@ pub fn spawn(state: AppState) {
                             }
                             Ok(Err(e)) => {
                                 tracing::debug!("Battery read failed: {}", e);
-                                consecutive_ec_failures += 1;
-                                if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-                                    reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
+                                consecutive_battery_failures += 1;
+                                if consecutive_battery_failures >= MAX_EC_IO_FAILURES {
+                                    reset_ec_after_failures(
+                                        &bg_state2,
+                                        consecutive_battery_failures,
+                                    );
                                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                     continue;
                                 }
@@ -721,9 +736,12 @@ pub fn spawn(state: AppState) {
                             }
                             Err(e) => {
                                 warn!("Battery spawn panicked: {}", e);
-                                consecutive_ec_failures += 1;
-                                if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-                                    reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
+                                consecutive_battery_failures += 1;
+                                if consecutive_battery_failures >= MAX_EC_IO_FAILURES {
+                                    reset_ec_after_failures(
+                                        &bg_state2,
+                                        consecutive_battery_failures,
+                                    );
                                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                     continue;
                                 }
@@ -1002,15 +1020,22 @@ pub fn spawn(state: AppState) {
                     // Hand the fans back to firmware before dying: without
                     // the loop nothing re-asserts duties, so a stuck manual
                     // duty would persist indefinitely with no UI to fix it.
+                    // Take the write lock so we don't race an in-flight
+                    // orphan duty write that could land after the handover.
                     let ec_opt = { read_lock(&state.system.ec_client) };
                     if let Some(ec) = ec_opt.as_ref().as_ref() {
                         let ec_clone = Arc::clone(ec);
-                        match crate::util::spawn_blocking_with_timeout(
-                            crate::util::EC_IO_TIMEOUT,
-                            move || ec_clone.autofanctrl(),
-                        )
-                        .await
-                        {
+                        let handover = if let Some(guard) = crate::util::acquire_ec_write().await {
+                            crate::util::spawn_ec_guarded(
+                                guard,
+                                crate::util::EC_IO_TIMEOUT,
+                                move || ec_clone.autofanctrl(),
+                            )
+                            .await
+                        } else {
+                            Err("EC write lock contended during final handover".to_string())
+                        };
+                        match handover {
                             Ok(Ok(())) => warn!(
                                 "Background task failed {} times consecutively, giving up; fans returned to firmware control",
                                 consecutive_failures

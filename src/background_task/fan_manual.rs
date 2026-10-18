@@ -13,6 +13,39 @@ use crate::util::read_lock;
 
 /// Drives Manual mode: unified single ramp, or one ramp per fan.
 pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
+    // High-temp guard: Manual 0% with fresh 95C+ readings would cook the
+    // machine while stale detection stays quiet. Hand back to firmware.
+    // Checked before the stale path so fresh-hot still trips.
+    {
+        let thermal = crate::util::read_lock(&ctx.state.thermal.data);
+        if let Some(info) = thermal.as_ref().as_ref() {
+            let max_temp = info.temps.values().copied().fold(0, i32::max);
+            if max_temp >= 95 {
+                let unified_zero = ctx.manual_duty == Some(0) || ctx.manual_duty.is_none();
+                // Per-fan path uses per_fan_duty, not manual_duty.
+                let per_fan_zero = {
+                    let per_fan = crate::util::read_lock(&ctx.state.fan.per_fan_duty);
+                    !per_fan.is_empty() && per_fan.iter().all(|&d| d == 0)
+                };
+                if unified_zero || per_fan_zero {
+                    tracing::warn!(
+                        "Manual mode: {}C with 0% duty, handing to firmware",
+                        max_temp
+                    );
+                    if let Some(_ec_guard) = crate::util::acquire_ec_write().await {
+                        let ec_clone = Arc::clone(ctx.ec);
+                        let _ = crate::util::spawn_ec_guarded(
+                            _ec_guard,
+                            crate::util::EC_IO_TIMEOUT,
+                            move || ec_clone.autofanctrl(),
+                        )
+                        .await;
+                    }
+                    return Flow::Next;
+                }
+            }
+        }
+    }
     // Same stale-thermal handover as Curve: driving blind on dead readings
     // risks holding a low duty into rising heat, so hand back to firmware.
     let last_ok = ctx.state.thermal.last_success_ms.load(Ordering::Acquire);

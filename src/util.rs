@@ -96,6 +96,14 @@ where
     }
 }
 
+/// Monotonic EC write sequence for log correlation. Timeouts release the
+/// lock while the orphan keeps running, so a late write can still land
+/// out of order; the seq lets logs prove it (re-assert loops heal it).
+pub fn next_ec_write_seq() -> u64 {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Serialized EC write with timeout. Prefer over acquire + spawn pairs.
 ///
 /// The mutex guard is held only until completion OR timeout, whichever
@@ -103,8 +111,8 @@ where
 /// stuck behind a hung driver; the orphaned thread keeps running without
 /// the guard (drivers offer no cancellation) and its late result is
 /// discarded. A timed-out write may therefore still land out of order —
-/// the periodic re-assert loops (fan duties, PL sync) heal that — but it
-/// can never wedge the write path.
+/// the periodic re-assert loops (fan duties every 30s, PL sync every
+/// 250ms) heal that — but it can never wedge the write path.
 pub async fn spawn_ec_guarded<T>(
     guard: tokio::sync::MutexGuard<'static, ()>,
     timeout: std::time::Duration,
@@ -113,6 +121,7 @@ pub async fn spawn_ec_guarded<T>(
 where
     T: Send + 'static,
 {
+    let seq = next_ec_write_seq();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let handle = tokio::task::spawn_blocking(task);
     // Forward completion; the receiver is gone after a timeout, in which
@@ -127,7 +136,10 @@ where
         Ok(Ok(Ok(val))) => Ok(val),
         Ok(Ok(Err(join_err))) => Err(format!("Task panicked: {}", join_err)),
         Ok(Err(_)) => Err("EC writer task vanished".to_string()),
-        Err(_) => Err(format!("Hardware I/O timed out after {:?}", timeout)),
+        Err(_) => Err(format!(
+            "Hardware I/O timed out after {:?} (ec_seq={seq})",
+            timeout
+        )),
     }
 }
 

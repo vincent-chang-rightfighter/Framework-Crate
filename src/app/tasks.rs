@@ -36,6 +36,51 @@ pub(crate) fn run_ec_task(
     )
 }
 
+/// Quit path must not silently skip the firmware handover: retry the lock
+/// a few times so a contended EC still gets restored before the window
+/// closes. Always returns `done` so the shutdown flow continues, but a
+/// skipped handover is logged as an error, not a silent success.
+pub(crate) fn run_ec_task_quit(
+    ec_client: &Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
+    done: Message,
+    f: impl FnOnce(Arc<cli::EcClient>) + Send + 'static,
+) -> Task<Message> {
+    let ec_client = Arc::clone(ec_client);
+    Task::perform(
+        async move {
+            // Drop the FnOnce into an Option so retries can take it once.
+            use std::sync::Mutex;
+            let f_cell = Mutex::new(Some(f));
+            for attempt in 1..=3u32 {
+                let Some(guard) = util::acquire_ec_write().await else {
+                    warn!("Quit EC handover contended (attempt {attempt}/3), retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    continue;
+                };
+                let ec_opt = { util::read_lock(&ec_client) };
+                if let Some(ref ec) = *ec_opt {
+                    let ec = ec.clone();
+                    // Take the closure on first use; later retries no-op.
+                    let task_f = f_cell.lock().ok().and_then(|mut g| g.take());
+                    if let Some(task_f) = task_f
+                        && let Err(e) =
+                            util::spawn_ec_guarded(guard, util::EC_IO_TIMEOUT, move || task_f(ec))
+                                .await
+                    {
+                        warn!("Quit EC handover failed (attempt {attempt}/3): {}", e);
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        continue;
+                    }
+                }
+                return done;
+            }
+            warn!("Quit EC handover skipped after 3 attempts; fans may stay on manual duty");
+            done
+        },
+        |msg| msg,
+    )
+}
+
 /// Flushes persisted charge limit to EC on quit (config_save_task skips EC writes during shutdown).
 pub(crate) fn apply_quit_charge_limit(ec: &cli::EcClient, limit: &Option<types::SettingU8>) {
     if let Some(limit) = limit {

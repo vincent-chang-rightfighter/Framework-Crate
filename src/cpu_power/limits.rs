@@ -331,13 +331,20 @@ struct LimitTarget<'a> {
 /// Rejects non-finite, negative, or out-of-range limit values before encoding.
 ///
 /// `NaN as u32` is 0, so without this gate a NaN would encode as a 0W
-/// enabled limit and hard-throttle the CPU. Upper bounds match the UI caps:
-/// beyond the 15-bit RAPL field the encoder silently clamps, which then
-/// surfaces as a confusing read-back mismatch. Zero stays allowed for a
-/// disabled limit. Kept pure and unit-tested; this is the last line of
-/// defense at the write boundary for UI, BIOS-restore, and sync paths.
-pub const LIMIT_MAX_WATTS: f64 = 1024.0;
+/// enabled limit and hard-throttle the CPU. Upper bound is a Framework-safe
+/// cap (120W covers all current boards with headroom; 1024W would let a
+/// typo cook the VRM): beyond the 15-bit RAPL field the encoder silently
+/// clamps, which then surfaces as a confusing read-back mismatch. Zero
+/// stays allowed for a disabled limit, but an enabled 0W limit is rejected
+/// (it would hard-throttle to a hang). PL1 must not exceed PL2 (RAPL
+/// behavior is undefined otherwise). Kept pure and unit-tested; this is
+/// the last line of defense at the write boundary for UI, BIOS-restore,
+/// and sync paths.
+pub const LIMIT_MAX_WATTS: f64 = 120.0;
 pub const LIMIT_MAX_TIME_S: f64 = 120.0;
+/// Minimum meaningful enabled limit: below this the CPU cannot make
+/// progress and the machine appears hung.
+pub const LIMIT_MIN_ENABLED_WATTS: f64 = 5.0;
 
 fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
     for (name, v) in [
@@ -370,6 +377,26 @@ fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
         if v > LIMIT_MAX_TIME_S {
             return Err(format!("invalid {name}: exceeds {LIMIT_MAX_TIME_S}s ({v})"));
         }
+    }
+    // An enabled 0W (or near-zero) limit hard-throttles the CPU into an
+    // apparent hang; require a floor for enabled limits.
+    if params.pl1_enabled && params.pl1_watts < LIMIT_MIN_ENABLED_WATTS {
+        return Err(format!(
+            "invalid PL1 watts: enabled limit must be >= {LIMIT_MIN_ENABLED_WATTS}W ({}W)",
+            params.pl1_watts
+        ));
+    }
+    if params.pl2_enabled && params.pl2_watts < LIMIT_MIN_ENABLED_WATTS {
+        return Err(format!(
+            "invalid PL2 watts: enabled limit must be >= {LIMIT_MIN_ENABLED_WATTS}W ({}W)",
+            params.pl2_watts
+        ));
+    }
+    if params.pl1_enabled && params.pl2_enabled && params.pl1_watts > params.pl2_watts {
+        return Err(format!(
+            "invalid PL1/PL2: PL1 ({}W) must not exceed PL2 ({}W)",
+            params.pl1_watts, params.pl2_watts
+        ));
     }
     Ok(())
 }

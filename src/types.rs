@@ -46,6 +46,11 @@ impl Config {
         if crate::style::ThemeId::parse(&self.theme).is_none() {
             self.theme = default_theme();
         }
+        // Bound vec lengths first: a crafted TOML with millions of entries
+        // would otherwise spin the loops below (DoS via config file).
+        const MAX_SENSORS: usize = 64;
+        const MAX_CURVE_POINTS: usize = 32;
+        self.telemetry.selected_sensors.truncate(MAX_SENSORS);
         self.telemetry.poll_ms = self.telemetry.poll_ms.clamp(POLL_MS_MIN, POLL_MS_MAX);
         self.telemetry.ui_refresh_ms = self
             .telemetry
@@ -92,10 +97,18 @@ impl Config {
                     );
                 }
             }
+            curve.curve.points.truncate(MAX_CURVE_POINTS);
+            curve.curve.sensors.truncate(8);
             for point in &mut curve.curve.points {
                 // Clamp to plot domain to keep points drawable.
                 point[0] = point[0].clamp(0, CURVE_TEMP_MAX);
                 point[1] = point[1].clamp(0, 100);
+                // High-temp floor: an 80C+ point at 0% would cook the
+                // machine while temps look "fresh" (no stale failover).
+                // Force at least 60% duty at/above 80C.
+                if point[0] >= 80 {
+                    point[1] = point[1].max(60);
+                }
             }
             // Dedupe by temp keeping highest duty; use BTreeMap to share
             // dedupe/sort semantics with `curve_full_points` and avoid drift.
@@ -314,11 +327,18 @@ pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
     full
 }
 
+fn default_telemetry_poll_ms() -> u64 {
+    500
+}
+fn default_telemetry_ui_ms() -> u64 {
+    500
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TelemetryConfig {
-    #[serde(default)]
+    #[serde(default = "default_telemetry_poll_ms")]
     pub poll_ms: u64,
-    #[serde(default)]
+    #[serde(default = "default_telemetry_ui_ms")]
     pub ui_refresh_ms: u64,
     #[serde(default)]
     pub selected_sensors: Vec<String>,
