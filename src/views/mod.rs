@@ -308,7 +308,7 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
             .width(Length::Fill)
             .style(move |_theme| iced::widget::container::Style {
                 background: Some(pal.error_bg.into()),
-                border: iced::Border::default().rounded(4),
+                border: iced::Border::default().rounded(4).width(1).color(pal.error),
                 ..Default::default()
             }),
         )

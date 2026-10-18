@@ -37,7 +37,14 @@ pub(crate) fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
     content = content.push(space::vertical().height(8));
 
     if snap.platform.has_fingerprint_led() {
-        content = content.push(text("Fingerprint LED").size(FONT_SECTION));
+        let pal = snap.palette;
+        content = content.push(
+            text("Fingerprint LED")
+                .size(FONT_SECTION)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.header),
+                }),
+        );
         let button_row = row![
             button(text("Low").size(FONT_BODY))
                 .on_press(Message::FpLedLevelChanged("low"))
@@ -120,7 +127,15 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     let ports = &snap.pd_ports;
     let history = &snap.pd_ports_history;
     let pal = snap.palette;
-    let mut content = column![text("Ports & Expansion Cards").size(FONT_SECTION)].spacing(2);
+    let mut content =
+        column![
+            text("Ports & Expansion Cards")
+                .size(FONT_SECTION)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.header)
+                })
+        ]
+        .spacing(2);
 
     if ports.is_empty() && cards.is_empty() {
         content = content.push(text("None detected").size(FONT_BODY).style(move |_theme| {

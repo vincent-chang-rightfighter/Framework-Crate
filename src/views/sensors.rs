@@ -120,8 +120,9 @@ pub(crate) fn view_sensors<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
                         .get(idx)
                         .copied()
                         // Unreachable in practice (colors tracks the sorted
-                        // list); keep the legacy fallback verbatim.
-                        .unwrap_or(iced::Color::WHITE);
+                        // list); fall back to header so Light stays visible
+                        // instead of hardcoded white.
+                        .unwrap_or(pal.header);
                     let row = row![
                         colored_dot(color, 10.0),
                         text(name.as_str()).size(FONT_BODY).width(Length::Fill),

@@ -482,16 +482,13 @@ pub fn mode_style(
     use iced::widget::button::Status;
     let pal = palette(theme);
     if selected {
-        // Selected keeps the accent fill; hover/pressed brighten text
-        // border slightly instead of going invisible.
+        // Selected keeps the accent fill and its readable text color
+        // (e.g. black on Gruvbox orange); hover/pressed only brighten the
+        // border so contrast never drops to white-on-orange levels.
         let hovered = matches!(status, Status::Hovered | Status::Pressed);
         iced::widget::button::Style {
             background: Some(pal.select_bg.into()),
-            text_color: if hovered {
-                iced::Color::WHITE
-            } else {
-                pal.select_text
-            },
+            text_color: pal.select_text,
             border: iced::Border::default()
                 .rounded(6)
                 .width(1)

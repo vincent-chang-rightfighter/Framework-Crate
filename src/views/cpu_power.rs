@@ -29,19 +29,7 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     ]);
 
     if !snap.intel_cpu {
-        content = content.push(text("Not Supported").size(FONT_BODY).style(move |_theme| {
-            iced::widget::text::Style {
-                color: Some(pal.not_supported_text),
-            }
-        }));
-        content = content.push(
-            text("CPU Power is available on Intel CPUs only.")
-                .size(FONT_SMALL)
-                .style(move |_theme| iced::widget::text::Style {
-                    color: Some(pal.gray),
-                }),
-        );
-        return content.into();
+        return crate::views::not_supported_section(pal, "CPU Power");
     }
 
     let info = &snap.cpu_power;
