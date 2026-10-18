@@ -135,11 +135,45 @@ fn classify_winget_output(output: &std::process::Output) -> WingetOutcome {
     WingetOutcome::Failed(super::modules::proc_failure_detail(output))
 }
 
+/// Resolves winget to an absolute path when possible. winget is a
+/// store-managed execution alias (not a System32 binary), so PATH lookup
+/// in an elevated process could pick a user-writable shim. Prefer the
+/// per-user WindowsApps alias and System32 `where.exe` resolution, and
+/// fall back to bare PATH only with a warning.
+fn resolve_winget() -> std::path::PathBuf {
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let cand = std::path::PathBuf::from(local).join(r"Microsoft\WindowsApps\winget.exe");
+        if cand.exists() {
+            return cand;
+        }
+    }
+    // `where.exe` itself is pinned to System32, so the resolution does not
+    // depend on attacker-controlled PATH entries.
+    if let Ok(out) = std::process::Command::new(crate::util::system32_exe("where.exe"))
+        .arg("winget")
+        .creation_flags(0x08000000)
+        .output()
+        && out.status.success()
+    {
+        let first = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !first.is_empty() && std::path::Path::new(&first).exists() {
+            return std::path::PathBuf::from(first);
+        }
+    }
+    tracing::warn!("winget not found at absolute path, falling back to PATH lookup");
+    std::path::PathBuf::from("winget")
+}
+
 /// Installs PawnIO via winget.
 pub fn install_pawnio() -> Result<(), String> {
     use std::process::Command;
     tracing::info!("Installing PawnIO via winget...");
-    let output = Command::new("winget")
+    let output = Command::new(resolve_winget())
         .args([
             "install",
             "-e",
@@ -436,7 +470,14 @@ fn verify_dll_path() -> Result<(), &'static str> {
     match authenticode {
         Ok(()) => {}
         Err(e) => {
-            if std::env::var_os("FRAMEWORK_ALLOW_UNSIGNED_PAWNIO").is_none() {
+            // Unsigned bypass is debug-only: a release binary must never
+            // let an env var disable signature enforcement, otherwise any
+            // same-user attacker can set it and load an unsigned DLL.
+            #[cfg(debug_assertions)]
+            let bypass_allowed = std::env::var_os("FRAMEWORK_ALLOW_UNSIGNED_PAWNIO").is_some();
+            #[cfg(not(debug_assertions))]
+            let bypass_allowed = false;
+            if !bypass_allowed {
                 warn!(
                     "PawnIO DLL authenticode check failed ({}): {}",
                     e,
@@ -445,7 +486,7 @@ fn verify_dll_path() -> Result<(), &'static str> {
                 return Err(e);
             }
             warn!(
-                "FRAMEWORK_ALLOW_UNSIGNED_PAWNIO set; loading DLL despite authenticode failure ({}): {}",
+                "FRAMEWORK_ALLOW_UNSIGNED_PAWNIO set (debug only); loading DLL despite authenticode failure ({}): {}",
                 e,
                 p.display()
             );

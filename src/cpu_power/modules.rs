@@ -126,8 +126,13 @@ pub(super) fn latest_modules_download_url() -> Option<String> {
         .args([
             "-s",
             "-L",
+            "--proto",
+            "=https",
+            "--fail",
             "--max-time",
             "15",
+            "--max-filesize",
+            "1048576",
             "--retry",
             "1",
             "--retry-delay",
@@ -137,6 +142,13 @@ pub(super) fn latest_modules_download_url() -> Option<String> {
         .creation_flags(0x08000000)
         .output();
     if let Ok(o) = out {
+        if !o.status.success() {
+            return None;
+        }
+        // Cap API body to avoid unbounded buffering on MITM/hijack.
+        if o.stdout.len() > 1024 * 1024 {
+            return None;
+        }
         let body = String::from_utf8_lossy(&o.stdout);
         // Find browser_download_url for release_*.zip
         for line in body.split(',') {
@@ -148,9 +160,17 @@ pub(super) fn latest_modules_download_url() -> Option<String> {
                 && let Some(end) = line[start..].find('"').map(|i| start + i)
             {
                 let url = line[start..end].to_string();
-                if url.contains("PawnIO.Modules") {
+                // Strict host whitelist: only GitHub release hosts, not
+                // any URL that merely contains the substring.
+                let ok_host = url.starts_with("https://github.com/namazso/PawnIO.Modules/")
+                    || url.starts_with("https://api.github.com/repos/namazso/PawnIO.Modules/")
+                    || url.starts_with("https://objects.githubusercontent.com/");
+                if ok_host && url.contains("PawnIO.Modules") && url.len() <= 512 {
                     tracing::info!("PawnIO Modules latest asset URL: {}", url);
                     return Some(url);
+                } else {
+                    tracing::warn!("Rejected non-whitelisted modules URL");
+                    return None;
                 }
             }
         }
@@ -182,9 +202,17 @@ pub(super) fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Explicit opt-in for loading module blobs whose hashes are not pinned.
 /// Default is fail-closed; only set this after manually verifying a newer
-/// upstream release.
+/// upstream release. Debug-only like the DLL bypass: release builds must
+/// not let an env var disable hash pinning.
 fn module_hash_override_enabled() -> bool {
-    std::env::var_os("FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH").is_some()
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os("FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH").is_some()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
 }
 
 fn check_module_hash(

@@ -641,7 +641,27 @@ pub(crate) fn atomic_replace(
         }
         // Fallback: try rename first (atomically replaces on Windows when dest exists).
         // If rename fails (e.g. cross-device), backup dest then delete-then-rename.
+        // Refuse to follow symlinks: a planted dest/bak symlink would make
+        // copy/remove write outside the config dir.
+        for p in [dest, tmp] {
+            if let Ok(meta) = std::fs::symlink_metadata(p)
+                && meta.file_type().is_symlink()
+            {
+                return Err(format!(
+                    "refusing to write through symlink: {}",
+                    p.display()
+                ));
+            }
+        }
         let bak = dest.with_extension("toml.bak");
+        if let Ok(meta) = std::fs::symlink_metadata(&bak)
+            && meta.file_type().is_symlink()
+        {
+            return Err(format!(
+                "refusing to write through symlink: {}",
+                bak.display()
+            ));
+        }
         match std::fs::rename(tmp, dest) {
             Ok(()) => Ok(()),
             Err(_) => {
