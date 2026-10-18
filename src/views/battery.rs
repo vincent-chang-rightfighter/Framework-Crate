@@ -15,12 +15,26 @@ pub(crate) fn view_charge_limit_section(enabled: bool, value: u32) -> Element<'s
             text(format!("{}%", value)).size(FONT_BODY),
         ]
         .spacing(4),
-        iced::widget::slider(
-            CHARGE_LIMIT_MIN..=CHARGE_LIMIT_MAX,
-            value,
-            Message::ChargeLimitChanged
-        )
-        .style(slider_style),
+        // Unchecked means "no cap" (disabled at 100%): drags are no-ops
+        // so the value can't diverge from the displayed 100%.
+        {
+            let slider_el: Element<'static, Message> = if enabled {
+                iced::widget::slider(
+                    CHARGE_LIMIT_MIN..=CHARGE_LIMIT_MAX,
+                    value,
+                    Message::ChargeLimitChanged,
+                )
+                .style(slider_style)
+                .into()
+            } else {
+                iced::widget::slider(CHARGE_LIMIT_MIN..=CHARGE_LIMIT_MAX, value, |_| {
+                    Message::ChargeLimitToggled(false)
+                })
+                .style(slider_style)
+                .into()
+            };
+            slider_el
+        },
     ]
     .spacing(4)
     .into()

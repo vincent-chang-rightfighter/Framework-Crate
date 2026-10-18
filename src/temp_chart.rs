@@ -244,9 +244,10 @@ fn draw_temp_chart_contents(
 
     frame.fill_rectangle(origin, Size::new(plot_w, plot_h), pal.temp_plot_bg);
 
+    // Grid alpha matches curve_canvas (0.10) so both charts read the same.
     let grid_stroke = iced::widget::canvas::Stroke::default()
         .with_color(iced::Color {
-            a: 0.08,
+            a: 0.10,
             ..pal.grid_base
         })
         .with_width(0.5);
@@ -266,7 +267,7 @@ fn draw_temp_chart_contents(
         Size::new(plot_w, plot_h),
         iced::widget::canvas::Stroke::default()
             .with_color(iced::Color {
-                a: 0.2,
+                a: 0.3,
                 ..pal.grid_base
             })
             .with_width(1.0),

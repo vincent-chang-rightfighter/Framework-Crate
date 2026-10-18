@@ -347,7 +347,8 @@ fn draw_curve_contents(
             Size::new(layout.plot_w, layout.plot_h),
             pal.curve_plot_bg,
         );
-        // Locked zone 100–110°C: subtle highlight to indicate forced 100%
+        // Locked zone 100–110°C: single subtle highlight for forced 100%
+        // (was two stacked fills ≈0.11 effective with a redundant overdraw).
         let lock_x0 = to_screen(crate::types::CURVE_TEMP_LOCK_START as f32, 0.0).x;
         let lock_x1 = to_screen(TEMP_RANGE, 0.0).x;
         let lock_w = (lock_x1 - lock_x0).max(0.0);
@@ -355,15 +356,7 @@ fn draw_curve_contents(
             Point::new(lock_x0, layout.origin.y),
             Size::new(lock_w, layout.plot_h),
             iced::Color {
-                a: 0.08,
-                ..pal.warning
-            },
-        );
-        f.fill_rectangle(
-            Point::new(lock_x0, layout.origin.y),
-            Size::new(lock_w, layout.plot_h),
-            iced::Color {
-                a: 0.03,
+                a: 0.10,
                 ..pal.warning
             },
         );

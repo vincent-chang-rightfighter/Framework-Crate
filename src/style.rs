@@ -250,9 +250,13 @@ pub fn palette(theme: &iced::Theme) -> Palette {
             // against the black card. Plots sit one lift above pure black
             // so panels read as panels, not holes.
             if *theme == iced::Theme::Oxocarbon {
-                pal.settings_bg = iced::Color::BLACK;
-                pal.card_bg = iced::Color::BLACK;
+                // Cards stay pure black; the settings panel sits one lift
+                // above so card/panel nesting reads via fill, not just the
+                // 1px border. Plots share the lift (they live inside black
+                // cards, so they still read as panels).
                 let plot_lift = iced::Color::from_rgb8(0x0A, 0x0A, 0x0C);
+                pal.settings_bg = plot_lift;
+                pal.card_bg = iced::Color::BLACK;
                 pal.temp_plot_bg = plot_lift;
                 pal.curve_plot_bg = plot_lift;
                 pal.gray =
@@ -597,9 +601,10 @@ pub fn slider_style(
 
 /// Disabled fill shared by inputs and checkboxes. Normally the plot panel
 /// (weakest) so it differs from both the active card (weak) and the
-/// settings container (weaker). Black forces card and settings to pure
-/// BLACK, where the plot lift (#0A0A0C) is nearly invisible, so Black
-/// gets a one-step brighter lift (#1A1A1E) to keep disabled boxes visible.
+/// settings container (weaker). Black keeps cards pure BLACK with lifted
+/// panels, where the plot lift (#0A0A0C) is nearly invisible against the
+/// card, so Black gets a one-step brighter lift (#1A1A1E) to keep disabled
+/// boxes visible.
 fn disabled_bg(theme: &iced::Theme, pal: &Palette) -> iced::Color {
     if *theme == iced::Theme::Oxocarbon {
         iced::Color::from_rgb8(0x1A, 0x1A, 0x1E)
@@ -836,11 +841,12 @@ mod tests {
 
     #[test]
     fn black_scheme_uses_true_black_surfaces() {
-        // Oxocarbon alone is dark gray; Black forces pure black surfaces,
-        // with plots one lift above so panels read as panels, not holes.
+        // Oxocarbon alone is dark gray; Black keeps cards pure black while
+        // settings panels and plots sit one lift above so nesting reads
+        // via fill, not just the 1px border.
         let pal = palette_for(ThemeId::Black);
         let plot_lift = iced::Color::from_rgb8(0x0A, 0x0A, 0x0C);
-        assert_eq!(pal.settings_bg, iced::Color::BLACK);
+        assert_eq!(pal.settings_bg, plot_lift);
         assert_eq!(pal.card_bg, iced::Color::BLACK);
         assert_eq!(pal.temp_plot_bg, plot_lift);
         assert_eq!(pal.curve_plot_bg, plot_lift);
@@ -995,16 +1001,23 @@ mod tests {
     fn input_disabled_differs_from_active_in_every_theme() {
         // Regression: Black forces both card_bg and settings_bg to pure
         // BLACK, so a settings_bg disabled fill would be identical to the
-        // active fill. Disabled uses temp_plot_bg (weakest) instead.
+        // active fill. Disabled uses a lifted fill instead. Beyond !=,
+        // require a luminance gap so the difference is human-visible.
+        fn lum(c: iced::Color) -> f32 {
+            0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+        }
         use iced::widget::text_input::Status;
         for id in ThemeId::ALL {
             let theme = id.iced();
             let active = input_style(&theme, Status::Active);
             let disabled = input_style(&theme, Status::Disabled);
-            assert_ne!(
-                bg_color(&disabled.background),
-                bg_color(&active.background),
-                "{id:?}: disabled bg must differ from active bg"
+            let a = bg_color(&active.background);
+            let d = bg_color(&disabled.background);
+            assert_ne!(d, a, "{id:?}: disabled bg must differ from active bg");
+            let gap = (lum(d) - lum(a)).abs();
+            assert!(
+                gap > 0.02,
+                "{id:?}: disabled vs active too close to see (gap {gap:.3})"
             );
         }
     }
