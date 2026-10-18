@@ -53,7 +53,9 @@ png = "0.18"
 tempfile = "3"
 
 [profile.release]
-opt-level = 3
+# Size-first: a 200ms-poll control UI gains nothing measurable from O3,
+# while "z" typically saves 10-25% on iced/wgpu binaries.
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
