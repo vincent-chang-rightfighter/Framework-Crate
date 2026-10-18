@@ -629,7 +629,7 @@ pub fn spawn(state: AppState) {
                     };
 
                     let ec_clone = Arc::clone(&ec);
-                    match crate::util::spawn_blocking_with_timeout(
+                    match crate::util::spawn_ec_read_with_timeout(
                         crate::util::EC_IO_TIMEOUT,
                         move || ec_clone.thermal(),
                     )
@@ -660,8 +660,13 @@ pub fn spawn(state: AppState) {
                                 continue;
                             }
                         }
-                        Err(join_err) => {
-                            warn!("EC thermal spawn panicked: {}", join_err);
+                        Err(e) => {
+                            // Overload skips are intentional backpressure,
+                            // not hardware failures: don't trip the reset.
+                            if e.contains("overloaded") {
+                                continue;
+                            }
+                            warn!("EC thermal spawn failed: {}", e);
                             consecutive_ec_failures += 1;
                             if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
                                 reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
@@ -673,7 +678,7 @@ pub fn spawn(state: AppState) {
                     // Skip UI-only reads while idle to save spawns.
                     if !is_idle {
                         let ec_clone = Arc::clone(&ec);
-                        match crate::util::spawn_blocking_with_timeout(
+                        match crate::util::spawn_ec_read_with_timeout(
                             crate::util::EC_IO_TIMEOUT,
                             move || ec_clone.power(),
                         )
@@ -735,7 +740,11 @@ pub fn spawn(state: AppState) {
                                 }
                             }
                             Err(e) => {
-                                warn!("Battery spawn panicked: {}", e);
+                                // Overload skips are backpressure, not failure.
+                                if e.contains("overloaded") {
+                                    continue;
+                                }
+                                warn!("Battery spawn failed: {}", e);
                                 consecutive_battery_failures += 1;
                                 // UI-only: back off without EC reset.
                                 if consecutive_battery_failures >= MAX_EC_IO_FAILURES {
