@@ -65,6 +65,12 @@ pub(crate) struct ViewSnapshot {
 }
 
 impl ViewSnapshot {
+    // NOTE: curve_points (<=7 pts), curve_marks (1-2 items) and the three
+    // PL edit strings are rebuilt per snapshot, but each is tiny (tens of
+    // bytes) and snapshots only run on tick/generation change (200ms
+    // active, 1-2s idle/hidden-skipped). The heavy histories stay Arc
+    // clones. Caching these in App would trade a trivial alloc for
+    // cross-thread cache invalidation bugs, so rebuilding is intentional.
     pub fn from_app(app: &App) -> Self {
         let now_ms = crate::util::monotonic_ms() as i64;
         let thermal_snap = app.state.thermal.snapshot(now_ms);
