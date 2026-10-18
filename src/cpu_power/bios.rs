@@ -85,7 +85,9 @@ pub(super) fn bios_defaults_valid(d: &BiosDefaults) -> bool {
     // disabled limit, but an enabled limit must meet the 5W floor or the
     // CPU would hard-throttle; PL1 must not exceed PL2. Upper bounds match
     // the write boundary so a corrupt huge snapshot is quarantined.
-    use super::limits::{LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS, LIMIT_MIN_ENABLED_WATTS};
+    use super::limits::{
+        LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS, LIMIT_MIN_ENABLED_WATTS, platform_max_watts,
+    };
     let watts = [d.pl1_watts, d.pl2_watts, d.pl1_mmio_watts, d.pl2_mmio_watts];
     let times = [
         d.pl1_time_s,
@@ -99,9 +101,10 @@ pub(super) fn bios_defaults_valid(d: &BiosDefaults) -> bool {
         d.pl1_mmio_enabled,
         d.pl2_mmio_enabled,
     ];
+    let model_max = platform_max_watts();
     watts
         .iter()
-        .all(|v| v.is_finite() && *v >= 0.0 && *v <= LIMIT_MAX_WATTS)
+        .all(|v| v.is_finite() && *v >= 0.0 && *v <= LIMIT_MAX_WATTS && *v <= model_max)
         && times
             .iter()
             .all(|v| v.is_finite() && *v >= 0.0 && *v <= LIMIT_MAX_TIME_S)
@@ -114,6 +117,7 @@ pub(super) fn bios_defaults_valid(d: &BiosDefaults) -> bool {
             .zip(enabled)
             .all(|(w, en)| !en || *w >= LIMIT_MIN_ENABLED_WATTS)
         && (!d.pl1_enabled || !d.pl2_enabled || d.pl1_watts <= d.pl2_watts)
+        && (!d.pl1_mmio_enabled || !d.pl2_mmio_enabled || d.pl1_mmio_watts <= d.pl2_mmio_watts)
 }
 
 /// Backs up a corrupt or invalid snapshot aside and refuses to overwrite it.
@@ -354,14 +358,16 @@ mod tests {
             PersistedBios::Loaded(loaded) => assert_eq!(defaults, loaded),
             other => panic!("expected Loaded, got {other:?}"),
         }
-        // Second persist should overwrite (but init_bios_defaults would not call it if already loaded)
+        // Second persist should overwrite (but init_bios_defaults would not call it if already loaded).
+        // 35W passes per-model caps everywhere (min cap is 40W); the old
+        // 99W fixture exceeds non-Desktop caps and is correctly quarantined.
         let defaults2 = BiosDefaults {
-            pl1_watts: 99.0,
+            pl1_watts: 35.0,
             ..defaults
         };
         persist_bios_defaults(&defaults2).unwrap();
         match load_persisted_bios_defaults() {
-            PersistedBios::Loaded(loaded2) => assert_eq!(loaded2.pl1_watts, 99.0),
+            PersistedBios::Loaded(loaded2) => assert_eq!(loaded2.pl1_watts, 35.0),
             other => panic!("expected Loaded, got {other:?}"),
         }
         unsafe {

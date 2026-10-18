@@ -580,11 +580,21 @@ impl EcClient {
         // Clamp at the API boundary so no caller (UI, quit-restore, init)
         // can push <25 into the EC even if validation is bypassed.
         // 100 means "no cap" per EC spec; 25 is the EC-enforced floor.
+        // min==0 disables the hysteresis window and is passed through.
         let max_pct = max_pct.clamp(
             crate::style::CHARGE_LIMIT_MIN as u8,
             crate::style::CHARGE_LIMIT_MAX as u8,
         );
-        let min_pct = min_pct.min(max_pct);
+        let min_pct = if min_pct == 0 {
+            0
+        } else {
+            min_pct
+                .clamp(
+                    crate::style::CHARGE_LIMIT_MIN as u8,
+                    crate::style::CHARGE_LIMIT_MAX as u8,
+                )
+                .min(max_pct)
+        };
         self.ec
             .set_charge_limit(min_pct, max_pct)
             .map_err(|e| format!("Failed to set charge limit: {:?}", e))
