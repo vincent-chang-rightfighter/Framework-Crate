@@ -484,9 +484,22 @@ impl App {
                 crate::cpu_power::LIMIT_MIN_ENABLED_WATTS
             ));
         }
-        // Upper bounds: beyond the 15-bit RAPL field the encoder silently
-        // clamps, which then surfaces as a confusing read-back mismatch.
-        // Shared with the write boundary (cpu_power::LIMIT_MAX_*).
+        // Upper bounds: per-model ceiling first (e.g. 40W on Laptop 12),
+        // then the absolute 120W Desktop ceiling. Shared with the write
+        // boundary so UI and encoder never disagree.
+        let model_max = crate::cpu_power::platform_max_watts();
+        if pl1 > model_max {
+            return Err(format!(
+                "PL1 must not exceed {:.0}W on this model",
+                model_max
+            ));
+        }
+        if pl2 > model_max {
+            return Err(format!(
+                "PL2 must not exceed {:.0}W on this model",
+                model_max
+            ));
+        }
         if pl1 > crate::cpu_power::LIMIT_MAX_WATTS {
             return Err(format!(
                 "PL1 must not exceed {:.0}W",

@@ -728,10 +728,11 @@ mod tests {
     #[tokio::test]
     async fn validate_cpu_power_accepts_finite_values() {
         let (mut app, _) = App::new(false);
-        app.pl1_edit = "40".into();
-        app.pl2_edit = "80".into();
+        // 30/35W passes on every model (min per-model cap is 40W).
+        app.pl1_edit = "30".into();
+        app.pl2_edit = "35".into();
         app.pl1_time_edit = "28".into();
         let (pl1, pl2, t) = app.validate_cpu_power_inputs().unwrap();
-        assert_eq!((pl1, pl2, t), (40.0, 80.0, 28.0));
+        assert_eq!((pl1, pl2, t), (30.0, 35.0, 28.0));
     }
 }

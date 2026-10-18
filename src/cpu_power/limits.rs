@@ -346,6 +346,21 @@ pub const LIMIT_MAX_TIME_S: f64 = 120.0;
 /// progress and the machine appears hung.
 pub const LIMIT_MIN_ENABLED_WATTS: f64 = 5.0;
 
+/// Per-model PL ceiling (hard safety cap). 120W is the absolute ceiling
+/// for Desktop; smaller chassis get lower caps so a typo can't cook the
+/// VRM for minutes. Unknown models fall back to a safe 65W.
+pub fn platform_max_watts() -> f64 {
+    // Detect once per validation (infrequent: UI apply, sync start,
+    // BIOS load). No plumbing needed through every caller.
+    match crate::cli::ec_wrapper::detect_platform() {
+        crate::cli::ec_wrapper::PlatformFamily::Laptop12 => 40.0,
+        crate::cli::ec_wrapper::PlatformFamily::Laptop13 => 70.0,
+        crate::cli::ec_wrapper::PlatformFamily::Laptop16 => 100.0,
+        crate::cli::ec_wrapper::PlatformFamily::Desktop => 120.0,
+        _ => 65.0,
+    }
+}
+
 pub fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
     for (name, v) in [
         ("power_unit", params.power_unit),
@@ -368,6 +383,21 @@ pub fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
     ] {
         if v > LIMIT_MAX_WATTS {
             return Err(format!("invalid {name}: exceeds {LIMIT_MAX_WATTS}W ({v})"));
+        }
+    }
+    // Per-model ceiling: a 13" typo at 120W would cook the VRM long before
+    // PROCHOT saves it. The absolute cap above is the Desktop ceiling.
+    {
+        let model_max = platform_max_watts();
+        for (name, v) in [
+            ("PL1 watts", params.pl1_watts),
+            ("PL2 watts", params.pl2_watts),
+        ] {
+            if v > model_max {
+                return Err(format!(
+                    "invalid {name}: exceeds this model ({v}W > {model_max}W)"
+                ));
+            }
         }
     }
     for (name, v) in [
@@ -606,36 +636,37 @@ mod tests {
 
     #[test]
     fn validate_limit_params_rejects_non_finite_and_negative() {
-        assert!(validate_limit_params(&params(30.0, 60.0)).is_ok());
+        // Baseline 30/35W passes on every model (min per-model cap is 40W).
+        assert!(validate_limit_params(&params(30.0, 35.0)).is_ok());
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
-            let mut p = params(30.0, 60.0);
+            let mut p = params(30.0, 35.0);
             p.pl1_watts = bad;
             assert!(validate_limit_params(&p).is_err(), "pl1={bad}");
-            let mut p = params(30.0, 60.0);
+            let mut p = params(30.0, 35.0);
             p.pl2_time_s = bad;
             assert!(validate_limit_params(&p).is_err(), "pl2_time={bad}");
         }
-        let mut p = params(30.0, 60.0);
+        let mut p = params(30.0, 35.0);
         p.power_unit = f64::NAN;
         assert!(validate_limit_params(&p).is_err());
     }
 
     #[test]
     fn validate_limit_params_rejects_over_ui_caps() {
-        let mut p = params(30.0, 60.0);
+        let mut p = params(30.0, 35.0);
         p.pl1_watts = LIMIT_MAX_WATTS + 1.0;
         assert!(validate_limit_params(&p).is_err());
-        let mut p = params(30.0, 60.0);
+        let mut p = params(30.0, 35.0);
         p.pl2_watts = LIMIT_MAX_WATTS + 1.0;
         assert!(validate_limit_params(&p).is_err());
-        let mut p = params(30.0, 60.0);
+        let mut p = params(30.0, 35.0);
         p.pl1_time_s = LIMIT_MAX_TIME_S + 1.0;
         assert!(validate_limit_params(&p).is_err());
-        let mut p = params(30.0, 60.0);
+        let mut p = params(30.0, 35.0);
         p.pl2_time_s = LIMIT_MAX_TIME_S + 1.0;
         assert!(validate_limit_params(&p).is_err());
         // Zero stays allowed for a disabled limit.
-        let mut p = params(30.0, 60.0);
+        let mut p = params(30.0, 35.0);
         p.pl1_watts = 0.0;
         p.pl1_enabled = false;
         assert!(validate_limit_params(&p).is_ok());
