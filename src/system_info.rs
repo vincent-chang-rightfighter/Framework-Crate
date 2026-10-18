@@ -949,11 +949,25 @@ static TASK_XML_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 fn write_task_xml(xml: &str) -> Result<String, String> {
     use std::io::Write;
     for _ in 0..5 {
-        let xml_path = std::env::temp_dir().join(format!(
-            "{TASK_XML_PREFIX}{}-{}.xml",
-            std::process::id(),
-            TASK_XML_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        ));
+        // Unpredictable suffix: timestamp-nanos + pid + counter hashed, so a
+        // same-user attacker can't pre-plant the path. create_new still
+        // guards collisions; post-write symlink+length check closes the
+        // drop-then-read window before schtasks imports as HighestAvailable.
+        let nonce = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            crate::util::monotonic_ms().hash(&mut h);
+            crate::util::current_time_ms().hash(&mut h);
+            std::process::id().hash(&mut h);
+            TASK_XML_COUNTER
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .hash(&mut h);
+            // Stack address adds per-invocation entropy.
+            (&TASK_XML_COUNTER as *const _ as usize).hash(&mut h);
+            format!("{:016x}{:016x}", h.finish(), crate::util::monotonic_ms())
+        };
+        let xml_path = std::env::temp_dir().join(format!("{TASK_XML_PREFIX}{nonce}.xml"));
         let mut f = match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -963,8 +977,18 @@ fn write_task_xml(xml: &str) -> Result<String, String> {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(format!("cannot write startup task xml: {e}")),
         };
-        f.write_all(&utf16le_with_bom(xml))
+        let bytes = utf16le_with_bom(xml);
+        f.write_all(&bytes)
             .map_err(|e| format!("cannot write startup task xml: {e}"))?;
+        drop(f);
+        // Re-verify: not a symlink and length matches what we wrote.
+        let ok = std::fs::symlink_metadata(&xml_path)
+            .map(|m| !m.file_type().is_symlink() && m.len() as usize == bytes.len())
+            .unwrap_or(false);
+        if !ok {
+            let _ = std::fs::remove_file(&xml_path);
+            return Err("startup task xml failed post-write verification".to_string());
+        }
         return Ok(xml_path.to_string_lossy().into_owned());
     }
     Err("cannot allocate a unique startup task xml path".to_string())
@@ -1012,6 +1036,25 @@ fn validate_task_command_path(exe: &str) -> Result<(), String> {
     // Command (e.g. "C:\path\" → the \" becomes an escaped quote).
     if exe.ends_with('\\') {
         return Err("exe path must not end with backslash".to_string());
+    }
+    // HighestAvailable runs elevated at logon: an exe in a user-writable
+    // dir (Downloads/Desktop/Temp) can be replaced by anyone to gain
+    // elevation. Warn loudly so portable runs are a conscious choice.
+    let lower = exe.to_lowercase();
+    for risky in [
+        "downloads",
+        "desktop",
+        "\\temp\\",
+        "\\tmp\\",
+        "appdata\\local\\temp",
+    ] {
+        if lower.contains(risky) {
+            tracing::warn!(
+                "startup exe is in a user-writable dir ({}); move to Program Files for HighestAvailable safety",
+                exe
+            );
+            break;
+        }
     }
     Ok(())
 }

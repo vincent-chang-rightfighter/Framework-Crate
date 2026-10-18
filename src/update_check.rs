@@ -22,6 +22,9 @@ pub fn fetch_latest_tag() -> Option<String> {
             "--fail",
             "--proto",
             "=https",
+            "--proto-redir",
+            "=https",
+            "--tlsv1.2",
             "--max-time",
             "15",
             "--max-filesize",
@@ -68,7 +71,11 @@ pub fn fetch_latest_tag() -> Option<String> {
 }
 
 /// Whether a fetched tag has release-tag shape (`v1.2.3`, digits only).
+/// Length-capped so a huge tag can't reach the UI.
 fn valid_tag(tag: &str) -> bool {
+    if tag.len() > 32 {
+        return false;
+    }
     let s = tag.trim().trim_start_matches('v');
     !s.is_empty()
         && s.split('.')

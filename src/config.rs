@@ -56,7 +56,17 @@ pub fn config_path() -> Result<PathBuf, String> {
             ));
         }
     }
-    Ok(config_dir.join("config.toml"))
+    // Canonicalize to collapse `..`/nested junctions in parents so the
+    // joined config.toml cannot escape the validated directory. Failure
+    // to canonicalize (e.g. race) fails closed.
+    let canonical = std::fs::canonicalize(&config_dir).map_err(|e| {
+        format!(
+            "Failed to canonicalize config directory {}: {}",
+            config_dir.display(),
+            e
+        )
+    })?;
+    Ok(canonical.join("config.toml"))
 }
 
 fn validate_config_dir(path: &std::path::Path) -> Result<(), String> {

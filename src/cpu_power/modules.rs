@@ -32,11 +32,15 @@ const MAX_STAGING_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ARCHIVE_MEMBERS: usize = 1024;
 
 /// Reads the locally installed modules tag recorded at download time.
+/// Length-capped like the update-check tag gate.
 pub(super) fn local_modules_version() -> Option<String> {
     let dir = modules_dir();
     let raw = std::fs::read_to_string(dir.join(MODULES_VERSION_FILE)).ok()?;
     let ver = raw.trim().trim_start_matches('v').to_string();
-    if ver.is_empty() || !ver.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+    if ver.is_empty()
+        || ver.len() > 32
+        || !ver.chars().all(|c| c.is_ascii_alphanumeric() || c == '.')
+    {
         return None;
     }
     Some(ver)
@@ -44,12 +48,18 @@ pub(super) fn local_modules_version() -> Option<String> {
 
 /// Extracts the release tag from a `.../download/{tag}/...` asset URL.
 pub(super) fn tag_from_modules_url(url: &str) -> Option<String> {
+    if url.len() > 512 {
+        return None;
+    }
     let marker = "/download/";
     let start = url.find(marker)? + marker.len();
     let rest = &url[start..];
     let end = rest.find('/')?;
     let tag = rest[..end].trim().trim_start_matches('v').to_string();
-    if tag.is_empty() || !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+    if tag.is_empty()
+        || tag.len() > 32
+        || !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '.')
+    {
         return None;
     }
     Some(tag)
@@ -128,6 +138,9 @@ pub(super) fn latest_modules_download_url() -> Option<String> {
             "-L",
             "--proto",
             "=https",
+            "--proto-redir",
+            "=https",
+            "--tlsv1.2",
             "--fail",
             "--max-time",
             "15",
@@ -472,7 +485,12 @@ pub fn download_and_extract_modules() -> Result<(), String> {
 
     // Primary: latest release asset URL. Fallback: last-known release so a
     // flaky GitHub API degrades to a slightly old download instead of an error.
-    let url = latest_modules_download_url().unwrap_or_else(|| {
+    // Fail-closed against downgrade: if the API is unreachable and the local
+    // install is already newer than LAST_KNOWN, keep it instead of
+    // overwriting with the older fallback.
+    let latest_url = latest_modules_download_url();
+    let using_fallback = latest_url.is_none();
+    let url = latest_url.unwrap_or_else(|| {
         warn!("GitHub API unreachable, falling back to last-known release");
         format!(
             "https://github.com/namazso/PawnIO.Modules/releases/download/{0}/release_{1}.zip",
@@ -480,6 +498,14 @@ pub fn download_and_extract_modules() -> Result<(), String> {
             LAST_KNOWN_MODULES_VERSION.replace('.', "_")
         )
     });
+    if using_fallback
+        && let Some(local) = local_modules_version()
+        && local != LAST_KNOWN_MODULES_VERSION
+    {
+        return Err(format!(
+            "GitHub API unreachable and local modules ({local}) differ from fallback {LAST_KNOWN_MODULES_VERSION}; refusing to overwrite a possibly newer install"
+        ));
+    }
     let zip_path = dir.join("pawnio_modules_latest.zip");
     // Primary ZIP is deterministic and vulnerable to pre-created symlink; also use unique tmp
     if let Ok(meta) = std::fs::symlink_metadata(&zip_path)
@@ -595,6 +621,9 @@ fn try_curl_download(url: &str, dir: &std::path::Path) -> Result<(), String> {
             "--fail",
             "--proto",
             "=https",
+            "--proto-redir",
+            "=https",
+            "--tlsv1.2",
             "--max-time",
             "30",
             "--max-filesize",

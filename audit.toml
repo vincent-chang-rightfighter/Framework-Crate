@@ -11,8 +11,9 @@ ignore = [
     # fontdb/cosmic-text. Upstream-only fix. Review by 2027-04.
     "RUSTSEC-2026-0192",
     # lru 0.16.4 unsound pop() under panic-unwind (RUSTSEC-2026-0253).
-    # Not exploitable here: the release profile is panic=abort (no unwinding
-    # to exploit) and nothing panics in the glyph-cache path. Transitive via
-    # cryoglyph/iced_wgpu. Upstream-only fix. Review by 2027-04.
+    # Not exploitable here: nothing panics in the glyph-cache path, so the
+    # unsound unwind path is unreachable. Release uses unwind (not abort) so
+    # the background supervisor and fan handover survive panics. Transitive
+    # via cryoglyph/iced_wgpu. Upstream-only fix. Review by 2027-04.
     "RUSTSEC-2026-0253",
 ]

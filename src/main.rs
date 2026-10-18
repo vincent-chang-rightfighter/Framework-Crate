@@ -148,6 +148,17 @@ impl LogSink {
             // again on every retry.
             state.written = 0;
         }
+        // Refuse to append through a planted symlink: an attacker with
+        // write access to the log dir could otherwise redirect log
+        // writes outside it.
+        if let Ok(meta) = std::fs::symlink_metadata(&self.path)
+            && meta.file_type().is_symlink()
+        {
+            return Err(std::io::Error::other(format!(
+                "refusing to open log through symlink: {}",
+                self.path.display()
+            )));
+        }
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -202,8 +213,17 @@ impl LogSink {
 }
 
 /// Shifts `app.log` to `app.log.1` and so on. The oldest backup is deleted first
-/// because `fs::rename` cannot overwrite an existing file.
+/// because `fs::rename` cannot overwrite an existing file. Symlinks are
+/// never followed or replaced: a planted link is removed only if it is
+/// itself the link (remove_file on a symlink removes the link), and
+/// rename sources that are symlinks are skipped so rotation cannot be
+/// steered outside the log dir.
 fn rotate_files(path: &std::path::Path) {
+    fn is_symlink(p: &std::path::Path) -> bool {
+        std::fs::symlink_metadata(p)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    }
     let numbered = |i: usize| {
         let mut name = path.as_os_str().to_os_string();
         name.push(format!(".{i}"));
@@ -211,9 +231,16 @@ fn rotate_files(path: &std::path::Path) {
     };
     let _ = std::fs::remove_file(numbered(LOG_KEEP));
     for i in (1..LOG_KEEP).rev() {
-        let _ = std::fs::rename(numbered(i), numbered(i + 1));
+        let src = numbered(i);
+        if src.exists() && !is_symlink(&src) {
+            let _ = std::fs::rename(&src, numbered(i + 1));
+        } else if is_symlink(&src) {
+            let _ = std::fs::remove_file(&src);
+        }
     }
-    let _ = std::fs::rename(path, numbered(1));
+    if path.exists() && !is_symlink(path) {
+        let _ = std::fs::rename(path, numbered(1));
+    }
 }
 
 impl std::io::Write for LogSink {

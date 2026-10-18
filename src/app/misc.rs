@@ -258,12 +258,27 @@ impl App {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
+                // Unique counter (in addition to ts+pid) so two reports in
+                // the same second never collide; create_new refuses a
+                // planted symlink at the temp path instead of following it.
+                static DEBUG_REPORT_COUNTER: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let ctr = DEBUG_REPORT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let path = std::env::temp_dir().join(format!(
-                    "framework_crate_debug_{}_{}.txt",
+                    "framework_crate_debug_{}_{}_{}.txt",
                     ts,
-                    std::process::id()
+                    std::process::id(),
+                    ctr
                 ));
-                if let Err(e) = std::fs::write(&path, &report) {
+                let write_res = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&path)
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        f.write_all(report.as_bytes())
+                    });
+                if let Err(e) = write_res {
                     tracing::error!("Failed to write debug report {}: {}", path.display(), e);
                 }
                 prune_debug_reports(std::env::temp_dir(), MAX_DEBUG_REPORTS);
@@ -281,6 +296,14 @@ impl App {
             }
             Message::OpenUrl(url) => {
                 let url: &str = url;
+                // Whitelist: only this repo's GitHub pages may be opened.
+                // A future static-str call site with file:// or ms-msdt:
+                // would otherwise become a protocol-handler hijack.
+                if !url.starts_with("https://github.com/vincent-chang-rightfighter/Framework-Crate")
+                {
+                    tracing::warn!("Refusing to open non-whitelisted URL: {}", url);
+                    return Some(Task::none());
+                }
                 unsafe {
                     use windows_sys::Win32::UI::Shell::ShellExecuteW;
                     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
