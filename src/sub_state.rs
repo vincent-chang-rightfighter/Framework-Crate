@@ -139,7 +139,7 @@ impl Default for BatteryState {
 #[derive(Clone)]
 pub struct SystemState {
     pub cli_available: Arc<AtomicBool>,
-    pub ec_client: Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
+    pub ec_client: cli::SharedEc,
     /// NOTE: While false, background loop must not create EC client concurrently.
     pub ec_init_done: Arc<AtomicBool>,
     pub versions: Arc<RwLock<Arc<Option<cli::ec_wrapper::VersionsData>>>>,

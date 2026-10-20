@@ -23,7 +23,7 @@ impl App {
                         if let Err(e) = ec.autofanctrl() {
                             warn!("Failed to restore auto fan control on quit: {}", e);
                         }
-                        apply_quit_charge_limit(&ec, &limit);
+                        apply_quit_charge_limit(&*ec, &limit);
                     },
                 ))
             }
@@ -53,7 +53,7 @@ impl App {
                         } else if let Err(e) = ec.set_fan_duty(duty, None) {
                             warn!("Failed to set quit fan duty: {}", e);
                         }
-                        apply_quit_charge_limit(&ec, &limit);
+                        apply_quit_charge_limit(&*ec, &limit);
                     },
                 ))
             }
@@ -94,7 +94,7 @@ impl App {
                         } else {
                             let _ = ec.set_fan_duty(last_duty, None);
                         }
-                        apply_quit_charge_limit(&ec, &limit);
+                        apply_quit_charge_limit(&*ec, &limit);
                     },
                 ))
             }

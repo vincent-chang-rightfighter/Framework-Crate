@@ -2,7 +2,6 @@ use crate::cli;
 use crate::types;
 use crate::util;
 use iced::Task;
-use parking_lot::RwLock;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -13,9 +12,9 @@ use super::Message;
 /// restored before the window closes. `f` is `Fn + Clone` so every attempt
 /// re-runs the full handover instead of only the first one.
 pub(crate) fn run_ec_task_quit(
-    ec_client: &Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
+    ec_client: &cli::SharedEc,
     done: Message,
-    f: impl Fn(Arc<cli::EcClient>) + Clone + Send + 'static,
+    f: impl Fn(Arc<dyn cli::EcHw>) + Clone + Send + 'static,
 ) -> Task<Message> {
     let ec_client = Arc::clone(ec_client);
     Task::perform(
@@ -54,7 +53,7 @@ pub(crate) fn run_ec_task_quit(
 }
 
 /// Flushes persisted charge limit to EC on quit (config_save_task skips EC writes during shutdown).
-pub(crate) fn apply_quit_charge_limit(ec: &cli::EcClient, limit: &Option<types::SettingU8>) {
+pub(crate) fn apply_quit_charge_limit(ec: &dyn cli::EcHw, limit: &Option<types::SettingU8>) {
     if let Some(limit) = limit {
         let pct = if limit.enabled { limit.value } else { 100 };
         if let Err(e) = ec.charge_limit_set(0, pct) {
@@ -65,8 +64,8 @@ pub(crate) fn apply_quit_charge_limit(ec: &cli::EcClient, limit: &Option<types::
 
 /// Runs a closure on the EC client and reports `Result` via `Message::EcOpResult` to surface EC write failures.
 pub(crate) fn run_ec_task_result(
-    ec_client: &Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
-    f: impl FnOnce(Arc<cli::EcClient>) -> Result<(), String> + Send + 'static,
+    ec_client: &cli::SharedEc,
+    f: impl FnOnce(Arc<dyn cli::EcHw>) -> Result<(), String> + Send + 'static,
 ) -> Task<Message> {
     let ec_client = Arc::clone(ec_client);
     Task::perform(

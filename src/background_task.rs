@@ -55,7 +55,7 @@ pub(super) enum Flow {
 /// call; the stepper and per-fan ramp stay borrowed so no state is lost.
 pub(super) struct FanCtx<'a> {
     pub state: &'a AppState,
-    pub ec: &'a Arc<cli::EcClient>,
+    pub ec: &'a Arc<dyn cli::EcHw>,
     pub mode: crate::types::FanControlMode,
     pub now_ms: u64,
     pub manual_duty: Option<u32>,
@@ -406,7 +406,7 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
     true
 }
 
-pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<cli::EcClient>) {
+pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<dyn cli::EcHw>) {
     let battery_ref = Arc::clone(&state.battery.info);
     let kblight_ref = Arc::clone(&state.peripherals.kblight);
     let pd_ports_ref = Arc::clone(&state.peripherals.pd_ports);
@@ -651,7 +651,7 @@ pub fn spawn(state: AppState) {
                     }
 
                     let ec_opt = { read_lock(&bg_state2.system.ec_client) };
-                    let ec: Arc<cli::EcClient> = match ec_opt.as_ref().as_ref() {
+                    let ec: Arc<dyn cli::EcHw> = match ec_opt.as_ref().as_ref() {
                         Some(c) => Arc::clone(c),
                         None => {
                             // Wait for init task before creating own client.
@@ -666,7 +666,7 @@ pub fn spawn(state: AppState) {
                             .await
                             {
                                 Ok(Ok(c)) => {
-                                    let arc_ec = Arc::new(c);
+                                    let arc_ec: Arc<dyn cli::EcHw> = Arc::new(c);
                                     with_write_lock(&state_cl.system.ec_client, |guard| {
                                         *guard = Arc::new(Some(Arc::clone(&arc_ec)));
                                     });

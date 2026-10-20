@@ -439,7 +439,7 @@ impl App {
                 {
                     Ok(Ok(ec)) => {
                         state.system.cli_available.store(true, Ordering::Release);
-                        let arc_ec = Arc::new(ec);
+                        let arc_ec: Arc<dyn cli::EcHw> = Arc::new(ec);
                         with_write_lock(&state.system.ec_client, |guard| {
                             *guard = Arc::new(Some(Arc::clone(&arc_ec)));
                         });

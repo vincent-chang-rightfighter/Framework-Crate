@@ -286,6 +286,29 @@ pub struct EcClient {
     ec: CrosEc,
 }
 
+/// Shared handle slot for the EC client: `None` while uninitialized or
+/// being re-created after a driver reset.
+pub type SharedEc =
+    std::sync::Arc<parking_lot::RwLock<std::sync::Arc<Option<std::sync::Arc<dyn EcHw>>>>>;
+
+/// Hardware behind the EC wrapper. Object-safe (`&self` only) so callers
+/// can hold `Arc<dyn EcHw>` and tests can substitute a scripted mock.
+/// Production impl is `EcClient` below; every method body lives in the
+/// `impl EcHw for EcClient` block so there is exactly one implementation.
+pub trait EcHw: Send + Sync {
+    fn thermal(&self) -> Result<ThermalData, String>;
+    fn power(&self) -> Result<BatteryData, String>;
+    fn versions(&self) -> Result<VersionsData, String>;
+    fn set_fan_duty(&self, percent: u32, fan_index: Option<u32>) -> Result<(), String>;
+    fn autofanctrl(&self) -> Result<(), String>;
+    fn kblight_get(&self) -> Result<u32, String>;
+    fn kblight_set(&self, percent: u32) -> Result<(), String>;
+    fn fp_led_level_set(&self, level: &str) -> Result<(), String>;
+    fn charge_limit_set(&self, min_pct: u8, max_pct: u8) -> Result<(), String>;
+    fn pd_ports(&self) -> SmallVec<[UsbCPort; 4]>;
+    fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]>;
+}
+
 fn sensor_name_for_index(platform: Option<Platform>, index: usize) -> String {
     let name = match platform {
         Some(Platform::IntelGen11) | Some(Platform::IntelGen12) | Some(Platform::IntelGen13) => {
@@ -386,8 +409,10 @@ impl EcClient {
             .map_err(|e| format!("EC initialization failed: {:?}", e))?;
         Ok(Self { ec })
     }
+}
 
-    pub fn thermal(&self) -> Result<ThermalData, String> {
+impl EcHw for EcClient {
+    fn thermal(&self) -> Result<ThermalData, String> {
         let mut temps = BTreeMap::new();
         let mut fans = SmallVec::new();
 
@@ -446,7 +471,7 @@ impl EcClient {
         })
     }
 
-    pub fn power(&self) -> Result<BatteryData, String> {
+    fn power(&self) -> Result<BatteryData, String> {
         let mut data = BatteryData::default();
 
         let info = power::power_info(&self.ec)
@@ -477,7 +502,7 @@ impl EcClient {
         Ok(data)
     }
 
-    pub fn versions(&self) -> Result<VersionsData, String> {
+    fn versions(&self) -> Result<VersionsData, String> {
         let mut data = VersionsData {
             mainboard_type: smbios::get_product_name(),
             mainboard_revision: smbios::get_platform().map(|p| format!("{:?}", p)),
@@ -515,7 +540,7 @@ impl EcClient {
     /// callers pass it only from explicit user intent (Manual 0% target,
     /// quit duty) or user-configured curve points; stale-thermal paths
     /// hand back to firmware instead of writing a blind duty.
-    pub fn set_fan_duty(&self, percent: u32, fan_index: Option<u32>) -> Result<(), String> {
+    fn set_fan_duty(&self, percent: u32, fan_index: Option<u32>) -> Result<(), String> {
         // Clamp at wrapper so no caller can send >100 to EC.
         let percent = percent.min(100);
         self.ec
@@ -523,20 +548,20 @@ impl EcClient {
             .map_err(|e| format!("Failed to set fan duty: {:?}", e))
     }
 
-    pub fn autofanctrl(&self) -> Result<(), String> {
+    fn autofanctrl(&self) -> Result<(), String> {
         self.ec
             .autofanctrl(None)
             .map_err(|e| format!("Failed to set auto fan control: {:?}", e))
     }
 
-    pub fn kblight_get(&self) -> Result<u32, String> {
+    fn kblight_get(&self) -> Result<u32, String> {
         self.ec
             .get_keyboard_backlight()
             .map(|v| v as u32)
             .map_err(|e| format!("Failed to get keyboard backlight: {:?}", e))
     }
 
-    pub fn kblight_set(&self, percent: u32) -> Result<(), String> {
+    fn kblight_set(&self, percent: u32) -> Result<(), String> {
         let percent = percent.min(100) as u8;
         // framework_lib ignores write errors; verify via readback with ±1 tolerance and brief retries for async EC update.
         self.ec.set_keyboard_backlight(percent);
@@ -555,7 +580,7 @@ impl EcClient {
         ))
     }
 
-    pub fn fp_led_level_set(&self, level: &str) -> Result<(), String> {
+    fn fp_led_level_set(&self, level: &str) -> Result<(), String> {
         use framework_lib::chromium_ec::commands::FpLedBrightnessLevel;
         let level_enum = match level.to_lowercase().as_str() {
             "high" => FpLedBrightnessLevel::High,
@@ -570,7 +595,7 @@ impl EcClient {
             .map_err(|e| format!("Failed to set FP LED level: {:?}", e))
     }
 
-    pub fn charge_limit_set(&self, min_pct: u8, max_pct: u8) -> Result<(), String> {
+    fn charge_limit_set(&self, min_pct: u8, max_pct: u8) -> Result<(), String> {
         if min_pct > max_pct {
             return Err(format!(
                 "Invalid charge limit range: min ({}) > max ({})",
@@ -609,7 +634,7 @@ impl EcClient {
     //         .map_err(|e| format!("Failed to get charge limit: {:?}", e))
     // }
 
-    pub fn pd_ports(&self) -> SmallVec<[UsbCPort; 4]> {
+    fn pd_ports(&self) -> SmallVec<[UsbCPort; 4]> {
         use framework_lib::chromium_ec::EcRequestRaw;
         use framework_lib::chromium_ec::commands::EcRequestGetPdPortState;
 
@@ -683,7 +708,7 @@ impl EcClient {
         ports
     }
 
-    pub fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]> {
+    fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]> {
         let mut cards = SmallVec::new();
         match self
             .ec
@@ -778,5 +803,132 @@ mod tests {
             classify_pd_port(&p, hist.iter().map(|v| v.as_slice()), 2, false, false),
             "USB-A Expansion Card"
         );
+    }
+
+    /// Scripted mock behind `EcHw` so ordering/failover logic can be tested
+    /// without hardware. Records every call in order; fallible calls fail
+    /// while `fail_writes` is non-empty (decremented per failed call).
+    pub struct MockEc {
+        pub ops: std::sync::Mutex<Vec<String>>,
+        pub fail_writes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MockEc {
+        pub fn new() -> Self {
+            Self {
+                ops: std::sync::Mutex::new(Vec::new()),
+                fail_writes: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn record(&self, op: String) {
+            self.ops.lock().unwrap().push(op);
+        }
+
+        fn fail_write(&self) -> Option<String> {
+            // `then` (lazy) rather than `then_some`: the latter evaluates
+            // `n - 1` eagerly and underflows on zero in debug builds.
+            let left = self
+                .fail_writes
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .unwrap_or(0);
+            (left > 0).then(|| "mock write failure".to_string())
+        }
+    }
+
+    impl EcHw for MockEc {
+        fn thermal(&self) -> Result<ThermalData, String> {
+            self.record("thermal".to_string());
+            Ok(ThermalData {
+                temps: Arc::new(BTreeMap::from([("CPU".to_string(), 50)])),
+                fans: SmallVec::new(),
+            })
+        }
+
+        fn power(&self) -> Result<BatteryData, String> {
+            self.record("power".to_string());
+            Ok(BatteryData::default())
+        }
+
+        fn versions(&self) -> Result<VersionsData, String> {
+            self.record("versions".to_string());
+            Ok(VersionsData::default())
+        }
+
+        fn set_fan_duty(&self, percent: u32, fan_index: Option<u32>) -> Result<(), String> {
+            self.record(format!("set_fan_duty({percent},{fan_index:?})"));
+            self.fail_write().map_or(Ok(()), Err)
+        }
+
+        fn autofanctrl(&self) -> Result<(), String> {
+            self.record("autofanctrl".to_string());
+            self.fail_write().map_or(Ok(()), Err)
+        }
+
+        fn kblight_get(&self) -> Result<u32, String> {
+            self.record("kblight_get".to_string());
+            Ok(50)
+        }
+
+        fn kblight_set(&self, percent: u32) -> Result<(), String> {
+            self.record(format!("kblight_set({percent})"));
+            self.fail_write().map_or(Ok(()), Err)
+        }
+
+        fn fp_led_level_set(&self, level: &str) -> Result<(), String> {
+            self.record(format!("fp_led_level_set({level})"));
+            self.fail_write().map_or(Ok(()), Err)
+        }
+
+        fn charge_limit_set(&self, min_pct: u8, max_pct: u8) -> Result<(), String> {
+            self.record(format!("charge_limit_set({min_pct},{max_pct})"));
+            self.fail_write().map_or(Ok(()), Err)
+        }
+
+        fn pd_ports(&self) -> SmallVec<[UsbCPort; 4]> {
+            self.record("pd_ports".to_string());
+            SmallVec::new()
+        }
+
+        fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]> {
+            self.record("expansion_cards".to_string());
+            SmallVec::new()
+        }
+    }
+
+    #[test]
+    fn mock_records_ops_in_call_order() {
+        // Foundation for fence/queue tests: dispatch order through
+        // `&dyn EcHw` must match the recorded hardware order.
+        let mock = MockEc::new();
+        let ec: &dyn EcHw = &mock;
+        ec.autofanctrl().unwrap();
+        ec.set_fan_duty(80, None).unwrap();
+        ec.set_fan_duty(30, Some(0)).unwrap();
+        assert_eq!(
+            *mock.ops.lock().unwrap(),
+            vec![
+                "autofanctrl".to_string(),
+                "set_fan_duty(80,None)".to_string(),
+                "set_fan_duty(30,Some(0))".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mock_fails_scripted_writes() {
+        let mock = MockEc::new();
+        mock.fail_writes
+            .store(2, std::sync::atomic::Ordering::SeqCst);
+        let ec: &dyn EcHw = &mock;
+        assert!(ec.set_fan_duty(80, None).is_err());
+        assert!(ec.autofanctrl().is_err());
+        // Script exhausted: writes succeed again.
+        assert!(ec.set_fan_duty(80, None).is_ok());
+        assert_eq!(mock.ops.lock().unwrap().len(), 3);
     }
 }

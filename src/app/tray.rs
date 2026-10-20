@@ -104,7 +104,7 @@ impl App {
                     return Some(run_ec_task_quit(
                         &self.state.system.ec_client,
                         Message::QuitShutdown,
-                        move |ec| apply_quit_charge_limit(&ec, &limit),
+                        move |ec| apply_quit_charge_limit(&*ec, &limit),
                     ));
                 }
                 Some(Task::none())
