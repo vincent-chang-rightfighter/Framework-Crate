@@ -14,18 +14,20 @@ use iced::{Element, Length};
 const SOFTWARE_MATCH_PAD: f32 = 38.0;
 
 /// About page reads `App` live; modal and infrequent so it bypasses snapshot cache.
-/// Section header matching the CPU Power card style.
-fn section_title(id: crate::style::ThemeId, label: &str) -> Element<'_, Message> {
+/// Section header matching the CPU Power card style. Takes the resolved
+/// palette instead of a ThemeId so one view build computes it once.
+fn section_title(pal: crate::style::Palette, label: &str) -> Element<'_, Message> {
     text(label)
         .size(FONT_SECTION)
         .style(move |_theme| iced::widget::text::Style {
-            color: Some(crate::style::palette_for(id).header),
+            color: Some(pal.header),
         })
         .into()
 }
 
 pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     let versions = read_lock(&app.state.system.versions);
+    let pal = palette_for(app.theme);
 
     let title_row = row![
         text("About").size(20),
@@ -148,7 +150,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     let mut content = column![].spacing(8);
     let ec_debug = app.expansion_card_debug;
     let diagnostics = column![
-        section_title(app.theme, "Diagnostics"),
+        section_title(pal, "Diagnostics"),
         row![
             text("Expansion Card Debug Mode:").size(FONT_BODY),
             button(text(if ec_debug { "ON" } else { "OFF" }).size(FONT_BODY))
@@ -173,7 +175,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     content = content.push(
         row![
             card(
-                column![section_title(app.theme, "Device"), hw_content]
+                column![section_title(pal, "Device"), hw_content]
                     .spacing(4)
                     .into()
             ),
@@ -182,7 +184,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         .spacing(8),
     );
     let mut updates = column![
-        section_title(app.theme, "Updates"),
+        section_title(pal, "Updates"),
         update_check_row(app),
         row![
             text("PawnIO:").size(FONT_BODY),
@@ -213,7 +215,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         row![
             card(
                 column![
-                    section_title(app.theme, "Software"),
+                    section_title(pal, "Software"),
                     sw_content,
                     space::vertical().height(SOFTWARE_MATCH_PAD),
                 ]
@@ -236,7 +238,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     }
     content = content.push(card(
         column![
-            section_title(app.theme, "License"),
+            section_title(pal, "License"),
             text("Framework Crate — MIT License")
                 .size(FONT_SMALL)
                 .style(|theme| iced::widget::text::Style {
@@ -307,7 +309,8 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
 /// Theme picker: two rows of scheme buttons with selected highlight.
 /// Default preserves the exact long-standing look.
 fn theme_picker(app: &App) -> Element<'_, Message> {
-    let mut rows = column![section_title(app.theme, "Theme")].spacing(8);
+    let pal = palette_for(app.theme);
+    let mut rows = column![section_title(pal, "Theme")].spacing(8);
     // Two rows of four: the half-width card cannot fit eight side by side.
     for chunk in crate::style::ThemeId::ALL.chunks(4) {
         let mut row = row![].spacing(8).align_y(iced::Alignment::Center);

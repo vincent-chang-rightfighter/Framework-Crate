@@ -239,14 +239,30 @@ pub(crate) fn not_supported_section(
 }
 
 pub fn view_main(app: &App) -> Element<'_, Message> {
+    // Startup/init screens use the resolved palette like the rest of the
+    // app instead of falling back to iced stock text colors.
+    let pal = palette_for(app.theme);
     if let Some(ref err) = app.startup_error {
         let mut content = column![].spacing(8).padding(20);
-        content = content.push(text("Framework Crate").size(20));
+        content = content.push(text("Framework Crate").size(20).style(move |_theme| {
+            iced::widget::text::Style {
+                color: Some(pal.header),
+            }
+        }));
         content = content.push(rule::horizontal(1).style(rule_style));
-        content = content.push(text(err.as_str()).size(FONT_BODY));
+        content = content.push(text(err.as_str()).size(FONT_BODY).style(move |_theme| {
+            iced::widget::text::Style {
+                color: Some(pal.error),
+            }
+        }));
         content = content.push(rule::horizontal(1).style(rule_style));
-        content = content
-            .push(text("Close this window and run the app as administrator.").size(FONT_BODY));
+        content = content.push(
+            text("Close this window and run the app as administrator.")
+                .size(FONT_BODY)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.gray),
+                }),
+        );
         return container(content)
             .center_x(Length::Fill)
             .center_y(Length::Fill)
@@ -255,9 +271,17 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
 
     if !app.init_complete {
         let content = column![
-            text("Framework Crate").size(20),
+            text("Framework Crate").size(20).style(move |_theme| {
+                iced::widget::text::Style {
+                    color: Some(pal.header),
+                }
+            }),
             rule::horizontal(1).style(rule_style),
-            text("Connecting to hardware...").size(FONT_BODY),
+            text("Connecting to hardware...")
+                .size(FONT_BODY)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.gray)
+                }),
         ]
         .spacing(8)
         .padding(20);
@@ -282,9 +306,16 @@ pub fn view_main(app: &App) -> Element<'_, Message> {
         Some(snap) => snap,
         None => {
             // First frame before Tick rebuild: placeholder avoids borrowing temporary.
-            return container(text("Preparing view...").size(FONT_BODY))
-                .padding(20)
-                .into();
+            let pal = crate::style::palette_for(app.theme);
+            return container(
+                text("Preparing view...")
+                    .size(FONT_BODY)
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.gray),
+                    }),
+            )
+            .padding(20)
+            .into();
         }
     };
 
