@@ -163,9 +163,9 @@ Measured on `target/release/framework-crate.exe` (Windows, `iced 0.14 + wgpu`, `
 
 | Metric | Value |
 |--------|-------|
-| Working Set | ~159 MB |
-| Private (commit charge) | ~119 MB |
-| Binary Size | ~8.6 MiB |
+| Working Set | ~161 MB |
+| Private (commit charge) | ~118 MB |
+| Binary Size | ~8.4 MiB |
 
 Working Set is what Task Manager's Processes **Memory** column shows. To reproduce:
 
