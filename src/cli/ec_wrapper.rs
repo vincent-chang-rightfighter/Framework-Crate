@@ -840,17 +840,24 @@ pub(crate) mod tests {
         }
 
         fn fail_write(&self) -> Option<String> {
-            // `then` (lazy) rather than `then_some`: the latter evaluates
-            // `n - 1` eagerly and underflows on zero in debug builds.
-            let left = self
-                .fail_writes
-                .fetch_update(
+            // Decrement-if-nonzero via compare_exchange (stable since
+            // forever); avoids `fetch_update`, which newer toolchains
+            // renamed to `try_update` and deny under -D warnings.
+            let mut left = self.fail_writes.load(std::sync::atomic::Ordering::SeqCst);
+            loop {
+                if left == 0 {
+                    return None;
+                }
+                match self.fail_writes.compare_exchange_weak(
+                    left,
+                    left - 1,
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
-                    |n| n.checked_sub(1),
-                )
-                .unwrap_or(0);
-            (left > 0).then(|| "mock write failure".to_string())
+                ) {
+                    Ok(_) => return Some("mock write failure".to_string()),
+                    Err(cur) => left = cur,
+                }
+            }
         }
     }
 
