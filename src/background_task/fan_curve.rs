@@ -5,9 +5,8 @@ use std::sync::atomic::Ordering;
 use tracing::warn;
 
 use super::{
-    CURVE_TEMP_FAILOVER_MS, FAN_REASSERT_INTERVAL_MS, FanCtx, Flow, MAX_EC_IO_FAILURES,
-    MAX_EC_WRITE_FAILURES, THERMAL_STALE_MS, reset_ec_after_failures, reset_ec_on_panic,
-    shutdown_requested,
+    CURVE_TEMP_FAILOVER_MS, FAN_REASSERT_INTERVAL_MS, FanCtx, Flow, MAX_EC_WRITE_FAILURES,
+    THERMAL_STALE_MS, reset_ec_after_failures, reset_ec_on_panic, shutdown_requested,
 };
 use crate::util::read_lock;
 
@@ -18,12 +17,9 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     let last_ok = ctx.state.thermal.last_success_ms.load(Ordering::Acquire);
     let is_stale = last_ok == 0 || ctx.now_ms.saturating_sub(last_ok) > THERMAL_STALE_MS;
     if is_stale {
-        ctx.consecutive_ec_failures += 1;
-        if ctx.consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-            reset_ec_after_failures(ctx.state, ctx.consecutive_ec_failures);
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            return Flow::Next;
-        }
+        // Read failures are counted by the background loop that performs
+        // the thermal read; counting here too would double-count one bad
+        // poll and reset the EC twice as fast. This arm only hands over.
         // Immediate handover when no fresh sample.
         if shutdown_requested(ctx.state) {
             return Flow::Stop;
@@ -32,6 +28,10 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             warn!("EC write lock contended, skipping this cycle");
             return Flow::Next;
         };
+        // Quit may have run while queued: re-check before touching hardware.
+        if shutdown_requested(ctx.state) {
+            return Flow::Stop;
+        }
         let ec_clone = Arc::clone(ctx.ec);
         match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
             ec_clone.autofanctrl()
@@ -46,10 +46,12 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 );
             }
             Ok(Err(e)) => {
+                // A failed handover write counts toward the *write*
+                // budget, not the read budget the background loop owns.
                 warn!("Curve stale fail-safe autofanctrl failed: {}", e);
-                ctx.consecutive_ec_failures += 1;
-                if ctx.consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-                    reset_ec_after_failures(ctx.state, ctx.consecutive_ec_failures);
+                ctx.consecutive_ec_write_failures += 1;
+                if ctx.consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
+                    reset_ec_after_failures(ctx.state, ctx.consecutive_ec_write_failures);
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     return Flow::Next;
                 }
@@ -79,6 +81,10 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             warn!("EC write lock contended, skipping this cycle");
             return Flow::Next;
         };
+        // Quit may have run while queued: re-check before touching hardware.
+        if shutdown_requested(ctx.state) {
+            return Flow::Stop;
+        }
         let ec_clone = Arc::clone(ctx.ec);
         if crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
             ec_clone.autofanctrl()
@@ -87,11 +93,13 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         .is_ok()
         {
             ctx.last_curve_failover_ms = ctx.now_ms;
-            ctx.consecutive_ec_failures = 0;
         } else {
-            ctx.consecutive_ec_failures += 1;
-            if ctx.consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-                reset_ec_after_failures(ctx.state, ctx.consecutive_ec_failures);
+            // Handover write failed: write budget, not read budget.
+            // (A successful handover also leaves the read counter alone:
+            // the background loop owns read-failure accounting.)
+            ctx.consecutive_ec_write_failures += 1;
+            if ctx.consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
+                reset_ec_after_failures(ctx.state, ctx.consecutive_ec_write_failures);
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 return Flow::Next;
             }
@@ -106,6 +114,10 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 warn!("EC write lock contended, skipping this cycle");
                 return Flow::Next;
             };
+            // Quit may have run while queued: re-check before touching hardware.
+            if shutdown_requested(ctx.state) {
+                return Flow::Stop;
+            }
             let ec_clone = Arc::clone(ctx.ec);
             let _ =
                 crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
@@ -122,6 +134,10 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 warn!("EC write lock contended, skipping this cycle");
                 return Flow::Next;
             };
+            // Quit may have run while queued: re-check before touching hardware.
+            if shutdown_requested(ctx.state) {
+                return Flow::Stop;
+            }
             let ec_clone = Arc::clone(ctx.ec);
             let _ =
                 crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
@@ -134,13 +150,8 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     // Fail-safe: empty temps means EC read failed; hand back to firmware immediately.
     // Previously waited 30s (CURVE_TEMP_FAILOVER_MS) holding last duty (could be 0%) → overheat.
     if thermal.temps.is_empty() {
-        // Count as read failure toward EC reset.
-        ctx.consecutive_ec_failures += 1;
-        if ctx.consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-            reset_ec_after_failures(ctx.state, ctx.consecutive_ec_failures);
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            return Flow::Next;
-        }
+        // The background loop already counted this empty read as a
+        // failure; counting here too would double-count one bad poll.
         // Throttle autofanctrl to once per second to avoid spamming EC
         if ctx.now_ms.saturating_sub(ctx.last_curve_failover_ms) >= CURVE_TEMP_FAILOVER_MS {
             if shutdown_requested(ctx.state) {
@@ -150,6 +161,10 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 warn!("EC write lock contended, skipping this cycle");
                 return Flow::Next;
             };
+            // Quit may have run while queued: re-check before touching hardware.
+            if shutdown_requested(ctx.state) {
+                return Flow::Stop;
+            }
             let ec_clone = Arc::clone(ctx.ec);
             match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
                 ec_clone.autofanctrl()
@@ -158,17 +173,16 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             {
                 Ok(Ok(())) => {
                     ctx.last_curve_failover_ms = ctx.now_ms;
-                    ctx.consecutive_ec_failures = 0;
                     tracing::warn!(
                         "Curve mode: EC temps read failed, handed fan control to firmware"
                     );
                 }
                 Ok(Err(e)) => {
                     warn!("Curve fail-safe autofanctrl failed: {}", e);
-                    // Count failure toward EC reset.
-                    ctx.consecutive_ec_failures += 1;
-                    if ctx.consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-                        reset_ec_after_failures(ctx.state, ctx.consecutive_ec_failures);
+                    // Failed handover write: write budget, not read budget.
+                    ctx.consecutive_ec_write_failures += 1;
+                    if ctx.consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
+                        reset_ec_after_failures(ctx.state, ctx.consecutive_ec_write_failures);
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                         return Flow::Next;
                     }
@@ -229,6 +243,10 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                     warn!("EC write lock contended, skipping this cycle");
                     return Flow::Next;
                 };
+                // Quit may have run while queued: re-check before touching hardware.
+                if shutdown_requested(ctx.state) {
+                    return Flow::Stop;
+                }
                 let ec_clone = Arc::clone(ctx.ec);
                 match crate::util::spawn_ec_guarded(
                     _ec_guard,
@@ -292,6 +310,10 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 warn!("EC write lock contended, skipping this cycle");
                 return Flow::Next;
             };
+            // Quit may have run while queued: re-check before touching hardware.
+            if shutdown_requested(ctx.state) {
+                return Flow::Stop;
+            }
             let ec_clone = Arc::clone(ctx.ec);
             match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
                 ec_clone.set_fan_duty(next, None)

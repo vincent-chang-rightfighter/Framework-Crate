@@ -27,6 +27,10 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 warn!("EC write lock contended, skipping this cycle");
                 return Flow::Next;
             };
+            // Quit may have run while queued: re-check before touching hardware.
+            if shutdown_requested(ctx.state) {
+                return Flow::Stop;
+            }
             let ec_clone = Arc::clone(ctx.ec);
             match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
                 ec_clone.autofanctrl()

@@ -63,7 +63,9 @@ pub(super) struct FanCtx<'a> {
     pub curve_rate_limit: Option<u32>,
     pub curve_rate_limit_down: Option<u32>,
     pub curve_sensors: Vec<String>,
-    pub consecutive_ec_failures: u32,
+    // NOTE: no read-failure counter here on purpose: the background loop
+    // owns thermal read accounting, so mode arms must not double-count one
+    // bad poll. Write failures use consecutive_ec_write_failures below.
     pub consecutive_ec_write_failures: u32,
     pub last_duty_write_ms: u64,
     pub last_curve_failover_ms: u64,
@@ -431,8 +433,13 @@ pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<cli::
 
 pub fn spawn(state: AppState) {
     const MAX_CONSECUTIVE_FAILURES: u32 = 10;
+    // Panics months apart must not accumulate into a shutdown: forget
+    // failures older than an hour so only a real crash loop trips the
+    // firmware handover below.
+    const OUTER_FAILURE_WINDOW_MS: u64 = 3_600_000;
     tokio::spawn(async move {
         let mut consecutive_failures: u32 = 0;
+        let mut last_outer_failure_ms: u64 = 0;
         loop {
             let bg_state2 = state.clone();
             let handle = tokio::spawn(async move {
@@ -598,10 +605,14 @@ pub fn spawn(state: AppState) {
                         .last_interaction_ts
                         .load(Ordering::Acquire);
                     let is_idle = now_ms.saturating_sub(last_interaction) > IDLE_THRESHOLD_MS;
+                    let hidden = !bg_state2.lifecycle.visible.load(Ordering::Acquire);
                     let effective_interval = match fan_mode {
                         // Curve must keep responding while idle; slowdown only for other modes.
-                        crate::types::FanControlMode::Curve => interval,
-                        _ if is_idle => IDLE_INTERVAL_MS,
+                        // Hidden window caps every mode at 2s to save power while
+                        // staying well inside the 5s stale-thermal failover.
+                        crate::types::FanControlMode::Curve if !hidden => interval,
+                        crate::types::FanControlMode::Curve => interval.max(2_000),
+                        _ if is_idle || hidden => IDLE_INTERVAL_MS.max(interval),
                         _ => interval,
                     };
                     tokio::time::sleep(std::time::Duration::from_millis(effective_interval)).await;
@@ -901,23 +912,30 @@ pub fn spawn(state: AppState) {
                         && now_ms.saturating_sub(last_versions_scan) >= VERSIONS_REFRESH_MS
                     {
                         last_versions_scan = now_ms;
-                        versions_scan_attempts += 1;
                         let ec_clone = Arc::clone(&ec);
-                        if let Ok(Ok(v)) = crate::util::spawn_ec_read_with_timeout(
+                        match crate::util::spawn_ec_read_with_timeout(
                             crate::util::EC_IO_TIMEOUT,
                             move || ec_clone.versions(),
                         )
                         .await
                         {
-                            with_write_lock(&bg_state2.system.versions, |guard| {
-                                if guard.as_ref().as_ref() != Some(&v) {
-                                    *guard = Arc::new(Some(v));
-                                    mark_view_dirty(&bg_state2);
+                            Ok(Ok(v)) => {
+                                with_write_lock(&bg_state2.system.versions, |guard| {
+                                    if guard.as_ref().as_ref() != Some(&v) {
+                                        *guard = Arc::new(Some(v));
+                                        mark_view_dirty(&bg_state2);
+                                    }
+                                });
+                                // Stop after first successful fetch; versions only change after reboot.
+                                if read_lock(&bg_state2.system.versions).is_some() {
+                                    versions_scan_attempts = 3;
                                 }
-                            });
-                            // Stop after first successful fetch; versions only change after reboot.
-                            if read_lock(&bg_state2.system.versions).is_some() {
-                                versions_scan_attempts = 3;
+                            }
+                            // Overload skips are backpressure, not failure:
+                            // don't consume the 3 startup tries.
+                            Err(e) if e.contains("overloaded") => {}
+                            _ => {
+                                versions_scan_attempts += 1;
                             }
                         }
                     }
@@ -1015,6 +1033,10 @@ pub fn spawn(state: AppState) {
                             manual_ramp_current = None;
                         }
                     }
+                    // Re-sample the clock: PD/expansion/versions/CPU scans above
+                    // can take seconds under EC load, and a stale now_ms
+                    // would drift the 30s duty re-assert guard.
+                    now_ms = crate::util::monotonic_ms();
                     let mut ctx = FanCtx {
                         state: &bg_state2,
                         ec: &ec,
@@ -1025,7 +1047,6 @@ pub fn spawn(state: AppState) {
                         curve_rate_limit,
                         curve_rate_limit_down,
                         curve_sensors,
-                        consecutive_ec_failures,
                         consecutive_ec_write_failures,
                         last_duty_write_ms,
                         last_curve_failover_ms,
@@ -1042,7 +1063,6 @@ pub fn spawn(state: AppState) {
                         crate::types::FanControlMode::Curve => fan_curve::run(&mut ctx).await,
                     };
                     // Write back the owned copies the arms may have mutated.
-                    consecutive_ec_failures = ctx.consecutive_ec_failures;
                     consecutive_ec_write_failures = ctx.consecutive_ec_write_failures;
                     last_duty_write_ms = ctx.last_duty_write_ms;
                     last_curve_failover_ms = ctx.last_curve_failover_ms;
@@ -1060,6 +1080,11 @@ pub fn spawn(state: AppState) {
                 }
             });
             if let Some(e) = handle.await.err() {
+                let now = crate::util::monotonic_ms();
+                if now.saturating_sub(last_outer_failure_ms) > OUTER_FAILURE_WINDOW_MS {
+                    consecutive_failures = 0;
+                }
+                last_outer_failure_ms = now;
                 consecutive_failures += 1;
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                     // Hand the fans back to firmware before dying: without
@@ -1068,43 +1093,47 @@ pub fn spawn(state: AppState) {
                     // Take the write lock so we don't race an in-flight
                     // orphan duty write that could land after the handover.
                     // Retry like the quit path instead of giving up on the
-                    // first contended lock.
-                    let ec_opt = { read_lock(&state.system.ec_client) };
-                    if let Some(ec) = ec_opt.as_ref().as_ref() {
-                        let mut handover: Result<Result<(), String>, String> =
-                            Err("EC write lock contended during final handover".to_string());
-                        for _ in 0..3 {
-                            if let Some(guard) = crate::util::acquire_ec_write().await {
-                                let ec_clone = Arc::clone(ec);
-                                handover = crate::util::spawn_ec_guarded(
+                    // first contended lock. Re-read the client inside the
+                    // loop: a resume racing the lock wait may have swapped
+                    // in a fresh client, and we must hand over on the new
+                    // handle, not a stale clone.
+                    let mut handover: Option<Result<Result<(), String>, String>> = None;
+                    for _ in 0..3 {
+                        let ec_opt = { read_lock(&state.system.ec_client) };
+                        let Some(ec) = ec_opt.as_ref().as_ref() else {
+                            break;
+                        };
+                        if let Some(guard) = crate::util::acquire_ec_write().await {
+                            let ec_clone = Arc::clone(ec);
+                            handover = Some(
+                                crate::util::spawn_ec_guarded(
                                     guard,
                                     crate::util::EC_IO_TIMEOUT,
                                     move || ec_clone.autofanctrl(),
                                 )
-                                .await;
-                                break;
-                            }
-                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                                .await,
+                            );
+                            break;
                         }
-                        match handover {
-                            Ok(Ok(())) => warn!(
-                                "Background task failed {} times consecutively, giving up; fans returned to firmware control",
-                                consecutive_failures
-                            ),
-                            Ok(Err(e)) => warn!(
-                                "Background task failed {} times consecutively, giving up; firmware handover also failed ({}): fans stuck at last duty",
-                                consecutive_failures, e
-                            ),
-                            Err(e) => warn!(
-                                "Background task failed {} times consecutively, giving up; firmware handover timed out ({}): fans stuck at last duty",
-                                consecutive_failures, e
-                            ),
-                        }
-                    } else {
-                        warn!(
-                            "Background task failed {} times consecutively, giving up with no EC client; fans stuck at last duty",
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    }
+                    match handover {
+                        Some(Ok(Ok(()))) => warn!(
+                            "Background task failed {} times consecutively, giving up; fans returned to firmware control",
                             consecutive_failures
-                        );
+                        ),
+                        Some(Ok(Err(e))) => warn!(
+                            "Background task failed {} times consecutively, giving up; firmware handover also failed ({}): fans stuck at last duty",
+                            consecutive_failures, e
+                        ),
+                        Some(Err(e)) => warn!(
+                            "Background task failed {} times consecutively, giving up; firmware handover timed out ({}): fans stuck at last duty",
+                            consecutive_failures, e
+                        ),
+                        None => warn!(
+                            "Background task failed {} times consecutively, giving up with no EC client or contended lock; fans stuck at last duty",
+                            consecutive_failures
+                        ),
                     }
                     break;
                 }
