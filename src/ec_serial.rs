@@ -25,17 +25,50 @@
 //!   the JoinError is mapped to a reply and the loop continues.
 
 use std::any::Any;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cli::EcHw;
 
-/// One queued driver call. `run` receives the client to call into and
-/// produces a type-erased reply; `FencedEc`-style generation checks are
-/// unnecessary because dispatch order is total.
+/// What `exec` can report, beyond the driver call's own `Result`.
+/// Callers match on the variant instead of substring-sniffing messages,
+/// so backpressure (`Overloaded`) is never confused with failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchError {
+    /// Queue full: skip this cycle, do not count it as a failure.
+    Overloaded { op: &'static str },
+    /// Caller stopped waiting; the op may still execute later.
+    TimedOut { op: &'static str, after: Duration },
+    /// The driver call itself failed (or panicked, which is mapped here).
+    Failed(String),
+}
+
+impl fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DispatchError::Overloaded { op } => write!(f, "EC overloaded, skipping {op}"),
+            DispatchError::TimedOut { op, after } => {
+                write!(f, "EC {op} timed out after {after:?}")
+            }
+            DispatchError::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl DispatchError {
+    /// Backpressure, not failure: the queue was full, nothing was sent.
+    /// Callers skip the cycle instead of counting a failure or resetting.
+    pub fn is_overloaded(&self) -> bool {
+        matches!(self, DispatchError::Overloaded { .. })
+    }
+}
+
 /// A queued driver call. Boxed so the unbounded-in-type closures all fit
 /// one channel; the reply carries the typed result back via `Any`.
+/// `FencedEc`-style generation checks are unnecessary: with a single
+/// writer, dispatch order always matches submission order.
 type BoxedEcCall = Box<dyn FnOnce(Arc<dyn EcHw>) -> Box<dyn Any + Send> + Send>;
 
 struct Job {
@@ -55,14 +88,25 @@ enum JobReply {
 /// (background loop + the occasional UI write).
 const QUEUE_CAP: usize = 16;
 
-fn worker_handle() -> mpsc::Sender<Job> {
-    static TX: std::sync::OnceLock<mpsc::Sender<Job>> = std::sync::OnceLock::new();
-    TX.get_or_init(|| {
-        let (tx, rx) = mpsc::channel(QUEUE_CAP);
-        tokio::spawn(worker_loop(rx));
-        tx
-    })
-    .clone()
+/// Lazily-started worker handle. If the worker task ever dies (only via
+/// a bug or runtime teardown, never via driver errors), the slot is
+/// empty and the next `sender()` call rebuilds it instead of wedging
+/// every future caller on a dead channel.
+static SLOT: std::sync::Mutex<Option<mpsc::Sender<Job>>> = std::sync::Mutex::new(None);
+
+fn sender() -> mpsc::Sender<Job> {
+    let mut slot = SLOT.lock().unwrap();
+    if let Some(tx) = slot.as_ref() {
+        if !tx.is_closed() {
+            return tx.clone();
+        }
+        // Worker died: drop the dead handle so a fresh one is built below.
+        *slot = None;
+    }
+    let (tx, rx) = mpsc::channel(QUEUE_CAP);
+    tokio::spawn(worker_loop(rx));
+    *slot = Some(tx.clone());
+    tx
 }
 
 async fn worker_loop(mut rx: mpsc::Receiver<Job>) {
@@ -86,24 +130,22 @@ async fn worker_loop(mut rx: mpsc::Receiver<Job>) {
     }
 }
 
-/// Runs `f` against the EC on the single writer thread and awaits its
-/// reply, up to `timeout`. The closure receives the client to call into,
-/// so call sites keep their existing `move |ec| ec.X(...)` shape.
-///
-/// Contention cannot happen by construction (one writer, FIFO), so unlike
-/// the old lock-based path there is no "contended" case: `Err` means the
-/// driver call failed, panicked, timed out, or the queue was full.
-pub async fn exec<F, T>(
+/// Shared submit-and-await core used by both the production path (`exec`,
+/// via the global worker) and tests (via a local worker). Keeping one
+/// implementation means tests cover the exact code production runs.
+async fn dispatch<F, T>(
+    tx: &mpsc::Sender<Job>,
     op: &'static str,
     timeout: Duration,
     client: Arc<dyn EcHw>,
     f: F,
-) -> Result<T, String>
+) -> Result<T, DispatchError>
 where
     F: FnOnce(Arc<dyn EcHw>) -> T + Send + 'static,
     T: Send + 'static,
 {
-    let (tx, rx) = oneshot::channel();
+    use tokio::sync::mpsc::error::TrySendError;
+    let (reply_tx, rx) = oneshot::channel();
     let job = Job {
         op,
         client,
@@ -111,20 +153,46 @@ where
             let out: T = f(ec);
             Box::new(out) as Box<dyn Any + Send>
         }),
-        reply: tx,
+        reply: reply_tx,
     };
-    crate::ec_serial::worker_handle()
-        .try_send(job)
-        .map_err(|_| format!("EC overloaded, skipping {op}"))?;
+    match tx.try_send(job) {
+        Ok(()) => {}
+        // Full and Closed both mean "do not queue": Full is backpressure,
+        // Closed means the worker died (it is rebuilt on next `sender()`
+        // call). Either way the caller must skip, not pile up.
+        Err(TrySendError::Full(_)) => return Err(DispatchError::Overloaded { op }),
+        Err(TrySendError::Closed(_)) => return Err(DispatchError::Overloaded { op }),
+    }
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(JobReply::Value(any))) => any.downcast().map(|b| *b).map_err(|_| {
             // Unreachable by construction: the box always holds T.
-            format!("EC reply type mismatch for {op}")
+            DispatchError::Failed(format!("EC reply type mismatch for {op}"))
         }),
-        Ok(Ok(JobReply::Failed(e))) => Err(e),
-        Ok(Err(_)) => Err("EC dispatcher gone".to_string()),
-        Err(_) => Err(format!("EC {op} timed out after {timeout:?}")),
+        Ok(Ok(JobReply::Failed(e))) => Err(DispatchError::Failed(e)),
+        Ok(Err(_)) => Err(DispatchError::Failed("EC dispatcher gone".to_string())),
+        Err(_) => Err(DispatchError::TimedOut { op, after: timeout }),
     }
+}
+
+/// Runs `f` against the EC on the single writer thread and awaits its
+/// reply, up to `timeout`. The closure receives the client to call into,
+/// so call sites keep their existing `move |ec| ec.X(...)` shape.
+///
+/// Contention cannot happen by construction (one writer, FIFO), so unlike
+/// the old lock-based path there is no "contended" case: match on
+/// [`DispatchError`] to tell backpressure apart from failure.
+pub async fn exec<F, T>(
+    op: &'static str,
+    timeout: Duration,
+    client: Arc<dyn EcHw>,
+    f: F,
+) -> Result<T, DispatchError>
+where
+    F: FnOnce(Arc<dyn EcHw>) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let tx = sender();
+    dispatch(&tx, op, timeout, client, f).await
 }
 
 #[cfg(test)]
@@ -140,39 +208,6 @@ mod tests {
         (tx, h)
     }
 
-    async fn local_exec<F, T>(
-        tx: &mpsc::Sender<Job>,
-        op: &'static str,
-        timeout: Duration,
-        client: Arc<dyn EcHw>,
-        f: F,
-    ) -> Result<T, String>
-    where
-        F: FnOnce(Arc<dyn EcHw>) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        let (rtx, rrx) = oneshot::channel();
-        tx.try_send(Job {
-            op,
-            client,
-            run: Box::new(move |ec| {
-                let out: T = f(ec);
-                Box::new(out) as Box<dyn Any + Send>
-            }),
-            reply: rtx,
-        })
-        .map_err(|_| format!("EC overloaded, skipping {op}"))?;
-        match tokio::time::timeout(timeout, rrx).await {
-            Ok(Ok(JobReply::Value(any))) => any
-                .downcast()
-                .map(|b| *b)
-                .map_err(|_| format!("EC reply type mismatch for {op}")),
-            Ok(Ok(JobReply::Failed(e))) => Err(e),
-            Ok(Err(_)) => Err("EC dispatcher gone".to_string()),
-            Err(_) => Err(format!("EC {op} timed out after {timeout:?}")),
-        }
-    }
-
     #[tokio::test]
     async fn ops_execute_in_submit_order() {
         let mock = Arc::new(MockEc::new());
@@ -180,7 +215,7 @@ mod tests {
         let (tx, _h) = local_worker();
         for i in 0..5u32 {
             let c = client.clone();
-            local_exec(&tx, "op", Duration::from_secs(5), c, move |ec| {
+            dispatch(&tx, "op", Duration::from_secs(5), c, move |ec| {
                 ec.set_fan_duty(i * 10, None)
             })
             .await
@@ -207,14 +242,14 @@ mod tests {
         let client: Arc<dyn EcHw> = mock.clone();
         let (tx, _h) = local_worker();
         let c = client.clone();
-        let first = local_exec(&tx, "hang", Duration::from_millis(50), c, move |ec| {
+        let first = dispatch(&tx, "hang", Duration::from_millis(50), c, move |ec| {
             ec.set_fan_duty(80, None)
         })
         .await;
         assert!(first.is_err(), "hung op must time out, got {first:?}");
         mock.set_hang(false);
         let c = client.clone();
-        let second = local_exec(&tx, "after", Duration::from_secs(5), c, move |ec| {
+        let second = dispatch(&tx, "after", Duration::from_secs(5), c, move |ec| {
             ec.set_fan_duty(10, None)
         })
         .await;
@@ -257,14 +292,14 @@ mod tests {
                 mock.set_hang(true);
             }
             let c = client.clone();
-            let r: Result<Result<(), String>, String> = if !is_set {
-                local_exec(&tx, "thermal", Duration::from_millis(200), c, move |ec| {
+            let r: Result<Result<(), String>, DispatchError> = if !is_set {
+                dispatch(&tx, "thermal", Duration::from_millis(200), c, move |ec| {
                     ec.thermal().map(|_| ())
                 })
                 .await
             } else {
                 expected_duties.push(i);
-                local_exec(&tx, "set", Duration::from_millis(200), c, move |ec| {
+                dispatch(&tx, "set", Duration::from_millis(200), c, move |ec| {
                     ec.set_fan_duty(i, None)
                 })
                 .await
@@ -305,7 +340,7 @@ mod tests {
         let (tx, _h) = local_worker();
         for _ in 0..100 {
             let c = client.clone();
-            local_exec(&tx, "quit-handover", Duration::from_secs(5), c, move |ec| {
+            dispatch(&tx, "quit-handover", Duration::from_secs(5), c, move |ec| {
                 ec.autofanctrl()
             })
             .await
@@ -327,7 +362,7 @@ mod tests {
         let c = client.clone();
         let tx_hung = tx.clone();
         let _hung = tokio::spawn(async move {
-            let _ = local_exec(&tx_hung, "hang", Duration::from_secs(30), c, move |ec| {
+            let _ = dispatch(&tx_hung, "hang", Duration::from_secs(30), c, move |ec| {
                 ec.set_fan_duty(80, None)
             })
             .await;
@@ -336,12 +371,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         // Fill the queue past capacity.
         let mut rejected = 0;
-        for _ in 0..(QUEUE_CAP + 4) {
+        for i in 0..(QUEUE_CAP + 4) as u8 {
             let c = client.clone();
-            let r = local_exec(&tx, "filler", Duration::from_millis(10), c, move |ec| {
-                ec.set_fan_duty(0, None)
-            })
-            .await;
+            let r: Result<Result<(), String>, DispatchError> =
+                dispatch(&tx, "set", Duration::from_millis(200), c, move |ec| {
+                    ec.set_fan_duty(i as u32, None)
+                })
+                .await;
             if r.is_err() {
                 rejected += 1;
             }
