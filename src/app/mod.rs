@@ -742,4 +742,27 @@ mod tests {
         let (pl1, pl2, t) = app.validate_cpu_power_inputs().unwrap();
         assert_eq!((pl1, pl2, t), (30.0, 35.0, 28.0));
     }
+
+    #[tokio::test]
+    async fn validate_cpu_power_disabled_skips_floor_and_order() {
+        // Matches the write boundary: a disabled 0W entry means "no
+        // limit enforced", so floor and PL1<=PL2 do not apply to it.
+        let (mut app, _) = App::new(false);
+        app.pl1_enabled = false;
+        app.pl1_edit = "0".into();
+        app.pl2_edit = "30".into();
+        app.pl1_time_edit = "28".into();
+        assert!(app.validate_cpu_power_inputs().is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_cpu_power_enabled_zero_is_rejected() {
+        // An enabled 0W limit would hard-throttle into an apparent hang.
+        let (mut app, _) = App::new(false);
+        app.pl1_enabled = true;
+        app.pl1_edit = "0".into();
+        app.pl2_edit = "30".into();
+        app.pl1_time_edit = "28".into();
+        assert!(app.validate_cpu_power_inputs().is_err());
+    }
 }

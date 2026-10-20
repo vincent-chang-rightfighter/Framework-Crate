@@ -470,17 +470,19 @@ impl App {
         if !pl1_time.is_finite() {
             return Err("PL1 time must be a finite number".to_string());
         }
-        // Enabled floor mirrors the write boundary: sub-5W enabled
-        // limits would hard-throttle into an apparent hang.
-        if pl1 < crate::cpu_power::LIMIT_MIN_ENABLED_WATTS {
+        // Enabled floor mirrors the write boundary: a sub-5W *enabled*
+        // limit would hard-throttle into an apparent hang. Disabled
+        // limits skip the floor (including 0W), matching
+        // `validate_limit_params`.
+        if self.pl1_enabled && pl1 < crate::cpu_power::LIMIT_MIN_ENABLED_WATTS {
             return Err(format!(
-                "PL1 must be at least {:.0}W",
+                "PL1 must be at least {:.0}W when enabled",
                 crate::cpu_power::LIMIT_MIN_ENABLED_WATTS
             ));
         }
-        if pl2 < crate::cpu_power::LIMIT_MIN_ENABLED_WATTS {
+        if self.pl2_enabled && pl2 < crate::cpu_power::LIMIT_MIN_ENABLED_WATTS {
             return Err(format!(
-                "PL2 must be at least {:.0}W",
+                "PL2 must be at least {:.0}W when enabled",
                 crate::cpu_power::LIMIT_MIN_ENABLED_WATTS
             ));
         }
@@ -521,7 +523,7 @@ impl App {
                 crate::cpu_power::LIMIT_MAX_TIME_S
             ));
         }
-        if pl1 > pl2 {
+        if self.pl1_enabled && self.pl2_enabled && pl1 > pl2 {
             return Err(format!(
                 "PL1 ({:.1}W) must not exceed PL2 ({:.1}W)",
                 pl1, pl2
