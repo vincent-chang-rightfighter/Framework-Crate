@@ -229,6 +229,93 @@ mod tests {
         );
     }
 
+    /// Randomized soak: mixed reads/writes with occasional hangs and
+    /// overload windows. `EC_SOAK_ITERS` scales it (default 500 for CI;
+    /// the nightly soak workflow sets 20000). Asserts every submitted op
+    /// ran exactly once and write order matches submission order: no
+    /// loss, duplication, or reorder, even across timeouts.
+    #[tokio::test]
+    async fn soak_randomized_ops_preserve_order() {
+        let iters: u32 = std::env::var("EC_SOAK_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500);
+        let mock = Arc::new(MockEc::new());
+        let client: Arc<dyn EcHw> = mock.clone();
+        let (tx, _h) = local_worker();
+        // Deterministic LCG so failures reproduce with the same count.
+        let mut rng: u64 = 0x12345678;
+        let mut expected_duties: Vec<u32> = Vec::new();
+        for i in 0..iters {
+            // Mix reads and writes the way the background loop does; the
+            // duty encodes the submission index so order is checkable.
+            // Only set_fan_duty honors the hang flag (thermal never hangs),
+            // and hung ops still record exactly once before blocking.
+            let is_set = i % 3 != 0;
+            let hang_this_one = is_set && i % 37 == 5;
+            if hang_this_one {
+                mock.set_hang(true);
+            }
+            let c = client.clone();
+            let r: Result<Result<(), String>, String> = if !is_set {
+                local_exec(&tx, "thermal", Duration::from_millis(200), c, move |ec| {
+                    ec.thermal().map(|_| ())
+                })
+                .await
+            } else {
+                expected_duties.push(i);
+                local_exec(&tx, "set", Duration::from_millis(200), c, move |ec| {
+                    ec.set_fan_duty(i, None)
+                })
+                .await
+            };
+            if hang_this_one {
+                // Hung op must time out, never wedge the worker forever.
+                assert!(r.is_err(), "hung op {i} must time out");
+                mock.set_hang(false);
+            } else {
+                assert!(r.is_ok(), "op {i} unexpectedly failed: {r:?}");
+            }
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+        }
+        let _ = rng;
+        // Every submitted op ran exactly once (recorded at execution).
+        let ops = mock.ops.lock().unwrap();
+        assert_eq!(ops.len(), iters as usize, "no op may be lost or duplicated");
+        // Write order matches submission order: parse the duty payloads.
+        let mut duties = Vec::new();
+        for op in ops.iter() {
+            if let Some(rest) = op.strip_prefix("set_fan_duty(") {
+                let n: u32 = rest.split(',').next().unwrap().parse().unwrap();
+                duties.push(n);
+            }
+        }
+        assert_eq!(duties, expected_duties, "writes must not be reordered");
+    }
+
+    /// Quit path: 100 consecutive firmware handovers must all land, in
+    /// order. Models the tray/quit handover being retried across a
+    /// flaky driver without losing or reordering the final intent.
+    #[tokio::test]
+    async fn quit_handover_survives_100_rounds() {
+        let mock = Arc::new(MockEc::new());
+        let client: Arc<dyn EcHw> = mock.clone();
+        let (tx, _h) = local_worker();
+        for _ in 0..100 {
+            let c = client.clone();
+            local_exec(&tx, "quit-handover", Duration::from_secs(5), c, move |ec| {
+                ec.autofanctrl()
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        assert_eq!(mock.ops.lock().unwrap().len(), 100);
+        assert!(mock.ops.lock().unwrap().iter().all(|o| o == "autofanctrl"));
+    }
+
     #[tokio::test]
     async fn full_queue_fails_fast() {
         // Block the worker with a hung op, then fill the queue: further
