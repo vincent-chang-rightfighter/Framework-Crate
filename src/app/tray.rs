@@ -1,4 +1,4 @@
-use super::{App, Message, apply_quit_charge_limit, refresh_cpu_power_task, run_ec_task};
+use super::{App, Message, apply_quit_charge_limit, refresh_cpu_power_task, run_ec_task_quit};
 use crate::system_info;
 use crate::types::FanControlMode;
 use crate::util::read_lock;
@@ -98,7 +98,10 @@ impl App {
                     let limit = read_lock(&self.state.lifecycle.config)
                         .battery
                         .charge_limit_max_pct;
-                    return Some(run_ec_task(
+                    // Same retry semantics as the quit dialog path: a
+                    // contended lock must not silently drop the charge
+                    // flush on the way out.
+                    return Some(run_ec_task_quit(
                         &self.state.system.ec_client,
                         Message::QuitShutdown,
                         move |ec| apply_quit_charge_limit(&ec, &limit),

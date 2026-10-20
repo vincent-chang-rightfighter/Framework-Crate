@@ -8,34 +8,6 @@ use tracing::warn;
 
 use super::Message;
 
-/// Executes closure on EC client via spawn_blocking; no-ops silently if unavailable.
-pub(crate) fn run_ec_task(
-    ec_client: &Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
-    done: Message,
-    f: impl FnOnce(Arc<cli::EcClient>) + Send + 'static,
-) -> Task<Message> {
-    let ec_client = Arc::clone(ec_client);
-    Task::perform(
-        async move {
-            let Some(_guard) = util::acquire_ec_write().await else {
-                warn!("EC write lock contended, skipping EC task");
-                return done;
-            };
-            let ec_opt = { util::read_lock(&ec_client) };
-            if let Some(ref ec) = *ec_opt {
-                let ec = ec.clone();
-                if let Err(e) =
-                    util::spawn_ec_guarded(_guard, util::EC_IO_TIMEOUT, move || f(ec)).await
-                {
-                    warn!("EC task failed: {}", e);
-                }
-            }
-            done
-        },
-        |msg| msg,
-    )
-}
-
 /// Quit path must not silently skip the firmware handover: retry both lock
 /// contention and EC write failures so a contended or flaky EC still gets
 /// restored before the window closes. `f` is `Fn + Clone` so every attempt
@@ -91,7 +63,7 @@ pub(crate) fn apply_quit_charge_limit(ec: &cli::EcClient, limit: &Option<types::
     }
 }
 
-/// Like `run_ec_task` but reports `Result` via `Message::EcOpResult` to surface EC write failures.
+/// Runs a closure on the EC client and reports `Result` via `Message::EcOpResult` to surface EC write failures.
 pub(crate) fn run_ec_task_result(
     ec_client: &Arc<RwLock<Arc<Option<Arc<cli::EcClient>>>>>,
     f: impl FnOnce(Arc<cli::EcClient>) -> Result<(), String> + Send + 'static,
