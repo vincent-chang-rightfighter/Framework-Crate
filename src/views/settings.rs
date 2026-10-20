@@ -189,21 +189,26 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
-        text("If update fails, check internet or download manually:")
-            .size(FONT_SMALL)
-            .style(|theme| iced::widget::text::Style {
-                color: Some(palette(theme).gray),
-            }),
-        text("PawnIO → https://github.com/namazso/PawnIO/releases")
-            .size(FONT_SMALL)
-            .style(|theme| iced::widget::text::Style {
-                color: Some(palette(theme).gray),
-            }),
-        text("Modules → https://github.com/namazso/PawnIO.Modules/releases/latest")
-            .size(FONT_SMALL)
-            .style(|theme| iced::widget::text::Style {
-                color: Some(palette(theme).gray),
-            }),
+        // Tight sub-column so the three hint lines read as one wrapped
+        // paragraph instead of three spaced-out rows.
+        column![
+            text("If update fails, check internet or download manually:")
+                .size(FONT_SMALL)
+                .style(|theme| iced::widget::text::Style {
+                    color: Some(palette(theme).gray),
+                }),
+            text("PawnIO → https://github.com/namazso/PawnIO/releases")
+                .size(FONT_SMALL)
+                .style(|theme| iced::widget::text::Style {
+                    color: Some(palette(theme).gray),
+                }),
+            text("Modules → https://github.com/namazso/PawnIO.Modules/releases/latest")
+                .size(FONT_SMALL)
+                .style(|theme| iced::widget::text::Style {
+                    color: Some(palette(theme).gray),
+                }),
+        ]
+        .spacing(2),
     ]
     .spacing(8);
     if let Some(ref err) = app.modules_download_error {
