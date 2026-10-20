@@ -6,7 +6,8 @@ use tracing::warn;
 
 use super::{
     FAN_REASSERT_INTERVAL_MS, FanCtx, Flow, MAX_EC_WRITE_FAILURES, THERMAL_STALE_MS,
-    estimate_duty_from_thermal, reset_ec_after_failures, reset_ec_on_panic, shutdown_requested,
+    acquire_ec_write_shutdown_aware, estimate_duty_from_thermal, reset_ec_after_failures,
+    reset_ec_on_panic, shutdown_requested,
 };
 use crate::util::read_lock;
 
@@ -229,14 +230,11 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 }
                 let mut write_backoff = false;
                 {
-                    let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
-                        warn!("EC write lock contended, skipping this cycle");
-                        return Flow::Next;
-                    };
-                    // Quit may have run while queued: re-check before touching hardware.
-                    if shutdown_requested(ctx.state) {
+                    let Some(_ec_guard) = acquire_ec_write_shutdown_aware(ctx.state).await else {
+                        // Shutdown was requested while waiting for the lock:
+                        // stop instead of writing a stale duty after quit.
                         return Flow::Stop;
-                    }
+                    };
                     let ec_clone = Arc::clone(ctx.ec);
                     let fan_idx = idx as u32;
                     match crate::util::spawn_ec_guarded(

@@ -90,6 +90,36 @@ fn reset_ec_on_panic(state: &AppState) {
         .store(true, Ordering::Release);
 }
 
+/// Acquires the EC write lock in 500ms slices so a pending shutdown is
+/// noticed promptly: `acquire_ec_write` alone can block up to 5s behind a
+/// hung holder, which stalls per-fan loops fan-by-fan on quit. Returns
+/// `None` only when shutdown was requested (callers must stop); lock
+/// contention alone retries until the holder releases, which always
+/// happens because `spawn_ec_guarded` drops the guard on completion.
+pub(super) async fn acquire_ec_write_shutdown_aware(
+    state: &AppState,
+) -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    loop {
+        if shutdown_requested(state) {
+            return None;
+        }
+        if let Ok(guard) = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            crate::util::ec_write_mutex().lock(),
+        )
+        .await
+        {
+            // Re-check after the wait: quit may have been requested while
+            // queued, and writing now would undo its firmware handover.
+            if shutdown_requested(state) {
+                return None;
+            }
+            return Some(guard);
+        }
+        // Timed out waiting: loop re-checks shutdown instead of piling up.
+    }
+}
+
 /// Forces EC reinitialization after consecutive failures (recovers stale driver after resume).
 fn reset_ec_after_failures(state: &AppState, failures: u32) {
     warn!(
