@@ -203,6 +203,27 @@ fn modules_dir() -> std::path::PathBuf {
     base.join("framework-crate").join(MODULES_DIR_NAME)
 }
 
+/// Creates the modules dir and refuses symlinks/junctions, mirroring
+/// `config::config_path`: a planted junction would redirect the ZIP
+/// download, staging, and promote outside the user profile.
+fn validated_modules_dir() -> Result<std::path::PathBuf, String> {
+    let dir = modules_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create modules directory: {e}"))?;
+    if std::fs::symlink_metadata(&dir)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+        || crate::config::dir_has_reparse_point(&dir)
+    {
+        return Err(format!(
+            "modules directory is a symlink or junction, refusing: {}",
+            dir.display()
+        ));
+    }
+    std::fs::canonicalize(&dir)
+        .map_err(|e| format!("failed to canonicalize modules directory: {e}"))
+}
+
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     // sha2 0.11 returns a hybrid-array without LowerHex; encode manually so
@@ -479,9 +500,7 @@ fn check_zip_size(zip_tmp: &std::path::Path) -> Result<(), String> {
 
 /// Downloads PawnIO Modules ZIP and extracts blobs.
 pub fn download_and_extract_modules() -> Result<(), String> {
-    let dir = modules_dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("failed to create modules directory: {}", e))?;
+    let dir = validated_modules_dir()?;
 
     // Primary: latest release asset URL. Fallback: last-known release so a
     // flaky GitHub API degrades to a slightly old download instead of an error.
@@ -710,8 +729,7 @@ pub fn pawnio_modules_version() -> String {
 
 /// Opens modules directory in Explorer (the dir actually in use, else target).
 pub fn open_modules_dir() -> Result<(), String> {
-    let dir = modules_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dir = validated_modules_dir().map_err(|e| e.to_string())?;
     std::process::Command::new(crate::util::system32_exe("explorer.exe"))
         .arg(&dir)
         .spawn()

@@ -114,7 +114,8 @@ fn validate_config_dir(path: &std::path::Path) -> Result<(), String> {
 
 /// True when the path is a symlink or junction: both carry
 /// FILE_ATTRIBUTE_REPARSE_POINT, while Rust's is_symlink misses junctions.
-fn dir_has_reparse_point(path: &std::path::Path) -> bool {
+/// Shared with the modules downloader, which stages to a sibling directory.
+pub(crate) fn dir_has_reparse_point(path: &std::path::Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_REPARSE_POINT, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
