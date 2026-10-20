@@ -4,7 +4,11 @@ updates:
     directory: /
     schedule:
       interval: monthly
-    # Pinned SHAs stay put; Dependabot opens the bump PRs with the new
-    # hash so a human still reviews each supply-chain change.
+    # One combined PR per cycle instead of one per action; a human still
+    # reviews each supply-chain change before merging.
+    groups:
+      actions:
+        patterns:
+          - "*"
     commit-message:
       prefix: "ci"
