@@ -699,21 +699,17 @@ pub fn spawn(state: AppState) {
                                 continue;
                             }
                         }
+                        Err(e) if e.is_overloaded() => {
+                            // Backpressure, not failure: fall through to fan
+                            // modes below instead of skipping the whole round.
+                        }
                         Err(e) => {
-                            // Overload skips are intentional backpressure,
-                            // not hardware failures: fall through so fan
-                            // modes still run on the last sample instead of
-                            // skipping the whole round.
-                            if e.contains("overloaded") {
-                                // Fall through to fan modes below.
-                            } else {
-                                warn!("EC thermal spawn failed: {}", e);
-                                consecutive_ec_failures += 1;
-                                if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-                                    reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
-                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                    continue;
-                                }
+                            warn!("EC thermal spawn failed: {}", e);
+                            consecutive_ec_failures += 1;
+                            if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
+                                reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                continue;
                             }
                         }
                     }
@@ -790,7 +786,7 @@ pub fn spawn(state: AppState) {
                                 // Overload skips are backpressure, not
                                 // failure: fall through to the rest of the
                                 // round instead of skipping PD/fan.
-                                if e.contains("overloaded") {
+                                if e.is_overloaded() {
                                 } else {
                                     warn!("Battery spawn failed: {}", e);
                                     consecutive_battery_failures += 1;
@@ -857,7 +853,7 @@ pub fn spawn(state: AppState) {
                                 // Overload skips are backpressure: fall
                                 // through to expansion/fan instead of
                                 // skipping the round.
-                                if e.contains("overloaded") {
+                                if e.is_overloaded() {
                                     // No warning, no staleness change.
                                 } else {
                                     warn!("PD ports read failed: {}", e);
@@ -943,7 +939,7 @@ pub fn spawn(state: AppState) {
                             }
                             // Overload skips are backpressure, not failure:
                             // don't consume the 3 startup tries.
-                            Err(e) if e.contains("overloaded") => {}
+                            Err(e) if e.is_overloaded() => {}
                             _ => {
                                 versions_scan_attempts += 1;
                             }
@@ -1100,30 +1096,30 @@ pub fn spawn(state: AppState) {
                     // Hand the fans back to firmware before dying: without
                     // the loop nothing re-asserts duties, so a stuck manual
                     // duty would persist indefinitely with no UI to fix it.
-                    // The single writer serializes this after any in-flight
-                    // duty, so the handover cannot be overtaken; re-read the
-                    // client each attempt in case a resume swapped it.
-                    let mut handover: Option<Result<Result<(), String>, String>> = None;
-                    for _ in 0..3 {
-                        let ec_opt = { read_lock(&state.system.ec_client) };
-                        let Some(ec) = ec_opt.as_ref().as_ref() else {
-                            break;
-                        };
-                        let ec_clone = Arc::clone(ec);
-                        let attempt = crate::ec_serial::exec(
-                            "final-handover",
-                            crate::util::EC_IO_TIMEOUT,
-                            ec_clone,
-                            move |ec| ec.autofanctrl(),
-                        )
-                        .await;
-                        let ok = matches!(&attempt, Ok(Ok(())));
-                        handover = Some(attempt);
-                        if ok {
-                            break;
+                    // Single attempt with a generous timeout: the single
+                    // writer serializes this after any in-flight duty, so
+                    // the handover cannot be overtaken, and retries would
+                    // only queue duplicate handovers behind the same hang.
+                    let ec_opt = { read_lock(&state.system.ec_client) };
+                    let handover: Option<
+                        Result<Result<(), String>, crate::ec_serial::DispatchError>,
+                    > = match ec_opt.as_ref().as_ref() {
+                        Some(ec) => {
+                            let ec_clone = Arc::clone(ec);
+                            const FINAL_HANDOVER_TIMEOUT: std::time::Duration =
+                                std::time::Duration::from_secs(5);
+                            Some(
+                                crate::ec_serial::exec(
+                                    "final-handover",
+                                    FINAL_HANDOVER_TIMEOUT,
+                                    ec_clone,
+                                    move |ec| ec.autofanctrl(),
+                                )
+                                .await,
+                            )
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    }
+                        None => None,
+                    };
                     match handover {
                         Some(Ok(Ok(()))) => warn!(
                             "Background task failed {} times consecutively, giving up; fans returned to firmware control",

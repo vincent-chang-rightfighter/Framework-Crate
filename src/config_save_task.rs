@@ -48,16 +48,19 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
         let pct = if limit.enabled { limit.value } else { 100 };
         let ec_clone = Arc::clone(ec);
         // min_pct=0: EC ignores software minimum; hardware enforces ~25%.
-        if let Err(e) = crate::ec_serial::exec(
+        let res: Result<(), String> = match crate::ec_serial::exec(
             "charge-limit-apply",
             CONFIG_SAVE_TIMEOUT,
             ec_clone,
             move |ec| ec.charge_limit_set(0, pct),
         )
         .await
-        .unwrap_or_else(Err)
         {
-            warn!("Failed to set charge limit: {}", e);
+            Ok(inner) => inner,
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(e) = res {
+            warn!("Failed to set charge limit: {e}");
             return false;
         }
     }

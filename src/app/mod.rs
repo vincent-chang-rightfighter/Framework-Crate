@@ -473,16 +473,19 @@ impl App {
                             if let Some(ref limit) = cfg.battery.charge_limit_max_pct {
                                 let pct = if limit.enabled { limit.value } else { 100 };
                                 let ec_clone = Arc::clone(&arc_ec);
-                                if let Err(e) = crate::ec_serial::exec(
+                                let res: Result<(), String> = match crate::ec_serial::exec(
                                     "init-charge-limit",
                                     crate::util::EC_IO_TIMEOUT,
                                     ec_clone,
                                     move |ec| ec.charge_limit_set(0, pct),
                                 )
                                 .await
-                                .unwrap_or_else(Err)
                                 {
-                                    warn!("Failed to apply saved charge limit: {}", e);
+                                    Ok(r) => r,
+                                    Err(e) => Err(e.to_string()),
+                                };
+                                if let Err(e) = res {
+                                    warn!("Failed to apply saved charge limit: {e}");
                                 }
                             }
                         }

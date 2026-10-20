@@ -232,7 +232,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                             ctx.last_duty_write_ms = ctx.now_ms;
                         }
                     }
-                    Err(e) if e.contains("overloaded") => {
+                    Err(e) if e.is_overloaded() => {
                         // Backpressure, not failure: skip the rest of this
                         // round like the old lock-contention path did.
                         return Flow::Next;
@@ -308,11 +308,6 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                     }
                     Err(e) => {
                         warn!("Failed to set fan duty (curve): {}", e);
-                        // Overload is backpressure, not failure: skip this
-                        // cycle like the old lock-contention path did.
-                        if e.contains("overloaded") {
-                            return Flow::Next;
-                        }
                         ctx.consecutive_ec_write_failures += 1;
                         if ctx.consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
                             reset_ec_after_failures(ctx.state, ctx.consecutive_ec_write_failures);
@@ -321,7 +316,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                         }
                     }
                 },
-                Err(e) if e.contains("overloaded") => {
+                Err(e) if e.is_overloaded() => {
                     return Flow::Next;
                 }
                 Err(e) => {

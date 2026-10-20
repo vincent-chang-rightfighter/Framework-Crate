@@ -158,7 +158,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                                 }
                             }
                         },
-                        Err(e) if e.contains("overloaded") => {
+                        Err(e) if e.is_overloaded() => {
                             // Backpressure, not failure: skip the rest of
                             // this round like the old lock-contention path.
                             return Flow::Next;
@@ -252,7 +252,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                                 write_backoff = true;
                             }
                         }
-                        Err(e) if e.contains("overloaded") => {
+                        Err(e) if e.is_overloaded() => {
                             // Backpressure, not failure: abandon this round
                             // like the old lock-contention path did.
                             break;
