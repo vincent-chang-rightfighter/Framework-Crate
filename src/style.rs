@@ -413,7 +413,11 @@ pub const SENSOR_COLORS: [iced::Color; 10] = [
 /// yellows/cyans wash out on white plots and are darkened to hold
 /// contrast. Sensor identity (index → hue) never changes, only the Light
 /// luminance. History chart lines intentionally stay verbatim via
-/// `sensor_color`: sensor curves are frozen by user directive.
+/// `sensor_color`: sensor curves are frozen by user directive. Known
+/// trade-off: on Light the frozen yellow/cyan history lines have low
+/// contrast against the white plot; changing them needs an explicit
+/// product decision (apply `sensor_tint` to lines, or add a gray plot
+/// backdrop), so it is documented here rather than half-fixed.
 pub fn sensor_tint(id: ThemeId, idx: usize) -> iced::Color {
     let c = SENSOR_COLORS[idx % SENSOR_COLORS.len()];
     if id == ThemeId::Light {

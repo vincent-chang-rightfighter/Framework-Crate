@@ -409,10 +409,11 @@ fn draw_curve_contents(
             let center = to_screen(p[0] as f32, p[1] as f32);
             let is_locked = p[0] >= crate::types::CURVE_TEMP_LOCK_START;
             let (fill_color, stroke_color, r) = if is_locked {
-                // Locked points read as disabled in every theme: dimmed
-                // text fill with a theme-contrasting ring (hardcoded gray
-                // and white wash out on Light).
-                (pal.gray, pal.grid_base, POINT_RADIUS)
+                // Locked points read as disabled in every theme: muted
+                // border-gray fill with a theme-contrasting ring, so the
+                // fill stays distinct from the ring even on Light (where
+                // gray text and grid_base are both near-black).
+                (pal.toggle_off_border, pal.grid_base, POINT_RADIUS)
             } else if drag_idx == Some(config_idx) {
                 (pal.fan_curve, pal.grid_base, POINT_RADIUS + 2.0)
             } else if hover_idx == Some(config_idx) {
