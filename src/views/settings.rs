@@ -189,7 +189,17 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
-        text("If update fails, check internet or download manually: PawnIO → https://github.com/namazso/PawnIO/releases | Modules → https://github.com/namazso/PawnIO.Modules/releases/latest")
+        text("If update fails, check internet or download manually:")
+            .size(FONT_SMALL)
+            .style(|theme| iced::widget::text::Style {
+                color: Some(palette(theme).gray),
+            }),
+        text("PawnIO → https://github.com/namazso/PawnIO/releases")
+            .size(FONT_SMALL)
+            .style(|theme| iced::widget::text::Style {
+                color: Some(palette(theme).gray),
+            }),
+        text("Modules → https://github.com/namazso/PawnIO.Modules/releases/latest")
             .size(FONT_SMALL)
             .style(|theme| iced::widget::text::Style {
                 color: Some(palette(theme).gray),
