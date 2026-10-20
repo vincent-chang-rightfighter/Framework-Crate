@@ -12,9 +12,13 @@ Download the `.exe`, then run it as administrator. PawnIO is optional and only n
 
 ## Screenshot
 
-![Framework Crate v0.3.0](images/Framework-Crate-v0.3.0.png)
+![Framework Crate v0.9.0](images/Framework-Crate-v0.9.0-1.png)
 
-![Framework Crate v0.3.0 fan curve and sensors](images/Framework-Crate-v0.3.0-2.png)
+![Framework Crate v0.9.0 fan curve settings](images/Framework-Crate-v0.9.0-2.png)
+
+![Framework Crate v0.9.0 expansion cards and CPU power](images/Framework-Crate-v0.9.0-3.png)
+
+![Framework Crate v0.9.0 About page with themes](images/Framework-Crate-v0.9.0-4.png)
 
 ## Features
 
