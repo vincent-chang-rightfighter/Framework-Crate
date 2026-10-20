@@ -60,6 +60,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     }
 
     let mut sw_content = column![].spacing(2);
+    sw_content = sw_content.push(info_row("Framework Crate", env!("CARGO_PKG_VERSION")));
     if let Some(v) = versions.as_ref().as_ref() {
         if let Some(ref bios) = v.uefi_version {
             sw_content = sw_content.push(info_row("BIOS", bios));
