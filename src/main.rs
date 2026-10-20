@@ -11,6 +11,7 @@ mod config;
 mod config_save_task;
 mod cpu_power;
 mod curve_canvas;
+mod ec_serial;
 mod fan_control;
 mod probe;
 mod style;

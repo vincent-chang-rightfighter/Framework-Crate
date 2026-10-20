@@ -730,7 +730,7 @@ impl EcHw for EcClient {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn port(role: &'static str, pd: bool, dp_alt: bool, watts: Option<f32>) -> UsbCPort {
@@ -811,6 +811,9 @@ mod tests {
     pub struct MockEc {
         pub ops: std::sync::Mutex<Vec<String>>,
         pub fail_writes: std::sync::atomic::AtomicUsize,
+        /// When set, `set_fan_duty` blocks until cleared: simulates a hung
+        /// driver for dispatcher wedge/timeout tests.
+        pub hang: std::sync::atomic::AtomicBool,
     }
 
     impl MockEc {
@@ -818,7 +821,18 @@ mod tests {
             Self {
                 ops: std::sync::Mutex::new(Vec::new()),
                 fail_writes: std::sync::atomic::AtomicUsize::new(0),
+                hang: std::sync::atomic::AtomicBool::new(false),
             }
+        }
+
+        pub fn with_hang(hang: bool) -> Self {
+            let m = Self::new();
+            m.set_hang(hang);
+            m
+        }
+
+        pub fn set_hang(&self, hang: bool) {
+            self.hang.store(hang, std::sync::atomic::Ordering::SeqCst);
         }
 
         fn record(&self, op: String) {
@@ -861,6 +875,12 @@ mod tests {
 
         fn set_fan_duty(&self, percent: u32, fan_index: Option<u32>) -> Result<(), String> {
             self.record(format!("set_fan_duty({percent},{fan_index:?})"));
+            // Simulate a hung driver: block (briefly at a time) until the
+            // test clears the flag. The dispatcher must time the caller
+            // out instead of piling up blocked pool threads.
+            while self.hang.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             self.fail_write().map_or(Ok(()), Err)
         }
 
