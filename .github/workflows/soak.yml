@@ -1,0 +1,42 @@
+name: EC Dispatcher Soak
+
+# Long-horizon validation for the single-writer EC dispatcher that the
+# per-push test suite cannot cover: randomized op interleavings, hung
+# drivers that recover mid-flight, and 100 consecutive quit handovers.
+# Runs weekly plus on demand; the EC_SOAK_ITERS knob scales the same
+# deterministic test the fast suite runs at 500 iterations.
+on:
+  schedule:
+    # Weekly, Monday 03:00 UTC. Weekends are for fans, not CI.
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Dispatcher soak (release, 20k randomized ops)
+        env:
+          EC_SOAK_ITERS: '20000'
+        run: cargo test --locked --release ec_serial -- --nocapture --test-threads=1
+
+      - name: Quit handover x100 (release)
+        run: cargo test --locked --release quit_handover_survives_100_rounds -- --nocapture
