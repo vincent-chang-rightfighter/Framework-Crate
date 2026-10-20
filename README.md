@@ -88,7 +88,7 @@ src/
     quit.rs            — Quit flow handlers (restore auto/duty fan on exit, flush charge limit)
     tick.rs            — Self-rescheduling UI tick, autosize_task, snapshot rebuild
     misc.rs            — One-off dispatch (settings toggles, debug report, peripheral writes)
-    tasks.rs           — Shared async task helpers (run_ec_task, refresh_cpu_power_task, ...)
+    tasks.rs           — Shared async task helpers (quit handover, EcOpResult reporting, ...); EC I/O itself goes through ec_serial
   sub_state.rs         — AppState groups (fan, thermal, peripherals, battery, system, lifecycle)
   views/               — UI layout split into per-card submodules
     mod.rs             — ViewSnapshot, view_main assembly, shared components
