@@ -111,7 +111,8 @@ src/
   fan_control.rs       — CurveStepper, rate limiting, duty calculation
   system_info.rs       — Windows API FFI (CPU, RAM, OS, display, tray)
   probe.rs             — HeightProbe widget for dynamic window sizing
-  util.rs              — Time utilities, lock helpers (read_lock, with_write_lock), EC/PawnIO timeout guard
+  util.rs              — Time utilities, lock helpers (read_lock, with_write_lock), PawnIO timeout guard
+  ec_serial.rs         — Single-writer EC dispatcher: all EC driver calls go through one FIFO worker, so hardware execution order always matches submission order
   cli/                 — EC wrapper only (not a command-line interface)
     ec_wrapper.rs      — EcClient wrapper around framework_lib's CrosEc
     mod.rs
@@ -124,12 +125,13 @@ src/
 ### Data Flow
 
 ```
-framework_lib (CrosEc) → background_task → Arc<RwLock> → UI (view reads)
-                                   ↕
-                            config_save_task → config.toml
+framework_lib (CrosEc) → ec_serial (single FIFO writer) → background_task → Arc<RwLock> → UI (view reads)
+                                                                  ↕
+                                                           config_save_task → config.toml
 ```
 
 - **Hardware access**: The `framework_lib` crate calls the EC directly via the kernel driver (no subprocess)
+- **EC serialization**: every EC call is dispatched through one FIFO worker (`ec_serial`), so at most one driver call is ever in flight and hardware execution order always matches submission order; callers time out individually without wedging the pool
 - **Config**: `dirs::config_dir() / framework-crate/config.toml`
 - **Background polling**: tokio task on LP-E core, 200ms–2s interval (idle slowdown)
 - **UI refresh**: self-rescheduling tick (50–1000ms), idle 1s, hidden 2s
@@ -287,6 +289,16 @@ Rendering parameters: optical size 32, stroke weight 1.5, color `#7300ff` (R 115
 ## Development
 
 This project is developed with AI coding agents (pair-programming / review / refactor assistance). Design decisions, hardware behavior, and releases are reviewed and owned by the maintainer.
+
+```bash
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+# Long-horizon EC dispatcher soak (randomized ops + quit storm, ~2 min at 20000 iterations)
+EC_SOAK_ITERS=20000 cargo test --locked --release ec_serial
+```
+
+CI runs fmt, debug build, tests, clippy, `cargo audit`, and the release build on every push; a weekly soak workflow runs the dispatcher stress test.
 
 ## License
 
