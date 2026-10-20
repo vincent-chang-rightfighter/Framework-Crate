@@ -22,7 +22,7 @@ Download the `.exe`, then run it as administrator. PawnIO is optional and only n
 - **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity
 - **Live Telemetry** — Real-time temperature chart (selectable 15/30/60s window, default 30s), per-sensor display with colored indicators, and fan RPM in the header
 - **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card, and USB-C / HDMI / DP port classification
-- **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download); original factory limits are saved on first run for `Reset`. AMD and other vendors are not supported.
+- **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download); original factory limits are saved on first run for `Reset`. Writes are capped per model (Laptop 12 → 40W, 13 → 70W, 16 → 100W, Desktop → 120W), require ≥5W when enabled, and require PL1 ≤ PL2. AMD and other vendors are not supported.
 - **About Page** — Hardware info (CPU, RAM, display, BIOS), software settings (poll rate, refresh interval, launch at startup), GitHub link, and third-party license notices
 - **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit), icon restored automatically if Explorer restarts
 - **Launch at Startup** — Registers a per-user logon task so the tray app comes back after a reboot. The task document is generated in-process and handed to `schtasks /Create /XML`; the settings that matter (unlimited execution limit, battery conditions cleared, restart on failure) are asserted by tests without needing elevation
@@ -105,7 +105,6 @@ src/
     ffi.rs             — PawnIOLib.dll binding and RAPL register access
     sync.rs            — Background sync thread
     bios.rs            — Factory default capture and persistence
-    version.rs         — PawnIO / Modules version reporting
     read.rs            — PL1/PL2 reading
   temp_chart.rs        — Canvas-based temperature line chart (selectable history window)
   curve_canvas.rs      — Interactive canvas-based fan curve editor (drag points, sensor markers)
@@ -151,13 +150,13 @@ framework_lib (CrosEc) → background_task → Arc<RwLock> → UI (view reads)
 
 ### Resource Usage
 
-Measured on `target/release/framework-crate.exe` (Windows, `iced 0.14 + wgpu`, `cargo build --release` with `lto = "fat"` `strip = true`), elevated, on Windows 11 / 31.5 GB RAM / Intel Arc. Mean of 3 launches, 60 s each, sampled once the window had appeared.
+Measured on `target/release/framework-crate.exe` (Windows, `iced 0.14 + wgpu`, `cargo build --release` with `opt-level = "z"` `lto = "fat"` `strip = true`, unwinding enabled), elevated, on Windows 11 / 31.5 GB RAM / Intel Arc. Mean of 3 launches, 60 s each, sampled once the window had appeared.
 
 | Metric | Value |
 |--------|-------|
 | Working Set | ~159 MB |
 | Private (commit charge) | ~119 MB |
-| Binary Size | 9.51 MiB |
+| Binary Size | ~8.6 MiB |
 
 Working Set is what Task Manager's Processes **Memory** column shows. To reproduce:
 
@@ -221,7 +220,7 @@ Notes:
 - **Enabling it requires an elevated process.** The task is registered with `RunLevel=HighestAvailable`, so the app reports a readable message instead of letting `schtasks` emit its localized access-denied text.
 - `schtasks` output is decoded using the OEM code page so non-English messages stay readable.
 - After creating the task the app queries it back, so success is only reported once the task is actually queryable.
-- The task document is written to `%TEMP%` as UTF-16LE and removed afterwards. Because the release profile uses `panic = "abort"`, a process killed mid-write never reaches the removal, so stale documents are cleaned up on the next run.
+- The task document is written to `%TEMP%` as UTF-16LE under an unpredictable hashed name (with a post-write symlink/size check) and removed afterwards. A process killed mid-write never reaches the removal, so stale documents are cleaned up on the next run.
 - The executable path is validated before it is embedded: quotes, cmd metacharacters, control characters, bidi overrides, `DEL` and a trailing backslash are all rejected, since the path is embedded as XML text and wrapped in quotes for the action `Command`.
 
 ## Logs
@@ -236,8 +235,8 @@ The file rotates once it grows past a size threshold, keeping `app.log.1` throug
 |----------|--------|
 | `RUST_LOG` | Log filter (default `info`); e.g. `RUST_LOG=debug` |
 | `FRAMEWORK_CONTROL_CONFIG_DIR` | Overrides the config directory. Must be absolute, with no `..` and no `\\?\` / `\\.\` prefix |
-| `FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1` | Loads PawnIO module blobs whose hash is not pinned. Only after manual verification of a newer upstream release |
-| `FRAMEWORK_ALLOW_UNSIGNED_PAWNIO=1` | Loads the PawnIO DLL despite an Authenticode failure. For self-signed test DLLs |
+| `FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1` | Loads PawnIO module blobs whose hash is not pinned. Only after manual verification of a newer upstream release. Debug builds only; release builds always fail closed |
+| `FRAMEWORK_ALLOW_UNSIGNED_PAWNIO=1` | Loads the PawnIO DLL despite an Authenticode failure. For self-signed test DLLs. Debug builds only; release builds always fail closed |
 | `FRAMEWORK_PIN_CORE=1` | Pins background work to the first enumerated core. Off by default; the OS scheduler is better than the heuristic |
 
 ## Known Limitations
