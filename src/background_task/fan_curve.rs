@@ -6,8 +6,7 @@ use tracing::warn;
 
 use super::{
     CURVE_TEMP_FAILOVER_MS, FAN_REASSERT_INTERVAL_MS, FanCtx, Flow, MAX_EC_WRITE_FAILURES,
-    THERMAL_STALE_MS, acquire_ec_write_shutdown_aware, reset_ec_after_failures, reset_ec_on_panic,
-    shutdown_requested,
+    THERMAL_STALE_MS, reset_ec_after_failures, reset_ec_on_panic, shutdown_requested,
 };
 use crate::util::read_lock;
 
@@ -25,18 +24,13 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         if shutdown_requested(ctx.state) {
             return Flow::Stop;
         }
-        let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
-            warn!("EC write lock contended, skipping this cycle");
-            return Flow::Next;
-        };
-        // Quit may have run while queued: re-check before touching hardware.
-        if shutdown_requested(ctx.state) {
-            return Flow::Stop;
-        }
         let ec_clone = Arc::clone(ctx.ec);
-        match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
-            ec_clone.autofanctrl()
-        })
+        match crate::ec_serial::exec(
+            "curve-stale-handover",
+            crate::util::EC_IO_TIMEOUT,
+            ec_clone,
+            move |ec| ec.autofanctrl(),
+        )
         .await
         {
             Ok(Ok(())) => {
@@ -78,18 +72,13 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         if shutdown_requested(ctx.state) {
             return Flow::Stop;
         }
-        let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
-            warn!("EC write lock contended, skipping this cycle");
-            return Flow::Next;
-        };
-        // Quit may have run while queued: re-check before touching hardware.
-        if shutdown_requested(ctx.state) {
-            return Flow::Stop;
-        }
         let ec_clone = Arc::clone(ctx.ec);
-        if crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
-            ec_clone.autofanctrl()
-        })
+        if crate::ec_serial::exec(
+            "curve-missing-sample-handover",
+            crate::util::EC_IO_TIMEOUT,
+            ec_clone,
+            move |ec| ec.autofanctrl(),
+        )
         .await
         .is_ok()
         {
@@ -111,40 +100,28 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     let Some(hyst) = ctx.curve_hysteresis else {
         warn!("Curve mode with missing hysteresis, handing back to firmware");
         if !shutdown_requested(ctx.state) {
-            let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
-                warn!("EC write lock contended, skipping this cycle");
-                return Flow::Next;
-            };
-            // Quit may have run while queued: re-check before touching hardware.
-            if shutdown_requested(ctx.state) {
-                return Flow::Stop;
-            }
             let ec_clone = Arc::clone(ctx.ec);
-            let _ =
-                crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
-                    ec_clone.autofanctrl()
-                })
-                .await;
+            let _ = crate::ec_serial::exec(
+                "curve-missing-hysteresis-handover",
+                crate::util::EC_IO_TIMEOUT,
+                ec_clone,
+                move |ec| ec.autofanctrl(),
+            )
+            .await;
         }
         return Flow::Next;
     };
     let Some(rate) = ctx.curve_rate_limit else {
         warn!("Curve mode with missing rate_limit, handing back to firmware");
         if !shutdown_requested(ctx.state) {
-            let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
-                warn!("EC write lock contended, skipping this cycle");
-                return Flow::Next;
-            };
-            // Quit may have run while queued: re-check before touching hardware.
-            if shutdown_requested(ctx.state) {
-                return Flow::Stop;
-            }
             let ec_clone = Arc::clone(ctx.ec);
-            let _ =
-                crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
-                    ec_clone.autofanctrl()
-                })
-                .await;
+            let _ = crate::ec_serial::exec(
+                "curve-missing-rate-handover",
+                crate::util::EC_IO_TIMEOUT,
+                ec_clone,
+                move |ec| ec.autofanctrl(),
+            )
+            .await;
         }
         return Flow::Next;
     };
@@ -158,18 +135,13 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             if shutdown_requested(ctx.state) {
                 return Flow::Stop;
             }
-            let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
-                warn!("EC write lock contended, skipping this cycle");
-                return Flow::Next;
-            };
-            // Quit may have run while queued: re-check before touching hardware.
-            if shutdown_requested(ctx.state) {
-                return Flow::Stop;
-            }
             let ec_clone = Arc::clone(ctx.ec);
-            match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
-                ec_clone.autofanctrl()
-            })
+            match crate::ec_serial::exec(
+                "curve-empty-temps-handover",
+                crate::util::EC_IO_TIMEOUT,
+                ec_clone,
+                move |ec| ec.autofanctrl(),
+            )
             .await
             {
                 Ok(Ok(())) => {
@@ -240,16 +212,12 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                     all_fans_applied = false;
                     break;
                 }
-                let Some(_ec_guard) = acquire_ec_write_shutdown_aware(ctx.state).await else {
-                    // Shutdown was requested while waiting for the lock:
-                    // stop instead of writing a stale duty after quit.
-                    return Flow::Stop;
-                };
                 let ec_clone = Arc::clone(ctx.ec);
-                match crate::util::spawn_ec_guarded(
-                    _ec_guard,
+                match crate::ec_serial::exec(
+                    "curve-set-per-fan-duty",
                     crate::util::EC_IO_TIMEOUT,
-                    move || ec_clone.set_fan_duty(next, Some(fan_idx)),
+                    ec_clone,
+                    move |ec| ec.set_fan_duty(next, Some(fan_idx)),
                 )
                 .await
                 {
@@ -264,10 +232,15 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                             ctx.last_duty_write_ms = ctx.now_ms;
                         }
                     }
-                    Err(join_err) => {
+                    Err(e) if e.contains("overloaded") => {
+                        // Backpressure, not failure: skip the rest of this
+                        // round like the old lock-contention path did.
+                        return Flow::Next;
+                    }
+                    Err(e) => {
                         warn!(
-                            "EC spawn panicked (set_fan_duty curve fan {}): {}",
-                            fan_idx, join_err
+                            "EC write failed (set_fan_duty curve fan {}): {}",
+                            fan_idx, e
                         );
                         reset_ec_on_panic(ctx.state);
                         all_fans_applied = false;
@@ -304,18 +277,13 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             if shutdown_requested(ctx.state) {
                 return Flow::Stop;
             }
-            let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
-                warn!("EC write lock contended, skipping this cycle");
-                return Flow::Next;
-            };
-            // Quit may have run while queued: re-check before touching hardware.
-            if shutdown_requested(ctx.state) {
-                return Flow::Stop;
-            }
             let ec_clone = Arc::clone(ctx.ec);
-            match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
-                ec_clone.set_fan_duty(next, None)
-            })
+            match crate::ec_serial::exec(
+                "curve-set-fan-duty",
+                crate::util::EC_IO_TIMEOUT,
+                ec_clone,
+                move |ec| ec.set_fan_duty(next, None),
+            )
             .await
             {
                 Ok(result) => match result {
@@ -340,6 +308,11 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                     }
                     Err(e) => {
                         warn!("Failed to set fan duty (curve): {}", e);
+                        // Overload is backpressure, not failure: skip this
+                        // cycle like the old lock-contention path did.
+                        if e.contains("overloaded") {
+                            return Flow::Next;
+                        }
                         ctx.consecutive_ec_write_failures += 1;
                         if ctx.consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
                             reset_ec_after_failures(ctx.state, ctx.consecutive_ec_write_failures);
@@ -348,8 +321,11 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                         }
                     }
                 },
-                Err(join_err) => {
-                    warn!("EC spawn panicked (set_fan_duty curve): {}", join_err);
+                Err(e) if e.contains("overloaded") => {
+                    return Flow::Next;
+                }
+                Err(e) => {
+                    warn!("EC write failed (set_fan_duty curve): {}", e);
                     reset_ec_on_panic(ctx.state);
                     return Flow::Next;
                 }

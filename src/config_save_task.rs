@@ -46,18 +46,14 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
     let Some(ref ec) = *ec else { return false };
     if let Some(ref limit) = cfg.battery.charge_limit_max_pct {
         let pct = if limit.enabled { limit.value } else { 100 };
-        let ec_clone = ec.clone();
-        let Some(_guard) = crate::util::acquire_ec_write().await else {
-            warn!("EC write lock contended, deferring charge limit apply");
-            return false;
-        };
-        if state.lifecycle.shutdown.load(Ordering::Acquire) {
-            return false;
-        }
+        let ec_clone = Arc::clone(ec);
         // min_pct=0: EC ignores software minimum; hardware enforces ~25%.
-        if let Err(e) = crate::util::spawn_ec_guarded(_guard, CONFIG_SAVE_TIMEOUT, move || {
-            ec_clone.charge_limit_set(0, pct)
-        })
+        if let Err(e) = crate::ec_serial::exec(
+            "charge-limit-apply",
+            CONFIG_SAVE_TIMEOUT,
+            ec_clone,
+            move |ec| ec.charge_limit_set(0, pct),
+        )
         .await
         .unwrap_or_else(Err)
         {

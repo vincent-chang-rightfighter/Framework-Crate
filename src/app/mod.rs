@@ -447,9 +447,11 @@ impl App {
                         state.system.ec_init_done.store(true, Ordering::Release);
                         let versions = Arc::clone(&state.system.versions);
                         let ec_cl = Arc::clone(&arc_ec);
-                        match crate::util::spawn_blocking_with_timeout(
+                        match crate::ec_serial::exec(
+                            "init-versions",
                             crate::util::EC_IO_TIMEOUT,
-                            move || ec_cl.versions(),
+                            ec_cl,
+                            move |ec| ec.versions(),
                         )
                         .await
                         {
@@ -471,9 +473,11 @@ impl App {
                             if let Some(ref limit) = cfg.battery.charge_limit_max_pct {
                                 let pct = if limit.enabled { limit.value } else { 100 };
                                 let ec_clone = Arc::clone(&arc_ec);
-                                if let Err(e) = crate::util::spawn_blocking_with_timeout(
+                                if let Err(e) = crate::ec_serial::exec(
+                                    "init-charge-limit",
                                     crate::util::EC_IO_TIMEOUT,
-                                    move || ec_clone.charge_limit_set(0, pct),
+                                    ec_clone,
+                                    move |ec| ec.charge_limit_set(0, pct),
                                 )
                                 .await
                                 .unwrap_or_else(Err)

@@ -85,26 +85,6 @@ pub fn powershell_exe() -> std::path::PathBuf {
     system32_exe(r"WindowsPowerShell\v1.0\powershell.exe")
 }
 
-/// Global serialized EC write mutex to prevent out-of-order hardware writes.
-pub fn ec_write_mutex() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
-/// Acquires EC write lock with bounded wait: 500ms fast path, then up to
-/// 5s total. Returns None on persistent contention so callers skip the
-/// cycle instead of piling up waiters behind a stuck holder.
-pub async fn acquire_ec_write() -> Option<tokio::sync::MutexGuard<'static, ()>> {
-    use std::time::Duration;
-    if let Ok(g) = tokio::time::timeout(Duration::from_millis(500), ec_write_mutex().lock()).await {
-        return Some(g);
-    }
-    tracing::warn!("EC write contended >500ms, waiting up to 5s");
-    tokio::time::timeout(Duration::from_secs(5), ec_write_mutex().lock())
-        .await
-        .ok()
-}
-
 /// Serialized CPU power operation mutex to prevent concurrent Apply/Reset/Sync races.
 pub fn cpu_power_mutex() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -115,20 +95,6 @@ pub const EC_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(
 pub const PAWNIO_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2000);
 /// PawnIO install/upgrade and Modules download may take 30s+ (winget + UAC + network)
 pub const PAWNIO_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Cap concurrent EC blocking I/O so a hung driver can't exhaust the
-/// shared `max_blocking_threads=8` pool. Reads that miss a permit skip
-/// the cycle instead of queueing behind orphans; the skip counter makes
-/// overload observable in logs. Writes stay serialized by `ec_write_mutex`.
-pub fn ec_io_slots() -> &'static tokio::sync::Semaphore {
-    static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    SLOTS.get_or_init(|| tokio::sync::Semaphore::new(3))
-}
-
-pub fn ec_io_skips() -> &'static std::sync::atomic::AtomicU64 {
-    static SKIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    &SKIPS
-}
 
 /// Runs blocking task with timeout; maps JoinError and timeout to String.
 /// Note: on timeout the blocking thread continues until completion (tokio pool reuses threads,
@@ -145,85 +111,6 @@ where
         Ok(Ok(val)) => Ok(val),
         Ok(Err(join_err)) => Err(format!("Task panicked: {}", join_err)),
         Err(_) => Err(format!("Hardware I/O timed out after {:?}", timeout)),
-    }
-}
-
-/// EC read path with overload protection. Takes an owned semaphore permit
-/// for the whole blocking call so a hung driver can't pile up more than
-/// 3 concurrent EC reads behind orphans; excess cycles skip fast with a
-/// skip counter instead of queueing into pool exhaustion.
-pub async fn spawn_ec_read_with_timeout<F, T>(
-    timeout: std::time::Duration,
-    task: F,
-) -> Result<T, String>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    let Ok(_permit) = ec_io_slots().try_acquire() else {
-        let n = ec_io_skips().fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        // Log sparingly: every 10th skip to avoid log spam while hung.
-        if n % 10 == 1 {
-            tracing::warn!("EC I/O overloaded, skipping read (total skips={n})");
-        }
-        return Err("EC I/O overloaded, skipping read".to_string());
-    };
-    // Permit held across the blocking call; dropped on completion/timeout.
-    let _permit = _permit;
-    spawn_blocking_with_timeout(timeout, task).await
-}
-
-/// Monotonic EC write sequence for log correlation. Timeouts release the
-/// lock while the orphan keeps running, so a late write can still land
-/// out of order; the seq lets logs prove it (re-assert loops heal it).
-pub fn next_ec_write_seq() -> u64 {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Serialized EC write with timeout. Prefer over acquire + spawn pairs.
-///
-/// The mutex guard is held only until completion OR timeout, whichever
-/// comes first. On timeout the mutex is released so later writes are not
-/// stuck behind a hung driver; the orphaned thread keeps running without
-/// the guard (drivers offer no cancellation) and its late result is
-/// discarded. A timed-out write may therefore still land out of order —
-/// the periodic re-assert loops (fan duties every 30s, PL sync every
-/// 250ms) heal that — but it can never wedge the write path.
-pub async fn spawn_ec_guarded<T>(
-    guard: tokio::sync::MutexGuard<'static, ()>,
-    timeout: std::time::Duration,
-    task: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, String>
-where
-    T: Send + 'static,
-{
-    let seq = next_ec_write_seq();
-    tracing::trace!("EC write dispatch ec_seq={seq}");
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let handle = tokio::task::spawn_blocking(task);
-    // Forward completion; the receiver is gone after a timeout, in which
-    // case the late result is dropped here instead of updating state.
-    // Late arrivals are still traced so out-of-order landings are provable.
-    tokio::spawn(async move {
-        let res = handle.await;
-        if tx.send(res).is_err() {
-            tracing::trace!("EC write late arrival ec_seq={seq} (receiver gone)");
-        }
-    });
-    let result = tokio::time::timeout(timeout, rx).await;
-    drop(guard);
-    match result {
-        Ok(Ok(Ok(val))) => {
-            tracing::trace!("EC write complete ec_seq={seq}");
-            Ok(val)
-        }
-        Ok(Ok(Err(join_err))) => Err(format!("Task panicked: {}", join_err)),
-        Ok(Err(_)) => Err("EC writer task vanished".to_string()),
-        Err(_) => Err(format!(
-            "Hardware I/O timed out after {:?} (ec_seq={seq})",
-            timeout
-        )),
     }
 }
 
@@ -271,26 +158,6 @@ mod tests {
         .await;
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("timed out"));
-    }
-
-    #[tokio::test]
-    async fn ec_guarded_timeout_releases_mutex() {
-        // The orphaned thread still sleeps 200ms, but the mutex must be
-        // free again right after the 10ms timeout, not held hostage.
-        let guard = ec_write_mutex().lock().await;
-        let res = spawn_ec_guarded(guard, std::time::Duration::from_millis(10), || {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            1u32
-        })
-        .await;
-        assert!(res.is_err());
-        let relock = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            ec_write_mutex().lock(),
-        )
-        .await
-        .expect("mutex must be released on timeout while orphan still runs");
-        drop(relock);
     }
 
     #[tokio::test]

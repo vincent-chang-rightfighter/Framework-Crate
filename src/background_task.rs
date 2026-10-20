@@ -90,36 +90,6 @@ fn reset_ec_on_panic(state: &AppState) {
         .store(true, Ordering::Release);
 }
 
-/// Acquires the EC write lock in 500ms slices so a pending shutdown is
-/// noticed promptly: `acquire_ec_write` alone can block up to 5s behind a
-/// hung holder, which stalls per-fan loops fan-by-fan on quit. Returns
-/// `None` only when shutdown was requested (callers must stop); lock
-/// contention alone retries until the holder releases, which always
-/// happens because `spawn_ec_guarded` drops the guard on completion.
-pub(super) async fn acquire_ec_write_shutdown_aware(
-    state: &AppState,
-) -> Option<tokio::sync::MutexGuard<'static, ()>> {
-    loop {
-        if shutdown_requested(state) {
-            return None;
-        }
-        if let Ok(guard) = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            crate::util::ec_write_mutex().lock(),
-        )
-        .await
-        {
-            // Re-check after the wait: quit may have been requested while
-            // queued, and writing now would undo its firmware handover.
-            if shutdown_requested(state) {
-                return None;
-            }
-            return Some(guard);
-        }
-        // Timed out waiting: loop re-checks shutdown instead of piling up.
-    }
-}
-
 /// Forces EC reinitialization after consecutive failures (recovers stale driver after resume).
 fn reset_ec_after_failures(state: &AppState, failures: u32) {
     warn!(
@@ -696,9 +666,11 @@ pub fn spawn(state: AppState) {
                     };
 
                     let ec_clone = Arc::clone(&ec);
-                    match crate::util::spawn_ec_read_with_timeout(
+                    match crate::ec_serial::exec(
+                        "thermal",
                         crate::util::EC_IO_TIMEOUT,
-                        move || ec_clone.thermal(),
+                        ec_clone,
+                        move |ec| ec.thermal(),
                     )
                     .await
                     {
@@ -748,9 +720,11 @@ pub fn spawn(state: AppState) {
                     // Skip UI-only reads while idle to save spawns.
                     if !is_idle {
                         let ec_clone = Arc::clone(&ec);
-                        match crate::util::spawn_ec_read_with_timeout(
+                        match crate::ec_serial::exec(
+                            "power",
                             crate::util::EC_IO_TIMEOUT,
-                            move || ec_clone.power(),
+                            ec_clone,
+                            move |ec| ec.power(),
                         )
                         .await
                         {
@@ -850,9 +824,11 @@ pub fn spawn(state: AppState) {
                     if now_ms.saturating_sub(last_expansion_scan) >= expansion_interval {
                         last_expansion_scan = now_ms;
                         let ec_clone = Arc::clone(&ec);
-                        match crate::util::spawn_ec_read_with_timeout(
+                        match crate::ec_serial::exec(
+                            "pd_ports",
                             crate::util::EC_IO_TIMEOUT,
-                            move || ec_clone.pd_ports(),
+                            ec_clone,
+                            move |ec| ec.pd_ports(),
                         )
                         .await
                         {
@@ -901,9 +877,11 @@ pub fn spawn(state: AppState) {
                             }
                         }
                         let ec_clone = Arc::clone(&ec);
-                        match crate::util::spawn_ec_read_with_timeout(
+                        match crate::ec_serial::exec(
+                            "expansion_cards",
                             crate::util::EC_IO_TIMEOUT,
-                            move || ec_clone.expansion_cards(),
+                            ec_clone,
+                            move |ec| ec.expansion_cards(),
                         )
                         .await
                         {
@@ -943,9 +921,11 @@ pub fn spawn(state: AppState) {
                     {
                         last_versions_scan = now_ms;
                         let ec_clone = Arc::clone(&ec);
-                        match crate::util::spawn_ec_read_with_timeout(
+                        match crate::ec_serial::exec(
+                            "versions",
                             crate::util::EC_IO_TIMEOUT,
-                            move || ec_clone.versions(),
+                            ec_clone,
+                            move |ec| ec.versions(),
                         )
                         .await
                         {
@@ -1120,29 +1100,26 @@ pub fn spawn(state: AppState) {
                     // Hand the fans back to firmware before dying: without
                     // the loop nothing re-asserts duties, so a stuck manual
                     // duty would persist indefinitely with no UI to fix it.
-                    // Take the write lock so we don't race an in-flight
-                    // orphan duty write that could land after the handover.
-                    // Retry like the quit path instead of giving up on the
-                    // first contended lock. Re-read the client inside the
-                    // loop: a resume racing the lock wait may have swapped
-                    // in a fresh client, and we must hand over on the new
-                    // handle, not a stale clone.
+                    // The single writer serializes this after any in-flight
+                    // duty, so the handover cannot be overtaken; re-read the
+                    // client each attempt in case a resume swapped it.
                     let mut handover: Option<Result<Result<(), String>, String>> = None;
                     for _ in 0..3 {
                         let ec_opt = { read_lock(&state.system.ec_client) };
                         let Some(ec) = ec_opt.as_ref().as_ref() else {
                             break;
                         };
-                        if let Some(guard) = crate::util::acquire_ec_write().await {
-                            let ec_clone = Arc::clone(ec);
-                            handover = Some(
-                                crate::util::spawn_ec_guarded(
-                                    guard,
-                                    crate::util::EC_IO_TIMEOUT,
-                                    move || ec_clone.autofanctrl(),
-                                )
-                                .await,
-                            );
+                        let ec_clone = Arc::clone(ec);
+                        let attempt = crate::ec_serial::exec(
+                            "final-handover",
+                            crate::util::EC_IO_TIMEOUT,
+                            ec_clone,
+                            move |ec| ec.autofanctrl(),
+                        )
+                        .await;
+                        let ok = matches!(&attempt, Ok(Ok(())));
+                        handover = Some(attempt);
+                        if ok {
                             break;
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -1161,7 +1138,7 @@ pub fn spawn(state: AppState) {
                             consecutive_failures, e
                         ),
                         None => warn!(
-                            "Background task failed {} times consecutively, giving up with no EC client or contended lock; fans stuck at last duty",
+                            "Background task failed {} times consecutively, giving up with no EC client; fans stuck at last duty",
                             consecutive_failures
                         ),
                     }

@@ -23,18 +23,13 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         let mut backoff_ec = false;
         let mut restore_failed = false;
         {
-            let Some(_ec_guard) = crate::util::acquire_ec_write().await else {
-                warn!("EC write lock contended, skipping this cycle");
-                return Flow::Next;
-            };
-            // Quit may have run while queued: re-check before touching hardware.
-            if shutdown_requested(ctx.state) {
-                return Flow::Stop;
-            }
             let ec_clone = Arc::clone(ctx.ec);
-            match crate::util::spawn_ec_guarded(_ec_guard, crate::util::EC_IO_TIMEOUT, move || {
-                ec_clone.autofanctrl()
-            })
+            match crate::ec_serial::exec(
+                "disabled-restore",
+                crate::util::EC_IO_TIMEOUT,
+                ec_clone,
+                move |ec| ec.autofanctrl(),
+            )
             .await
             {
                 Ok(result) => {
