@@ -941,18 +941,270 @@ const TASK_XML_PREFIX: &str = "framework-crate-task-";
 /// task documents onto one path.
 static TASK_XML_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Writes the task document to a uniquely-named temp file.
-///
-/// `create_new` refuses a pre-existing path instead of following it, so a
-/// planted symlink or file can only fail the toggle, never redirect the
-/// import schtasks performs as HighestAvailable.
-fn write_task_xml(xml: &str) -> Result<String, String> {
+#[cfg(any(debug_assertions, test))]
+fn create_plain_task_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    let meta = f.metadata()?;
+    if !meta.is_file() || meta.len() != bytes.len() as u64 {
+        return Err(std::io::Error::other(
+            "startup task xml failed post-write verification",
+        ));
+    }
+    Ok(())
+}
+
+fn enable_restore_privilege() -> std::io::Result<()> {
+    use windows_sys::Win32::Security::{
+        AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+        SE_RESTORE_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
+    let mut token: HANDLE = std::ptr::null_mut();
+    if unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let result = (|| {
+        let mut luid = windows_sys::Win32::Foundation::LUID {
+            LowPart: 0,
+            HighPart: 0,
+        };
+        if unsafe { LookupPrivilegeValueW(std::ptr::null(), SE_RESTORE_NAME, &mut luid) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let state = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
+        };
+        if unsafe {
+            AdjustTokenPrivileges(
+                token,
+                0,
+                &state,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let err = unsafe { GetLastError() };
+        if err != 0 {
+            return Err(std::io::Error::from_raw_os_error(err as i32));
+        }
+        Ok(())
+    })();
+    unsafe { CloseHandle(token) };
+    result
+}
+
+fn task_file_owner_is_administrators(path: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        CreateWellKnownSid, EqualSid, PSID, SECURITY_MAX_SID_SIZE, WinBuiltinAdministratorsSid,
+    };
+    let mut expected = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut expected_len = expected.len() as u32;
+    if unsafe {
+        CreateWellKnownSid(
+            WinBuiltinAdministratorsSid,
+            std::ptr::null_mut(),
+            expected.as_mut_ptr() as PSID,
+            &mut expected_len,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut sd: PSID = std::ptr::null_mut();
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            windows_sys::Win32::Security::OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if rc != 0 || owner.is_null() {
+        if !sd.is_null() {
+            unsafe { LocalFree(sd) };
+        }
+        return Err(if rc != 0 {
+            std::io::Error::from_raw_os_error(rc as i32)
+        } else {
+            std::io::Error::other("startup task xml owner SID missing")
+        });
+    }
+    let matches = unsafe { EqualSid(owner, expected.as_ptr() as PSID) } != 0;
+    unsafe { LocalFree(sd) };
+    Ok(matches)
+}
+
+fn create_admin_only_task_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Win32::Foundation::{GENERIC_ALL, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
+    use windows_sys::Win32::Security::{
+        ACL, ACL_REVISION, AddAccessAllowedAceEx, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
+        InitializeAcl, NO_INHERITANCE, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_MAX_SID_SIZE,
+        WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, WRITE_DAC,
+        WRITE_OWNER,
+    };
+
+    enable_restore_privilege()?;
+    let mut admin_sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut admin_len = admin_sid.len() as u32;
+    if unsafe {
+        CreateWellKnownSid(
+            WinBuiltinAdministratorsSid,
+            std::ptr::null_mut(),
+            admin_sid.as_mut_ptr() as PSID,
+            &mut admin_len,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut system_sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut system_len = system_sid.len() as u32;
+    if unsafe {
+        CreateWellKnownSid(
+            WinLocalSystemSid,
+            std::ptr::null_mut(),
+            system_sid.as_mut_ptr() as PSID,
+            &mut system_len,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut acl_buf = [0u32; 64];
+    let acl = acl_buf.as_mut_ptr() as *mut ACL;
+    if unsafe { InitializeAcl(acl, std::mem::size_of_val(&acl_buf) as u32, ACL_REVISION) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    for sid in [admin_sid.as_ptr() as PSID, system_sid.as_ptr() as PSID] {
+        if unsafe { AddAccessAllowedAceEx(acl, ACL_REVISION, NO_INHERITANCE, GENERIC_ALL, sid) }
+            == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_WRITE | FILE_READ_ATTRIBUTES | WRITE_DAC | WRITE_OWNER,
+            0,
+            std::ptr::null(),
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut file = unsafe { std::fs::File::from_raw_handle(handle) };
+    let rc = unsafe {
+        SetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION,
+            admin_sid.as_ptr() as PSID,
+            std::ptr::null_mut(),
+            acl,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(std::io::Error::from_raw_os_error(rc as i32));
+    }
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        let meta = file.metadata()?;
+        if !meta.is_file() || meta.len() != bytes.len() as u64 {
+            return Err(std::io::Error::other(
+                "startup task xml failed post-write verification",
+            ));
+        }
+        Ok(())
+    })();
+    drop(file);
+    let result = result.and_then(|()| {
+        if task_file_owner_is_administrators(path)? {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "startup task xml owner is not Administrators",
+            ))
+        }
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+fn create_task_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(any(debug_assertions, test))]
+    if !is_elevated() {
+        return create_plain_task_file(path, bytes);
+    }
+    create_admin_only_task_file(path, bytes)
+}
+
+/// Writes the task document to a uniquely-named temp file.
+fn write_task_xml(xml: &str) -> Result<String, String> {
     for _ in 0..5 {
         // Unpredictable suffix: timestamp-nanos + pid + counter hashed, so a
-        // same-user attacker can't pre-plant the path. create_new still
-        // guards collisions; post-write symlink+length check closes the
-        // drop-then-read window before schtasks imports as HighestAvailable.
+        // same-user attacker can't pre-plant the path.
         let nonce = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
@@ -963,33 +1215,19 @@ fn write_task_xml(xml: &str) -> Result<String, String> {
             TASK_XML_COUNTER
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 .hash(&mut h);
-            // Stack address adds per-invocation entropy.
             (&TASK_XML_COUNTER as *const _ as usize).hash(&mut h);
             format!("{:016x}{:016x}", h.finish(), crate::util::monotonic_ms())
         };
         let xml_path = std::env::temp_dir().join(format!("{TASK_XML_PREFIX}{nonce}.xml"));
-        let mut f = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&xml_path)
-        {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("cannot write startup task xml: {e}")),
-        };
         let bytes = utf16le_with_bom(xml);
-        f.write_all(&bytes)
-            .map_err(|e| format!("cannot write startup task xml: {e}"))?;
-        drop(f);
-        // Re-verify: not a symlink and length matches what we wrote.
-        let ok = std::fs::symlink_metadata(&xml_path)
-            .map(|m| !m.file_type().is_symlink() && m.len() as usize == bytes.len())
-            .unwrap_or(false);
-        if !ok {
-            let _ = std::fs::remove_file(&xml_path);
-            return Err("startup task xml failed post-write verification".to_string());
+        match create_task_file(&xml_path, &bytes) {
+            Ok(()) => return Ok(xml_path.to_string_lossy().into_owned()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                let _ = std::fs::remove_file(&xml_path);
+                return Err(format!("cannot write startup task xml: {e}"));
+            }
         }
-        return Ok(xml_path.to_string_lossy().into_owned());
     }
     Err("cannot allocate a unique startup task xml path".to_string())
 }
@@ -1665,6 +1903,19 @@ mod tests {
         unsafe {
             RegDeleteKeyW(HKEY_CURRENT_USER, sub.as_ptr());
         }
+    }
+
+    #[test]
+    fn elevated_task_xml_is_owned_by_administrators() {
+        if !super::is_elevated() {
+            return;
+        }
+        let path = super::write_task_xml("<a/>").expect("write");
+        assert!(
+            super::task_file_owner_is_administrators(std::path::Path::new(&path))
+                .expect("owner query")
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
