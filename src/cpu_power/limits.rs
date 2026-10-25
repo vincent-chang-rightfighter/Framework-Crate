@@ -1,5 +1,6 @@
 //! MSR/MMIO power limit encoding, decoding and the write paths.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::debug;
 
 use super::bios::BiosDefaults;
@@ -309,6 +310,8 @@ fn classify_readback(
     }
 }
 
+static TIME_CLAMP_WARNED: AtomicBool = AtomicBool::new(false);
+
 fn readback_time_clamp_mismatch(
     rb_raw: u64,
     pl1_enc: u32,
@@ -544,8 +547,10 @@ fn write_power_limits(target: &LimitTarget<'_>, params: &PowerLimitParams) -> Re
         ));
     }
 
-    if readback_time_clamp_mismatch(rb_out[0], pl1_enc, pl2_enc, params) {
-        debug!(
+    if readback_time_clamp_mismatch(rb_out[0], pl1_enc, pl2_enc, params)
+        && !TIME_CLAMP_WARNED.swap(true, Ordering::Relaxed)
+    {
+        tracing::warn!(
             "{} time/clamp fields differ from the request; firmware may clamp the time window",
             target.label
         );
