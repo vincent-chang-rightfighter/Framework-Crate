@@ -273,7 +273,7 @@ pub fn is_pawnio_installed() -> bool {
 }
 
 /// Cached PawnIO version, read from the DLL's version resource.
-static PAWNIO_VERSION: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
+static PAWNIO_VERSION: parking_lot::RwLock<Option<Option<String>>> = parking_lot::RwLock::new(None);
 
 /// Reads the PawnIO version from the DLL's VS_FIXEDFILEINFO resource.
 fn fetch_pawnio_version_from_dll() -> Option<String> {
@@ -343,18 +343,15 @@ fn fetch_pawnio_version_from_dll() -> Option<String> {
 /// that a machine without PawnIO does not re-resolve the DLL path on every
 /// view rebuild.
 pub fn pawnio_version() -> Option<String> {
-    {
-        let guard = PAWNIO_VERSION.read();
-        if let Some(ref v) = *guard {
-            return Some(v.clone());
-        }
+    if let Some(cached) = PAWNIO_VERSION.read().clone() {
+        return cached;
     }
     let ver = if is_pawnio_installed() {
-        fetch_pawnio_version_from_dll().or_else(|| Some("installed".to_string()))
+        Some(fetch_pawnio_version_from_dll().unwrap_or_else(|| "installed".to_string()))
     } else {
         None
     };
-    *PAWNIO_VERSION.write() = ver.clone();
+    *PAWNIO_VERSION.write() = Some(ver.clone());
     ver
 }
 
@@ -586,6 +583,7 @@ fn verify_dll_path() -> Result<(), &'static str> {
 /// Initializes DLL function pointers (reinitializable).
 fn init_dll_fns() -> Result<(), &'static str> {
     use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::FreeLibrary;
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW};
 
     // Single lock closes the check-then-load race between concurrent first calls.
@@ -634,17 +632,26 @@ fn init_dll_fns() -> Result<(), &'static str> {
             std::mem::size_of::<PawnioClose>()
                 == std::mem::size_of::<windows_sys::Win32::Foundation::FARPROC>()
         );
-        let addr = GetProcAddress(dll, c"pawnio_open".as_ptr() as *const u8)
-            .ok_or("pawnio_open not found")?;
+        let addr = GetProcAddress(dll, c"pawnio_open".as_ptr() as *const u8).ok_or_else(|| {
+            FreeLibrary(dll);
+            "pawnio_open not found"
+        })?;
         let open: PawnioOpen = std::mem::transmute(addr);
-        let addr = GetProcAddress(dll, c"pawnio_load".as_ptr() as *const u8)
-            .ok_or("pawnio_load not found")?;
+        let addr = GetProcAddress(dll, c"pawnio_load".as_ptr() as *const u8).ok_or_else(|| {
+            FreeLibrary(dll);
+            "pawnio_load not found"
+        })?;
         let load: PawnioLoad = std::mem::transmute(addr);
-        let addr = GetProcAddress(dll, c"pawnio_execute".as_ptr() as *const u8)
-            .ok_or("pawnio_execute not found")?;
+        let addr =
+            GetProcAddress(dll, c"pawnio_execute".as_ptr() as *const u8).ok_or_else(|| {
+                FreeLibrary(dll);
+                "pawnio_execute not found"
+            })?;
         let exec: PawnioExecute = std::mem::transmute(addr);
-        let addr = GetProcAddress(dll, c"pawnio_close".as_ptr() as *const u8)
-            .ok_or("pawnio_close not found")?;
+        let addr = GetProcAddress(dll, c"pawnio_close".as_ptr() as *const u8).ok_or_else(|| {
+            FreeLibrary(dll);
+            "pawnio_close not found"
+        })?;
         let close: PawnioClose = std::mem::transmute(addr);
         *DLL_MODULE.lock() = Some(dll as isize);
         *DLL_OPEN.lock() = Some(open);
