@@ -141,6 +141,7 @@ pub enum Message {
     ToggleExpansionCardDebug,
     StartupLaunchToggled(bool),
     StartupLaunchSet(bool, Result<(), String>),
+    StartupLaunchQueried(bool),
     InstallPawnIO,
     PawnIOInstalled(Result<(), String>),
     DownloadPawnIOModules,
@@ -185,6 +186,7 @@ pub struct App {
     pub config_save_failed: bool,
     pub expansion_card_debug: bool,
     pub startup_launch_enabled: bool,
+    pub startup_launch_touched: bool,
     pub startup_launch_error: Option<String>,
     pub config_load_warning: Option<String>,
     pub show_quit_warning: bool,
@@ -373,7 +375,8 @@ impl App {
             init_complete: false,
             config_save_failed: false,
             expansion_card_debug: false,
-            startup_launch_enabled: system_info::startup_launch_enabled(),
+            startup_launch_enabled: false,
+            startup_launch_touched: false,
             startup_launch_error: None,
             start_minimized,
             config_load_warning,
@@ -517,7 +520,19 @@ impl App {
         let bg_state = app.state.clone();
         background_task::spawn(bg_state);
 
-        (app, init_task)
+        let startup_query = Task::perform(
+            async {
+                crate::util::spawn_blocking_with_timeout(
+                    std::time::Duration::from_secs(6),
+                    system_info::startup_launch_enabled,
+                )
+                .await
+                .unwrap_or(false)
+            },
+            Message::StartupLaunchQueried,
+        );
+
+        (app, Task::batch([init_task, startup_query]))
     }
 
     pub(crate) fn subscription(&self) -> Subscription<Message> {
@@ -545,7 +560,8 @@ impl App {
             | Message::StartupError(_)
             | Message::WindowResized(..)
             | Message::CpuPowerDataRefreshed
-            | Message::CpuPowerSyncStopped => {}
+            | Message::CpuPowerSyncStopped
+            | Message::StartupLaunchQueried(_) => {}
             _ => {
                 let now_ms = crate::util::monotonic_ms();
                 self.state

@@ -701,7 +701,13 @@ fn schtasks_output(args: &[&str]) -> Result<std::process::Output, String> {
                     // reported failure would enable startup the UI claims is
                     // off (or vice versa).
                     let _ = child.kill();
-                    let _ = child.wait();
+                    let reap_deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(1);
+                    while child.try_wait().ok().flatten().is_none()
+                        && std::time::Instant::now() < reap_deadline
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
                     return Err("schtasks timed out after 5s".to_string());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));

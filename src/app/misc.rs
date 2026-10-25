@@ -138,15 +138,28 @@ impl App {
             }
             Message::StartupLaunchToggled(enabled) => {
                 self.startup_launch_error = None;
+                self.startup_launch_touched = true;
                 self.mark_dirty();
                 let enabled = *enabled;
                 Some(Task::perform(
                     async move {
-                        let res = crate::system_info::set_startup_launch(enabled);
+                        let res = crate::util::spawn_blocking_with_timeout(
+                            std::time::Duration::from_secs(15),
+                            move || crate::system_info::set_startup_launch(enabled),
+                        )
+                        .await
+                        .unwrap_or_else(Err);
                         Message::StartupLaunchSet(enabled, res)
                     },
                     |msg| msg,
                 ))
+            }
+            Message::StartupLaunchQueried(enabled) => {
+                if !self.startup_launch_touched {
+                    self.startup_launch_enabled = *enabled;
+                    self.mark_dirty();
+                }
+                Some(Task::none())
             }
             Message::StartupLaunchSet(enabled, result) => {
                 match result {
