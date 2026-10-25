@@ -123,7 +123,7 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
                         let (cfg_arc, ver) = latest;
                         let save_failed = Arc::clone(&state.lifecycle.bg_config_save_failed);
                         crate::util::spawn_blocking_with_timeout(CONFIG_SAVE_TIMEOUT, move || {
-                            if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, false) {
+                            if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, true) {
                                 warn!("Failed to save config on channel close: {}", e);
                                 save_failed.store(true, Ordering::Relaxed);
                             }
@@ -144,7 +144,7 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
             let cfg_for_battery = Arc::clone(&cfg_arc);
             let save_failed = Arc::clone(&state.lifecycle.bg_config_save_failed);
             crate::util::spawn_blocking_with_timeout(CONFIG_SAVE_TIMEOUT, move || {
-                if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, false) {
+                if let Err(e) = crate::config::save_versioned(&cfg_arc, ver, true) {
                     warn!("Failed to save config: {}", e);
                     save_failed.store(true, Ordering::Relaxed);
                 } else {
