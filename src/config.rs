@@ -483,16 +483,22 @@ fn revoke_everyone_write(path: &std::path::Path) -> Result<bool, &'static str> {
     Ok(true)
 }
 
-/// Backs up corrupt config before next save overwrites it.
-fn backup_corrupt_config(path: &std::path::Path) {
+/// Backs up corrupt config bytes before next save overwrites them.
+fn backup_corrupt_config(path: &std::path::Path, content: &[u8]) {
+    use std::io::Write;
     let backup = path.with_extension(format!(
         "toml.corrupt-{}-{}-{}",
         crate::util::current_time_ms(),
         std::process::id(),
         TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
     ));
-    match std::fs::copy(path, &backup) {
-        Ok(_) => tracing::warn!(
+    let result = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&backup)
+        .and_then(|mut f| f.write_all(content));
+    match result {
+        Ok(()) => tracing::warn!(
             "Backed up corrupt config to {} before falling back to defaults",
             backup.display()
         ),
@@ -504,29 +510,21 @@ fn backup_corrupt_config(path: &std::path::Path) {
     }
 }
 
-pub(crate) fn refuse_symlink(path: &std::path::Path) -> Result<(), String> {
-    if let Ok(meta) = std::fs::symlink_metadata(path)
-        && meta.file_type().is_symlink()
-    {
-        return Err(format!(
-            "refusing to read through symlink: {}",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
 pub fn load() -> Result<Config, String> {
     let path = config_path()?;
     tracing::debug!("Loading config from: {}", path.display());
     if path.exists() {
         warn_if_world_writable(&path);
-        refuse_symlink(&path)?;
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
+        let bytes = match crate::util::read_validated_file_bytes(&path) {
+            Ok(bytes) => bytes,
             Err(e) => {
-                // IO or non-UTF-8 corruption would be silently overwritten; preserve it.
-                backup_corrupt_config(&path);
+                return Err(format!("Failed to read {}: {}", path.display(), e));
+            }
+        };
+        let content = match String::from_utf8(bytes) {
+            Ok(content) => content,
+            Err(e) => {
+                backup_corrupt_config(&path, e.as_bytes());
                 return Err(format!("Failed to read {}: {}", path.display(), e));
             }
         };
@@ -534,7 +532,7 @@ pub fn load() -> Result<Config, String> {
             Ok(cfg) => cfg,
             Err(e) => {
                 // Load falls back to defaults and next save overwrites; preserve corrupt file.
-                backup_corrupt_config(&path);
+                backup_corrupt_config(&path, content.as_bytes());
                 return Err(format!("Failed to parse {}: {}", path.display(), e));
             }
         };
@@ -692,22 +690,46 @@ pub(crate) fn atomic_replace(
                 ));
             }
         }
-        let bak = dest.with_extension("toml.bak");
-        if let Ok(meta) = std::fs::symlink_metadata(&bak)
-            && meta.file_type().is_symlink()
-        {
-            return Err(format!(
-                "refusing to write through symlink: {}",
-                bak.display()
-            ));
-        }
+        let bak = dest.with_extension(format!(
+            "toml.bak-{}-{}-{}",
+            crate::util::current_time_ms(),
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
         match std::fs::rename(tmp, dest) {
             Ok(()) => Ok(()),
             Err(_) => {
                 // rename failed; backup dest, delete, then retry rename.
                 if dest.exists() {
-                    if let Err(e) = std::fs::copy(dest, &bak) {
-                        tracing::warn!("Failed to back up config to {:?}: {}", bak, e);
+                    use std::io::Write;
+                    match crate::util::read_validated_file_bytes(dest) {
+                        Ok(bytes) => {
+                            match std::fs::OpenOptions::new()
+                                .create_new(true)
+                                .write(true)
+                                .open(&bak)
+                            {
+                                Ok(mut f) => {
+                                    if let Err(e) = f.write_all(&bytes) {
+                                        tracing::warn!(
+                                            "Failed to write config backup {:?}: {}",
+                                            bak,
+                                            e
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to create config backup {:?}: {}",
+                                        bak,
+                                        e
+                                    )
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Refusing to back up config {:?}: {}", dest, e)
+                        }
                     }
                     let _ = std::fs::remove_file(dest);
                 }
@@ -715,14 +737,31 @@ pub(crate) fn atomic_replace(
                     Ok(()) => Ok(()),
                     Err(e) => {
                         if bak.exists()
-                            && let Err(restore_err) = std::fs::copy(&bak, dest)
+                            && let Ok(bytes) = crate::util::read_validated_file_bytes(&bak)
                         {
-                            tracing::warn!(
-                                "Failed to restore config backup {:?} → {:?}: {}",
-                                bak,
-                                dest,
-                                restore_err
-                            );
+                            use std::io::Write;
+                            match std::fs::OpenOptions::new()
+                                .create_new(true)
+                                .write(true)
+                                .open(dest)
+                            {
+                                Ok(mut f) => {
+                                    if let Err(restore_err) = f.write_all(&bytes) {
+                                        tracing::warn!(
+                                            "Failed to restore config backup {:?} → {:?}: {}",
+                                            bak,
+                                            dest,
+                                            restore_err
+                                        );
+                                    }
+                                }
+                                Err(restore_err) => tracing::warn!(
+                                    "Failed to restore config backup {:?} → {:?}: {}",
+                                    bak,
+                                    dest,
+                                    restore_err
+                                ),
+                            }
                         }
                         Err(format!("rename failed: {}", e))
                     }

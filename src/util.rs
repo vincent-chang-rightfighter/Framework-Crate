@@ -85,6 +85,73 @@ pub fn powershell_exe() -> std::path::PathBuf {
     system32_exe(r"WindowsPowerShell\v1.0\powershell.exe")
 }
 
+/// Reads a regular file through one validated handle. Rejects reparse points,
+/// directories and files with multiple hard links before reading any data.
+pub(crate) fn read_validated_file_bytes(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+        OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut file = unsafe { std::fs::File::from_raw_handle(handle) };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to read a reparse point",
+        ));
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to read a directory",
+        ));
+    }
+    if info.nNumberOfLinks > 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to read a file with multiple hard links",
+        ));
+    }
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)?;
+    Ok(content)
+}
+
+pub(crate) fn read_validated_file(path: &std::path::Path) -> std::io::Result<String> {
+    let bytes = read_validated_file_bytes(path)?;
+    String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 /// Serialized CPU power operation mutex to prevent concurrent Apply/Reset/Sync races.
 pub fn cpu_power_mutex() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -168,5 +235,45 @@ mod tests {
         .await;
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("panicked"));
+    }
+
+    #[test]
+    fn read_validated_file_reads_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "value = 1").unwrap();
+        assert_eq!(read_validated_file(&path).unwrap(), "value = 1");
+    }
+
+    #[test]
+    fn read_validated_file_rejects_hardlinks_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.toml");
+        std::fs::write(&original, "value = 1").unwrap();
+        let link = dir.path().join("link.toml");
+        std::fs::hard_link(&original, &link).unwrap();
+        assert_eq!(
+            read_validated_file(&link).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            read_validated_file(dir.path()).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn read_validated_file_rejects_symlinks_when_supported() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.toml");
+        std::fs::write(&original, "value = 1").unwrap();
+        let link = dir.path().join("link.toml");
+        if std::os::windows::fs::symlink_file(&original, &link).is_err() {
+            return;
+        }
+        assert_eq!(
+            read_validated_file(&link).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 }

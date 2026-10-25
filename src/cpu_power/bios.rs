@@ -166,39 +166,14 @@ fn quarantine_corrupt(path: &std::path::Path, reason: String) -> PersistedBios {
     PersistedBios::Unusable
 }
 
-fn has_multiple_hardlinks(path: &std::path::Path) -> bool {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
-    };
-
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
-    ok != 0 && info.nNumberOfLinks > 1
-}
-
 pub(super) fn load_persisted_bios_defaults() -> PersistedBios {
     let Ok(path) = bios_defaults_path() else {
         return PersistedBios::Unavailable;
     };
-    if let Err(e) = crate::config::refuse_symlink(&path) {
-        warn!(
-            "bios_defaults.toml is a symlink ({}); refusing to read it",
-            e
-        );
-        return PersistedBios::Unusable;
-    }
-    if has_multiple_hardlinks(&path) {
-        warn!("bios_defaults.toml has multiple hard links; refusing to read it");
-        return PersistedBios::Unusable;
-    }
     if path.exists() {
         crate::config::warn_if_world_writable(&path);
     }
-    let content = match std::fs::read_to_string(&path) {
+    let content = match crate::util::read_validated_file(&path) {
         Ok(c) => c,
         // Missing file: first run.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return PersistedBios::Missing,
@@ -280,17 +255,6 @@ mod tests {
         assert_eq!(resolve_ac_present(None, true), None);
         assert_eq!(resolve_ac_present(Some(false), false), Some(false));
         assert_eq!(resolve_ac_present(Some(true), true), Some(true));
-    }
-
-    #[test]
-    fn hardlinks_are_detected() {
-        let dir = tempfile::tempdir().unwrap();
-        let original = dir.path().join("original.toml");
-        std::fs::write(&original, "x").unwrap();
-        assert!(!has_multiple_hardlinks(&original));
-        let link = dir.path().join("link.toml");
-        std::fs::hard_link(&original, &link).unwrap();
-        assert!(has_multiple_hardlinks(&original));
     }
 
     #[test]
