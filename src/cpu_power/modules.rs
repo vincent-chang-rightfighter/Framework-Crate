@@ -75,6 +75,13 @@ pub(super) fn modules_update_needed(local: Option<&str>, latest_tag: Option<&str
     }
 }
 
+fn fallback_overwrite_allowed(local: Option<&str>, bins_present: bool) -> bool {
+    match local {
+        Some(version) => version == LAST_KNOWN_MODULES_VERSION,
+        None => !bins_present,
+    }
+}
+
 /// Creates a file exclusively: fails if it exists, never follows a planted
 /// symlink at the temp path.
 fn create_new_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
@@ -660,13 +667,16 @@ pub fn download_and_extract_modules() -> Result<(), String> {
             LAST_KNOWN_MODULES_VERSION.replace('.', "_")
         )
     });
-    if using_fallback
-        && let Some(local) = local_modules_version()
-        && local != LAST_KNOWN_MODULES_VERSION
-    {
-        return Err(format!(
-            "GitHub API unreachable and local modules ({local}) differ from fallback {LAST_KNOWN_MODULES_VERSION}; refusing to overwrite a possibly newer install"
-        ));
+    if using_fallback {
+        let local = local_modules_version();
+        let bins_present =
+            dir.join(INTEL_MSR_FILE).is_file() || dir.join(INTEL_MCHBAR_FILE).is_file();
+        if !fallback_overwrite_allowed(local.as_deref(), bins_present) {
+            return Err(format!(
+                "GitHub API unreachable and local modules ({}) are not the known fallback {LAST_KNOWN_MODULES_VERSION}; refusing to overwrite a possibly newer or unmarked install",
+                local.as_deref().unwrap_or("unknown")
+            ));
+        }
     }
     let zip_path = dir.join("pawnio_modules_latest.zip");
     // Primary ZIP is deterministic and vulnerable to pre-created symlink; also use unique tmp
@@ -918,6 +928,33 @@ pub(super) fn load_intel_mchbar_blob() -> Result<Vec<u8>, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_refuses_unknown_or_newer_local_installs() {
+        assert!(fallback_overwrite_allowed(None, false));
+        assert!(!fallback_overwrite_allowed(None, true));
+        assert!(fallback_overwrite_allowed(
+            Some(LAST_KNOWN_MODULES_VERSION),
+            true
+        ));
+        assert!(!fallback_overwrite_allowed(Some("0.2.12"), true));
+    }
+
+    #[test]
+    fn staging_size_cap_detects_oversized_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("blob.bin"), [0u8; 10]).unwrap();
+        assert!(staging_size_within(dir.path(), 100).unwrap());
+        assert!(!staging_size_within(dir.path(), 5).unwrap());
+    }
+
+    #[test]
+    fn tar_declared_bytes_sums_the_size_column() {
+        let listing = b"-rw-rw-r--  0 0      0        1236 Jan 25 21:40 a.txt\n-rw-rw-r--  0 0      0        5680 Jan 25 21:40 b c.txt\n";
+        assert_eq!(parse_tar_declared_bytes(listing), Some(6916));
+        assert_eq!(parse_tar_declared_bytes(b""), Some(0));
+        assert_eq!(parse_tar_declared_bytes(b"not a tar listing"), None);
+    }
 
     #[test]
     fn sha256_hex_empty() {
