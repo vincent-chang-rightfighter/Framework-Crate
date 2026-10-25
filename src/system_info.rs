@@ -1798,6 +1798,7 @@ pub fn show_tray_menu(hwnd: isize, x: i32, y: i32) -> Option<u32> {
 
     // SAFETY: TrackPopupMenu with TPM_RETURNCMD.
     let cmd = unsafe {
+        SetForegroundWindow(hwnd as *mut core::ffi::c_void);
         TrackPopupMenu(
             menu,
             TPM_RIGHTBUTTON | TPM_RETURNCMD,
