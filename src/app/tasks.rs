@@ -26,7 +26,7 @@ pub(crate) fn run_ec_task_quit(
                 return done;
             };
             let ec = Arc::clone(ec);
-            match crate::ec_serial::exec("quit-handover", QUIT_TIMEOUT, ec, f).await {
+            match crate::ec_serial::exec_force("quit-handover", QUIT_TIMEOUT, ec, f).await {
                 Ok(()) => {}
                 Err(e) => {
                     warn!("Quit EC handover failed, fans may stay on manual duty: {e}");

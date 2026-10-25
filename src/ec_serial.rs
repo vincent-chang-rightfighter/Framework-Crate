@@ -176,6 +176,21 @@ where
     F: FnOnce(Arc<dyn EcHw>) -> T + Send + 'static,
     T: Send + 'static,
 {
+    dispatch_with_force(tx, op, timeout, client, f, false).await
+}
+
+async fn dispatch_with_force<F, T>(
+    tx: &mpsc::Sender<Job>,
+    op: &'static str,
+    timeout: Duration,
+    client: Arc<dyn EcHw>,
+    f: F,
+    force: bool,
+) -> Result<T, DispatchError>
+where
+    F: FnOnce(Arc<dyn EcHw>) -> T + Send + 'static,
+    T: Send + 'static,
+{
     use tokio::sync::mpsc::error::TrySendError;
     let (reply_tx, rx) = oneshot::channel();
     let job = Job {
@@ -186,7 +201,7 @@ where
             Box::new(out) as Box<dyn Any + Send>
         }),
         reply: Reply::Async(reply_tx),
-        force: false,
+        force,
     };
     match tx.try_send(job) {
         Ok(()) => {}
@@ -226,6 +241,24 @@ where
 {
     let tx = sender();
     dispatch(&tx, op, timeout, client, f).await
+}
+
+/// Closes the write fence and runs one final job after all already-queued EC
+/// operations. Used by the normal quit path so no late duty can overtake the
+/// firmware handover.
+pub async fn exec_force<F, T>(
+    op: &'static str,
+    timeout: Duration,
+    client: Arc<dyn EcHw>,
+    f: F,
+) -> Result<T, DispatchError>
+where
+    F: FnOnce(Arc<dyn EcHw>) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let tx = sender();
+    WRITES_CLOSED.store(true, Ordering::Release);
+    dispatch_with_force(&tx, op, timeout, client, f, true).await
 }
 
 fn dispatch_blocking<F, T>(
@@ -498,6 +531,26 @@ mod tests {
         }
         assert!(rejected > 0, "queue must shed load when wedged");
         mock.set_hang(false);
+    }
+
+    #[tokio::test]
+    async fn forced_dispatch_runs_after_writes_close() {
+        let mock = Arc::new(MockEc::new());
+        let client: Arc<dyn EcHw> = mock.clone();
+        let (tx, _h, fence) = local_worker_with_fence();
+        fence.store(true, Ordering::Release);
+        dispatch_with_force(
+            &tx,
+            "force",
+            Duration::from_secs(5),
+            client,
+            |ec| ec.autofanctrl(),
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(*mock.ops.lock().unwrap(), vec!["autofanctrl".to_string()]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
