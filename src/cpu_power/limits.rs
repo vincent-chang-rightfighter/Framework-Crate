@@ -499,14 +499,6 @@ pub fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
                 "invalid {name}: enabled limit requires a positive time window ({v})"
             ));
         }
-        if enabled
-            && let Some(max) = params.max_time_s
-            && v > max + f64::EPSILON
-        {
-            return Err(format!(
-                "invalid {name}: exceeds firmware maximum {max:.0}s ({v}s)"
-            ));
-        }
     }
     // An enabled 0W (or near-zero) limit hard-throttles the CPU into an
     // apparent hang; require a floor for enabled limits.
@@ -878,11 +870,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_limit_params_enforces_firmware_max_time() {
+    fn validate_limit_params_allows_time_above_reported_firmware_max() {
+        // Some firmware reports a smaller 0x614 max than the BIOS itself uses
+        // (18s reported while the factory PL1 window is 28s), so the field is
+        // not a hard write bound. It only gates strict read-back checks.
         let mut p = params(30.0, 35.0);
-        p.max_time_s = Some(20.0);
-        assert!(validate_limit_params(&p).is_err());
-        p.max_time_s = Some(28.0);
+        p.max_time_s = Some(18.0);
         assert!(validate_limit_params(&p).is_ok());
     }
 

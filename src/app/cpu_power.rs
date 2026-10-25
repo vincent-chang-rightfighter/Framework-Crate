@@ -573,13 +573,6 @@ impl App {
                 crate::cpu_power::LIMIT_MAX_TIME_S
             ));
         }
-        if let Some(max) = self.state.cpu_power.snapshot().max_time_s
-            && pl1_time > max
-        {
-            return Err(format!(
-                "PL1 time must not exceed the firmware maximum of {max:.0}s"
-            ));
-        }
         if self.pl1_enabled && self.pl2_enabled && pl1 > pl2 {
             return Err(format!(
                 "PL1 ({:.1}W) must not exceed PL2 ({:.1}W)",
