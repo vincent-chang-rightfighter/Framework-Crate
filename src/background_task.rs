@@ -395,55 +395,116 @@ pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<dyn c
     let pd_ports_ref = Arc::clone(&state.peripherals.pd_ports);
     let pd_history_ref = Arc::clone(&state.peripherals.pd_ports_history);
     let exp_ref = Arc::clone(&state.peripherals.expansion_cards);
-    let ec_clone = Arc::clone(ec);
-    // Batch of 5 sequential EC reads needs more than the single-op 1.5s budget.
-    let batch =
-        crate::util::spawn_blocking_with_timeout(std::time::Duration::from_secs(5), move || {
-            (
-                ec_clone.thermal(),
-                ec_clone.power(),
-                ec_clone.kblight_get(),
-                ec_clone.pd_ports(),
-                ec_clone.expansion_cards(),
-            )
-        })
-        .await;
-    let (thermal_result, power_result, kb_result, pd_ports, exp_cards) = match batch {
-        Ok((t, p, kb, pd, exp)) => (t, p, kb, pd, exp),
-        Err(join_err) => {
-            warn!("refresh_all_data spawn panicked: {}", join_err);
-            return;
+    let thermal = match crate::ec_serial::exec(
+        "refresh-thermal",
+        crate::util::EC_IO_TIMEOUT,
+        Arc::clone(ec),
+        |ec| ec.thermal(),
+    )
+    .await
+    {
+        Ok(Ok(t)) => Some(t),
+        Ok(Err(e)) => {
+            warn!("refresh_all_data thermal read failed: {}", e);
+            None
+        }
+        Err(e) => {
+            warn!("refresh_all_data thermal dispatch failed: {}", e);
+            None
+        }
+    };
+    let power = match crate::ec_serial::exec(
+        "refresh-power",
+        crate::util::EC_IO_TIMEOUT,
+        Arc::clone(ec),
+        |ec| ec.power(),
+    )
+    .await
+    {
+        Ok(Ok(p)) => Some(p),
+        Ok(Err(e)) => {
+            tracing::debug!("refresh_all_data battery read failed: {}", e);
+            None
+        }
+        Err(e) => {
+            tracing::debug!("refresh_all_data battery dispatch failed: {}", e);
+            None
+        }
+    };
+    let kblight = match crate::ec_serial::exec(
+        "refresh-kblight",
+        crate::util::EC_IO_TIMEOUT,
+        Arc::clone(ec),
+        |ec| ec.kblight_get(),
+    )
+    .await
+    {
+        Ok(Ok(kb)) => Some(kb),
+        Ok(Err(e)) => {
+            tracing::debug!("refresh_all_data kblight read failed: {}", e);
+            None
+        }
+        Err(e) => {
+            tracing::debug!("refresh_all_data kblight dispatch failed: {}", e);
+            None
+        }
+    };
+    let pd_ports = match crate::ec_serial::exec(
+        "refresh-pd-ports",
+        crate::util::EC_IO_TIMEOUT,
+        Arc::clone(ec),
+        |ec| ec.pd_ports(),
+    )
+    .await
+    {
+        Ok(ports) => Some(ports),
+        Err(e) => {
+            tracing::debug!("refresh_all_data PD read failed: {}", e);
+            None
+        }
+    };
+    let exp_cards = match crate::ec_serial::exec(
+        "refresh-expansion-cards",
+        crate::util::EC_IO_TIMEOUT,
+        Arc::clone(ec),
+        |ec| ec.expansion_cards(),
+    )
+    .await
+    {
+        Ok(cards) => Some(cards),
+        Err(e) => {
+            tracing::debug!("refresh_all_data expansion card read failed: {}", e);
+            None
         }
     };
 
-    if let Ok(t) = thermal_result {
+    if let Some(t) = thermal {
         record_thermal_sample(state, t);
     }
-    if let Ok(bat) = power_result {
+    if let Some(bat) = power {
         with_write_lock(&battery_ref, |guard| {
             *guard = Arc::new(Some(crate::types::BatteryInfo { power_info: bat }));
         });
     }
-    if let Ok(kb) = kb_result {
+    if let Some(kb) = kblight {
         with_write_lock(&kblight_ref, |guard| {
             *guard = Arc::new(Some(kb));
         });
     }
-    {
+    if let Some(ports) = pd_ports {
         with_write_lock(&pd_ports_ref, |guard| {
-            *guard = Arc::new(pd_ports);
+            *guard = Arc::new(ports);
         });
-        mark_pd_usb_c_seen(&read_lock(&pd_ports_ref), &state.peripherals.pd_usb_c_seen);
-        push_pd_ports_history(&pd_ports_ref, &pd_history_ref);
     }
-    {
+    if let Some(cards) = exp_cards {
         with_write_lock(&exp_ref, |guard| {
-            *guard = Arc::new(exp_cards);
+            *guard = Arc::new(cards);
         });
     }
+    mark_pd_usb_c_seen(&read_lock(&pd_ports_ref), &state.peripherals.pd_usb_c_seen);
+    push_pd_ports_history(&pd_ports_ref, &pd_history_ref);
     mark_view_dirty(state);
 }
-
 pub fn spawn(state: AppState) {
     const MAX_CONSECUTIVE_FAILURES: u32 = 10;
     // Panics months apart must not accumulate into a shutdown: forget
