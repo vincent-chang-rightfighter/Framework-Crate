@@ -417,12 +417,17 @@ pub fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
             }
         }
     }
-    for (name, v) in [
-        ("PL1 time", params.pl1_time_s),
-        ("PL2 time", params.pl2_time_s),
+    for (name, v, enabled) in [
+        ("PL1 time", params.pl1_time_s, params.pl1_enabled),
+        ("PL2 time", params.pl2_time_s, params.pl2_enabled),
     ] {
         if v > LIMIT_MAX_TIME_S {
             return Err(format!("invalid {name}: exceeds {LIMIT_MAX_TIME_S}s ({v})"));
+        }
+        if enabled && v <= 0.0 {
+            return Err(format!(
+                "invalid {name}: enabled limit requires a positive time window ({v})"
+            ));
         }
     }
     // An enabled 0W (or near-zero) limit hard-throttles the CPU into an
@@ -1129,6 +1134,24 @@ mod unit_bounds_tests {
             power_unit: 0.125,
             time_unit: 0.0009765625,
         }
+    }
+
+    #[test]
+    fn enabled_limits_require_a_positive_time_window() {
+        let mut p = params();
+        p.pl1_time_s = 0.0;
+        assert!(validate_limit_params(&p).is_err());
+        let mut p = params();
+        p.pl2_time_s = 0.0;
+        assert!(validate_limit_params(&p).is_err());
+        let mut p = params();
+        p.pl1_time_s = 0.0;
+        p.pl1_enabled = false;
+        assert!(validate_limit_params(&p).is_ok());
+        let mut p = params();
+        p.pl2_time_s = 0.0;
+        p.pl2_enabled = false;
+        assert!(validate_limit_params(&p).is_ok());
     }
 
     #[test]

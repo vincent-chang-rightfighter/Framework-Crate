@@ -121,6 +121,10 @@ pub(super) fn bios_defaults_valid(d: &BiosDefaults) -> bool {
             .iter()
             .zip(enabled)
             .all(|(w, en)| !en || *w >= LIMIT_MIN_ENABLED_WATTS)
+        && (!d.pl1_enabled || d.pl1_time_s > 0.0)
+        && (!d.pl2_enabled || d.pl2_time_s > 0.0)
+        && (!d.pl1_mmio_enabled || d.pl1_mmio_time_s > 0.0)
+        && (!d.pl2_mmio_enabled || d.pl2_mmio_time_s > 0.0)
         && (!d.pl1_enabled || !d.pl2_enabled || d.pl1_watts <= d.pl2_watts)
         && (!d.pl1_mmio_enabled || !d.pl2_mmio_enabled || d.pl1_mmio_watts <= d.pl2_mmio_watts)
 }
@@ -333,6 +337,30 @@ mod tests {
         assert!(
             matches!(load_persisted_bios_defaults(), PersistedBios::Unusable),
             "NaN watts must be Unusable, not Loaded"
+        );
+        assert!(path.exists(), "the invalid file must be kept, not removed");
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", v) };
+        } else {
+            unsafe { std::env::remove_var("FRAMEWORK_CONTROL_CONFIG_DIR") };
+        }
+    }
+
+    #[test]
+    fn zero_time_window_is_quarantined_when_enabled() {
+        let _env_guard = crate::config::CONFIG_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR");
+        unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", dir.path()) };
+        let path = dir.path().join("bios_defaults.toml");
+        std::fs::write(
+            &path,
+            "pl1_watts = 30.0\npl1_enabled = true\npl1_clamped = false\npl1_time_s = 0.0\npl2_watts = 60.0\npl2_enabled = true\npl2_clamped = true\npl2_time_s = 2.5\npower_unit = 0.125\ntime_unit = 0.001\n",
+        )
+        .unwrap();
+        assert!(
+            matches!(load_persisted_bios_defaults(), PersistedBios::Unusable),
+            "enabled limit with a zero time window must be Unusable"
         );
         assert!(path.exists(), "the invalid file must be kept, not removed");
         if let Some(v) = prev {
