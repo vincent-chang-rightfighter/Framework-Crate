@@ -497,7 +497,7 @@ enum AuthenticodeOutcome {
 /// `reset_dll_fns` drops it so an upgraded DLL is re-verified instead of
 /// inheriting the previous file's result. Transient PowerShell failures are
 /// not cached, so Retry can recover without restarting the app.
-static AUTHENTICODE: parking_lot::Mutex<Option<AuthenticodeOutcome>> =
+static AUTHENTICODE: parking_lot::Mutex<Option<(std::path::PathBuf, AuthenticodeOutcome)>> =
     parking_lot::Mutex::new(None);
 
 /// Drops the cached Authenticode verdict. Called with the DLL pointers so an
@@ -507,7 +507,9 @@ fn invalidate_authenticode() {
 }
 
 fn cached_authenticode_status(p: &std::path::Path) -> Result<(), &'static str> {
-    if let Some(cached) = *AUTHENTICODE.lock() {
+    if let Some((cached_path, cached)) = AUTHENTICODE.lock().as_ref()
+        && cached_path == p
+    {
         return match cached {
             AuthenticodeOutcome::Valid => Ok(()),
             AuthenticodeOutcome::Invalid => Err("DLL authenticode not valid"),
@@ -516,11 +518,11 @@ fn cached_authenticode_status(p: &std::path::Path) -> Result<(), &'static str> {
     }
     match check_authenticode(p) {
         AuthenticodeOutcome::Valid => {
-            *AUTHENTICODE.lock() = Some(AuthenticodeOutcome::Valid);
+            *AUTHENTICODE.lock() = Some((p.to_path_buf(), AuthenticodeOutcome::Valid));
             Ok(())
         }
         AuthenticodeOutcome::Invalid => {
-            *AUTHENTICODE.lock() = Some(AuthenticodeOutcome::Invalid);
+            *AUTHENTICODE.lock() = Some((p.to_path_buf(), AuthenticodeOutcome::Invalid));
             Err("DLL authenticode not valid")
         }
         AuthenticodeOutcome::Unavailable => Err("authenticode check failed"),
@@ -857,7 +859,10 @@ mod tests {
     fn invalidate_authenticode_clears_the_cache() {
         // White-box: the whole point of Mutex<Option<…>> over OnceLock is
         // clearability, so pin that property directly. No PowerShell runs.
-        *AUTHENTICODE.lock() = Some(AuthenticodeOutcome::Valid);
+        *AUTHENTICODE.lock() = Some((
+            std::path::PathBuf::from("test.dll"),
+            AuthenticodeOutcome::Valid,
+        ));
         invalidate_authenticode();
         assert!(AUTHENTICODE.lock().is_none());
     }
