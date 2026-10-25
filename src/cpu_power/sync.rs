@@ -174,6 +174,7 @@ fn sync_thread_main(
         Ok(b) => b,
         Err(e) => {
             warn!("Sync thread: failed to load IntelMSR module: {}", e);
+            broken.store(true, Ordering::Release);
             return;
         }
     };
@@ -182,6 +183,7 @@ fn sync_thread_main(
         Ok(h) => h,
         Err(e) => {
             warn!("Sync thread: failed to open MSR handle: {}", e);
+            broken.store(true, Ordering::Release);
             return;
         }
     };

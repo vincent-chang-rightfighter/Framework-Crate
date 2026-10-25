@@ -236,19 +236,18 @@ impl CpuPowerState {
         }
         let mut thread = self.sync_thread.lock();
         thread.join_running();
+        // Clear the latch before spawning: a worker that fails immediately
+        // sets `sync_broken` during startup, and a later store here would
+        // erase that failure signal.
+        self.sync_broken.store(false, Ordering::Release);
+        self.sync_restart_disabled.store(false, Ordering::Release);
+        self.sync_restart_failures.store(0, Ordering::Release);
         thread.start(
             params,
             Arc::clone(&self.sync_alive),
             Arc::clone(&self.sync_broken),
         )?;
         self.sync_enabled.store(true, Ordering::Release);
-        // Successful (re)start clears the auto-restart latch and its
-        // counter, so a manual Sync press re-arms auto-restart. Cleared
-        // here rather than on entry so consecutive auto-restart failures
-        // still accumulate across try_restart_if_dead calls.
-        self.sync_broken.store(false, Ordering::Release);
-        self.sync_restart_disabled.store(false, Ordering::Release);
-        self.sync_restart_failures.store(0, Ordering::Release);
         self.sync_start_ms
             .store(crate::util::monotonic_ms(), Ordering::Release);
         *self.desired_sync.write() = Some(params);
@@ -296,6 +295,7 @@ impl CpuPowerState {
                     "Sync thread hit a permanent failure (likely BIOS-locked); auto-restart disabled until manual Sync start"
                 );
             }
+            self.sync_enabled.store(false, Ordering::Release);
             return false;
         }
         if self.sync_restart_disabled.load(Ordering::Acquire) {
@@ -319,6 +319,7 @@ impl CpuPowerState {
                 let failures = self.sync_restart_failures.fetch_add(1, Ordering::AcqRel) + 1;
                 if failures >= MAX_SYNC_RESTART_FAILURES {
                     self.sync_restart_disabled.store(true, Ordering::Release);
+                    self.sync_enabled.store(false, Ordering::Release);
                     warn!(
                         "Sync auto-restart failed {} times; giving up until manual Sync start: {}",
                         failures, e
@@ -435,6 +436,7 @@ mod tests {
         state.sync_broken.store(true, Ordering::Release);
         assert!(!state.try_restart_if_dead());
         assert!(state.sync_restart_latched());
+        assert!(!state.sync_enabled.load(Ordering::Acquire));
         // Stays latched without re-warning or respawning.
         assert!(!state.try_restart_if_dead());
         assert!(state.sync_restart_latched());
