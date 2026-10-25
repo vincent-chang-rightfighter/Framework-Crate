@@ -349,16 +349,20 @@ pub const LIMIT_MIN_ENABLED_WATTS: f64 = 5.0;
 /// Per-model PL ceiling (hard safety cap). 120W is the absolute ceiling
 /// for Desktop; smaller chassis get lower caps so a typo can't cook the
 /// VRM for minutes. Unknown models fall back to a safe 65W.
-pub fn platform_max_watts() -> f64 {
-    // Detect once per validation (infrequent: UI apply, sync start,
-    // BIOS load). No plumbing needed through every caller.
-    match crate::cli::ec_wrapper::detect_platform() {
+pub fn max_watts_for_family(family: crate::cli::ec_wrapper::PlatformFamily) -> f64 {
+    match family {
         crate::cli::ec_wrapper::PlatformFamily::Laptop12 => 40.0,
         crate::cli::ec_wrapper::PlatformFamily::Laptop13 => 70.0,
         crate::cli::ec_wrapper::PlatformFamily::Laptop16 => 100.0,
         crate::cli::ec_wrapper::PlatformFamily::Desktop => 120.0,
-        _ => 65.0,
+        crate::cli::ec_wrapper::PlatformFamily::Unknown => 65.0,
     }
+}
+
+pub fn platform_max_watts() -> f64 {
+    // Detect once per validation (infrequent: UI apply, sync start,
+    // BIOS load). No plumbing needed through every caller.
+    max_watts_for_family(crate::cli::ec_wrapper::detect_platform())
 }
 
 pub fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
@@ -618,6 +622,16 @@ mod tests {
     /// from the CPU. 0.9765625us per time unit step.
     const POWER_UNIT: f64 = 0.125;
     const TIME_UNIT: f64 = 0.0009765625;
+
+    #[test]
+    fn laptop12_core3_keeps_the_laptop12_watt_cap() {
+        use crate::cli::ec_wrapper::PlatformFamily;
+        assert_eq!(max_watts_for_family(PlatformFamily::Laptop12), 40.0);
+        assert_eq!(max_watts_for_family(PlatformFamily::Laptop13), 70.0);
+        assert_eq!(max_watts_for_family(PlatformFamily::Laptop16), 100.0);
+        assert_eq!(max_watts_for_family(PlatformFamily::Desktop), 120.0);
+        assert_eq!(max_watts_for_family(PlatformFamily::Unknown), 65.0);
+    }
 
     fn params(pl1_watts: f64, pl2_watts: f64) -> PowerLimitParams {
         PowerLimitParams {

@@ -82,9 +82,11 @@ impl PlatformFamily {
     }
 }
 
-pub fn detect_platform() -> PlatformFamily {
-    match smbios::get_platform() {
-        Some(Platform::Framework12IntelGen13) => PlatformFamily::Laptop12,
+pub fn platform_family(platform: Option<Platform>) -> PlatformFamily {
+    match platform {
+        Some(Platform::Framework12IntelGen13) | Some(Platform::Framework12IntelCore3) => {
+            PlatformFamily::Laptop12
+        }
         Some(Platform::IntelCoreUltra1)
         | Some(Platform::IntelCoreUltra3)
         | Some(Platform::IntelGen11)
@@ -96,8 +98,14 @@ pub fn detect_platform() -> PlatformFamily {
             PlatformFamily::Laptop16
         }
         Some(Platform::FrameworkDesktopAmdAiMax300) => PlatformFamily::Desktop,
-        _ => PlatformFamily::Unknown,
+        Some(Platform::GenericFramework(..)) | Some(Platform::UnknownSystem) | None => {
+            PlatformFamily::Unknown
+        }
     }
+}
+
+pub fn detect_platform() -> PlatformFamily {
+    platform_family(smbios::get_platform())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -732,6 +740,40 @@ impl EcHw for EcClient {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn framework12_core3_maps_to_laptop12() {
+        assert_eq!(
+            platform_family(Some(Platform::Framework12IntelCore3)),
+            PlatformFamily::Laptop12
+        );
+    }
+
+    #[test]
+    fn platform_family_covers_all_known_platforms() {
+        let cases = [
+            (Platform::Framework12IntelGen13, PlatformFamily::Laptop12),
+            (Platform::Framework12IntelCore3, PlatformFamily::Laptop12),
+            (Platform::IntelGen11, PlatformFamily::Laptop13),
+            (Platform::IntelGen12, PlatformFamily::Laptop13),
+            (Platform::IntelGen13, PlatformFamily::Laptop13),
+            (Platform::IntelCoreUltra1, PlatformFamily::Laptop13),
+            (Platform::IntelCoreUltra3, PlatformFamily::Laptop13),
+            (Platform::Framework13Amd7080, PlatformFamily::Laptop13),
+            (Platform::Framework13AmdAi300, PlatformFamily::Laptop13),
+            (Platform::Framework16Amd7080, PlatformFamily::Laptop16),
+            (Platform::Framework16AmdAi300, PlatformFamily::Laptop16),
+            (
+                Platform::FrameworkDesktopAmdAiMax300,
+                PlatformFamily::Desktop,
+            ),
+            (Platform::UnknownSystem, PlatformFamily::Unknown),
+        ];
+        for (platform, expected) in cases {
+            assert_eq!(platform_family(Some(platform)), expected, "{platform:?}");
+        }
+        assert_eq!(platform_family(None), PlatformFamily::Unknown);
+    }
 
     fn port(role: &'static str, pd: bool, dp_alt: bool, watts: Option<f32>) -> UsbCPort {
         UsbCPort {
