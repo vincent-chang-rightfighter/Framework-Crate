@@ -940,6 +940,173 @@ fn current_user_id() -> Result<String, String> {
     }
 }
 
+fn known_common_app_data() -> Option<std::path::PathBuf> {
+    use windows_sys::Win32::UI::Shell::SHGetFolderPathW;
+    const CSIDL_COMMON_APPDATA: i32 = 0x0023;
+    const MAX_PATH: usize = 260;
+    let mut buf = [0u16; MAX_PATH];
+    let ok = unsafe {
+        SHGetFolderPathW(
+            std::ptr::null_mut(),
+            CSIDL_COMMON_APPDATA,
+            std::ptr::null_mut(),
+            0,
+            buf.as_mut_ptr(),
+        )
+    };
+    if ok != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(MAX_PATH);
+    String::from_utf16(&buf[..len])
+        .ok()
+        .map(std::path::PathBuf::from)
+}
+
+fn task_dir() -> std::io::Result<std::path::PathBuf> {
+    #[cfg(any(debug_assertions, test))]
+    if !is_elevated() {
+        return Ok(std::env::temp_dir());
+    }
+    let base = known_common_app_data()
+        .ok_or_else(|| std::io::Error::other("cannot resolve ProgramData"))?
+        .join("FrameworkCrate");
+    create_admin_directory(&base)?;
+    let dir = base.join("tasks");
+    create_admin_directory(&dir)?;
+    Ok(dir)
+}
+
+/// Creates an Administrators-owned directory with an admin/SYSTEM-only DACL.
+fn create_admin_directory(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::GENERIC_ALL;
+    use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
+    use windows_sys::Win32::Security::{
+        ACL, ACL_REVISION, AddAccessAllowedAceEx, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
+        InitializeAcl, InitializeSecurityDescriptor, NO_INHERITANCE, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+        SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE,
+        SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
+        WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    };
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+    use windows_sys::core::PCWSTR;
+
+    enable_restore_privilege()?;
+    let mut admin_sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut admin_len = admin_sid.len() as u32;
+    if unsafe {
+        CreateWellKnownSid(
+            WinBuiltinAdministratorsSid,
+            std::ptr::null_mut(),
+            admin_sid.as_mut_ptr() as PSID,
+            &mut admin_len,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut system_sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut system_len = system_sid.len() as u32;
+    if unsafe {
+        CreateWellKnownSid(
+            WinLocalSystemSid,
+            std::ptr::null_mut(),
+            system_sid.as_mut_ptr() as PSID,
+            &mut system_len,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut acl_buf = [0u32; 64];
+    let acl = acl_buf.as_mut_ptr() as *mut ACL;
+    if unsafe { InitializeAcl(acl, std::mem::size_of_val(&acl_buf) as u32, ACL_REVISION) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    for sid in [admin_sid.as_ptr() as PSID, system_sid.as_ptr() as PSID] {
+        if unsafe { AddAccessAllowedAceEx(acl, ACL_REVISION, NO_INHERITANCE, GENERIC_ALL, sid) }
+            == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+
+    let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let sd_ptr = &mut sd as *mut SECURITY_DESCRIPTOR as PSECURITY_DESCRIPTOR;
+    if unsafe { InitializeSecurityDescriptor(sd_ptr, 1) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { SetSecurityDescriptorOwner(sd_ptr, admin_sid.as_ptr() as PSID, 0) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { SetSecurityDescriptorDacl(sd_ptr, 1, acl, 0) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { SetSecurityDescriptorControl(sd_ptr, SE_DACL_PROTECTED, SE_DACL_PROTECTED) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd_ptr,
+        bInheritHandle: 0,
+    };
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let created = unsafe { CreateDirectoryW(wide.as_ptr(), &sa) };
+    if created != 0 {
+        if !task_file_owner_is_administrators(path)? {
+            let _ = std::fs::remove_dir(path);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "task directory owner is not Administrators",
+            ));
+        }
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(183) {
+        if crate::config::dir_has_reparse_point(path) || !path.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "task directory is not a plain admin directory: {}",
+                    path.display()
+                ),
+            ));
+        }
+        let rc = unsafe {
+            SetNamedSecurityInfoW(
+                wide.as_ptr() as PCWSTR,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                admin_sid.as_ptr() as PSID,
+                std::ptr::null_mut(),
+                acl,
+                std::ptr::null(),
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::from_raw_os_error(rc as i32));
+        }
+        if !task_file_owner_is_administrators(path)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "task directory owner is not Administrators",
+            ));
+        }
+        return Ok(());
+    }
+    Err(err)
+}
+
 /// Prefix of the temporary task document written for `schtasks /Create /XML`.
 const TASK_XML_PREFIX: &str = "framework-crate-task-";
 
@@ -1208,6 +1375,7 @@ fn create_task_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
 
 /// Writes the task document to a uniquely-named temp file.
 fn write_task_xml(xml: &str) -> Result<String, String> {
+    let dir = task_dir().map_err(|e| format!("cannot resolve startup task directory: {e}"))?;
     for _ in 0..5 {
         // Unpredictable suffix: timestamp-nanos + pid + counter hashed, so a
         // same-user attacker can't pre-plant the path.
@@ -1224,7 +1392,7 @@ fn write_task_xml(xml: &str) -> Result<String, String> {
             (&TASK_XML_COUNTER as *const _ as usize).hash(&mut h);
             format!("{:016x}{:016x}", h.finish(), crate::util::monotonic_ms())
         };
-        let xml_path = std::env::temp_dir().join(format!("{TASK_XML_PREFIX}{nonce}.xml"));
+        let xml_path = dir.join(format!("{TASK_XML_PREFIX}{nonce}.xml"));
         let bytes = utf16le_with_bom(xml);
         match create_task_file(&xml_path, &bytes) {
             Ok(()) => return Ok(xml_path.to_string_lossy().into_owned()),
@@ -1243,8 +1411,8 @@ fn write_task_xml(xml: &str) -> Result<String, String> {
 /// The release profile uses `panic = "abort"`, so a process killed mid-write
 /// (or by Task Scheduler) never reaches the removal and the file would
 /// otherwise accumulate in the temp directory forever.
-fn cleanup_stale_task_xml() {
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+fn cleanup_task_xml_in(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
@@ -1253,6 +1421,16 @@ fn cleanup_stale_task_xml() {
         if name.starts_with(TASK_XML_PREFIX) && name.ends_with(".xml") {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+fn cleanup_stale_task_xml() {
+    let temp = std::env::temp_dir();
+    cleanup_task_xml_in(&temp);
+    if let Ok(dir) = task_dir()
+        && dir != temp
+    {
+        cleanup_task_xml_in(&dir);
     }
 }
 
