@@ -763,8 +763,9 @@ pub fn spawn(state: AppState) {
                             }
                         }
                     }
-                    // Skip UI-only reads while idle to save spawns.
-                    if !is_idle {
+                    // Battery polling also drives the AC→battery power-limit
+                    // reset, so it must keep running while idle.
+                    {
                         let ec_clone = Arc::clone(&ec);
                         match crate::ec_serial::exec(
                             "power",
