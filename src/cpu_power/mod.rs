@@ -343,7 +343,6 @@ impl CpuPowerState {
     pub fn stop_sync(&self) {
         let mut thread = self.sync_thread.lock();
         thread.shutdown();
-        drop(thread);
         self.sync_alive.store(false, Ordering::Release);
         self.sync_enabled.store(false, Ordering::Release);
         // Keep desired_sync for resume restore.
