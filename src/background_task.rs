@@ -343,94 +343,88 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
     true
 }
 
+/// Runs one startup read unless a previous dispatch failure already proved the
+/// EC unavailable. Command-level errors keep the dispatcher usable; a timeout
+/// or driver failure skips the remaining reads instead of paying the timeout
+/// once per sensor.
+async fn read_ec<T, F, Fut>(alive: &mut bool, label: &'static str, f: F) -> Option<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Result<T, String>, crate::ec_serial::DispatchError>>,
+{
+    if !*alive {
+        return None;
+    }
+    match f().await {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) => {
+            tracing::debug!("refresh_all_data {} read failed: {}", label, e);
+            None
+        }
+        Err(e) if e.is_overloaded() => {
+            tracing::debug!("refresh_all_data {} dispatch overloaded", label);
+            None
+        }
+        Err(e) => {
+            *alive = false;
+            warn!("refresh_all_data {} dispatch failed: {}", label, e);
+            None
+        }
+    }
+}
+
 pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<dyn cli::EcHw>) {
     let battery_ref = Arc::clone(&state.battery.info);
     let kblight_ref = Arc::clone(&state.peripherals.kblight);
     let pd_ports_ref = Arc::clone(&state.peripherals.pd_ports);
     let pd_history_ref = Arc::clone(&state.peripherals.pd_ports_history);
     let exp_ref = Arc::clone(&state.peripherals.expansion_cards);
-    let thermal = match crate::ec_serial::exec(
-        "refresh-thermal",
-        crate::util::EC_IO_TIMEOUT,
-        Arc::clone(ec),
-        |ec| ec.thermal(),
-    )
-    .await
-    {
-        Ok(Ok(t)) => Some(t),
-        Ok(Err(e)) => {
-            warn!("refresh_all_data thermal read failed: {}", e);
-            None
-        }
-        Err(e) => {
-            warn!("refresh_all_data thermal dispatch failed: {}", e);
-            None
-        }
-    };
-    let power = match crate::ec_serial::exec(
-        "refresh-power",
-        crate::util::EC_IO_TIMEOUT,
-        Arc::clone(ec),
-        |ec| ec.power(),
-    )
-    .await
-    {
-        Ok(Ok(p)) => Some(p),
-        Ok(Err(e)) => {
-            tracing::debug!("refresh_all_data battery read failed: {}", e);
-            None
-        }
-        Err(e) => {
-            tracing::debug!("refresh_all_data battery dispatch failed: {}", e);
-            None
-        }
-    };
-    let kblight = match crate::ec_serial::exec(
-        "refresh-kblight",
-        crate::util::EC_IO_TIMEOUT,
-        Arc::clone(ec),
-        |ec| ec.kblight_get(),
-    )
-    .await
-    {
-        Ok(Ok(kb)) => Some(kb),
-        Ok(Err(e)) => {
-            tracing::debug!("refresh_all_data kblight read failed: {}", e);
-            None
-        }
-        Err(e) => {
-            tracing::debug!("refresh_all_data kblight dispatch failed: {}", e);
-            None
-        }
-    };
-    let pd_ports = match crate::ec_serial::exec(
-        "refresh-pd-ports",
-        crate::util::EC_IO_TIMEOUT,
-        Arc::clone(ec),
-        |ec| ec.pd_ports(),
-    )
-    .await
-    {
-        Ok(ports) => Some(ports),
-        Err(e) => {
-            tracing::debug!("refresh_all_data PD read failed: {}", e);
-            None
-        }
-    };
-    let exp_cards = match crate::ec_serial::exec(
-        "refresh-expansion-cards",
-        crate::util::EC_IO_TIMEOUT,
-        Arc::clone(ec),
-        |ec| ec.expansion_cards(),
-    )
-    .await
-    {
-        Ok(cards) => Some(cards),
-        Err(e) => {
-            tracing::debug!("refresh_all_data expansion card read failed: {}", e);
-            None
-        }
-    };
+    let mut ec_alive = true;
+    let thermal = read_ec(&mut ec_alive, "thermal", || {
+        crate::ec_serial::exec(
+            "refresh-thermal",
+            crate::util::EC_IO_TIMEOUT,
+            Arc::clone(ec),
+            |ec| ec.thermal(),
+        )
+    })
+    .await;
+    let power = read_ec(&mut ec_alive, "battery", || {
+        crate::ec_serial::exec(
+            "refresh-power",
+            crate::util::EC_IO_TIMEOUT,
+            Arc::clone(ec),
+            |ec| ec.power(),
+        )
+    })
+    .await;
+    let kblight = read_ec(&mut ec_alive, "keyboard backlight", || {
+        crate::ec_serial::exec(
+            "refresh-kblight",
+            crate::util::EC_IO_TIMEOUT,
+            Arc::clone(ec),
+            |ec| ec.kblight_get(),
+        )
+    })
+    .await;
+    let pd_ports = read_ec(&mut ec_alive, "PD ports", || {
+        crate::ec_serial::exec(
+            "refresh-pd-ports",
+            crate::util::EC_IO_TIMEOUT,
+            Arc::clone(ec),
+            |ec| Ok::<_, String>(ec.pd_ports()),
+        )
+    })
+    .await;
+    let exp_cards = read_ec(&mut ec_alive, "expansion cards", || {
+        crate::ec_serial::exec(
+            "refresh-expansion-cards",
+            crate::util::EC_IO_TIMEOUT,
+            Arc::clone(ec),
+            |ec| Ok::<_, String>(ec.expansion_cards()),
+        )
+    })
+    .await;
 
     if let Some(t) = thermal {
         record_thermal_sample(state, t);
@@ -1336,5 +1330,54 @@ mod tests {
         assert!(try_ec_init_permit(&sem).is_none());
         drop(first);
         assert!(try_ec_init_permit(&sem).is_some());
+    }
+
+    #[tokio::test]
+    async fn ec_dispatch_failure_skips_remaining_startup_reads() {
+        let mut alive = true;
+        let first: Option<u32> = read_ec(&mut alive, "first", || async {
+            Err(crate::ec_serial::DispatchError::Failed("dead".into()))
+        })
+        .await;
+        assert!(first.is_none());
+        assert!(!alive);
+
+        let mut called = false;
+        let second: Option<u32> = read_ec(&mut alive, "second", || {
+            called = true;
+            async { Ok::<_, crate::ec_serial::DispatchError>(Ok::<_, String>(1u32)) }
+        })
+        .await;
+        assert!(second.is_none());
+        assert!(!called);
+    }
+
+    #[tokio::test]
+    async fn ec_command_error_keeps_startup_reads_alive() {
+        let mut alive = true;
+        let failed: Option<u32> = read_ec(&mut alive, "first", || async {
+            Ok::<_, crate::ec_serial::DispatchError>(Err::<u32, String>("unsupported".into()))
+        })
+        .await;
+        assert!(failed.is_none());
+        assert!(alive);
+
+        let value: Option<u32> = read_ec(&mut alive, "second", || async {
+            Ok::<_, crate::ec_serial::DispatchError>(Ok::<_, String>(7u32))
+        })
+        .await;
+        assert_eq!(value, Some(7));
+        assert!(alive);
+    }
+
+    #[tokio::test]
+    async fn ec_overload_keeps_startup_reads_alive() {
+        let mut alive = true;
+        let skipped: Option<u32> = read_ec(&mut alive, "busy", || async {
+            Err(crate::ec_serial::DispatchError::Overloaded { op: "busy" })
+        })
+        .await;
+        assert!(skipped.is_none());
+        assert!(alive);
     }
 }
