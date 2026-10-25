@@ -708,6 +708,10 @@ fn schtasks_output(args: &[&str]) -> Result<std::process::Output, String> {
                     {
                         std::thread::sleep(std::time::Duration::from_millis(20));
                     }
+                    // Closing the killed child's pipes lets the drain threads
+                    // finish; join so a timeout does not leak them.
+                    let _ = out_thread.join();
+                    let _ = err_thread.join();
                     return Err("schtasks timed out after 5s".to_string());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));

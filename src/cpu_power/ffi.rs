@@ -240,7 +240,7 @@ fn run_command_with_timeout(
         .map_err(|e| format!("failed to run winget: {e}"))?;
     let mut stdout = child.stdout.take();
     let (out_tx, out_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    let out_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(ref mut out) = stdout {
             let _ = out.read_to_end(&mut buf);
@@ -249,7 +249,7 @@ fn run_command_with_timeout(
     });
     let mut stderr = child.stderr.take();
     let (err_tx, err_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    let err_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(ref mut err) = stderr {
             let _ = err.read_to_end(&mut buf);
@@ -264,12 +264,20 @@ fn run_command_with_timeout(
             .map_err(|e| format!("failed to wait for winget: {e}"))?
         {
             Some(status) => {
-                let stdout = out_rx
-                    .recv_timeout(Duration::from_secs(2))
-                    .unwrap_or_default();
-                let stderr = err_rx
-                    .recv_timeout(Duration::from_secs(2))
-                    .unwrap_or_default();
+                let stdout = match out_rx.recv_timeout(Duration::from_secs(2)) {
+                    Ok(buf) => {
+                        let _ = out_thread.join();
+                        buf
+                    }
+                    Err(_) => Vec::new(),
+                };
+                let stderr = match err_rx.recv_timeout(Duration::from_secs(2)) {
+                    Ok(buf) => {
+                        let _ = err_thread.join();
+                        buf
+                    }
+                    Err(_) => Vec::new(),
+                };
                 return Ok(std::process::Output {
                     status,
                     stdout,
@@ -284,6 +292,15 @@ fn run_command_with_timeout(
                         && Instant::now() < reap_deadline
                     {
                         std::thread::sleep(Duration::from_millis(20));
+                    }
+                    // Join only readers that finished; a grandchild can keep a
+                    // pipe open past the kill, and an unbounded join would
+                    // defeat the timeout.
+                    if out_rx.recv_timeout(Duration::from_secs(1)).is_ok() {
+                        let _ = out_thread.join();
+                    }
+                    if err_rx.recv_timeout(Duration::from_secs(1)).is_ok() {
+                        let _ = err_thread.join();
                     }
                     return Err(format!("winget timed out after {}s", timeout.as_secs()));
                 }
