@@ -200,7 +200,11 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                     let cache = &snap.sensor_cache;
                     let curve_sensor: Option<&str> =
                         curve.curve.sensors.first().map(|s| s.as_str());
-                    if cache.keys.is_empty() {
+                    if !cache
+                        .keys
+                        .iter()
+                        .any(|name| !crate::types::is_battery_sensor(name))
+                    {
                         settings_content = settings_content.push(
                             text("No sensors detected yet")
                                 .size(FONT_SMALL)
@@ -210,6 +214,9 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                         );
                     } else {
                         for (idx, name) in cache.keys.iter().enumerate() {
+                            if crate::types::is_battery_sensor(name) {
+                                continue;
+                            }
                             let is_on = curve_sensor == Some(name.as_str());
                             let color = crate::style::sensor_tint(snap.theme, idx);
                             let on_off = if is_on { "On" } else { "Off" };

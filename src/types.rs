@@ -97,6 +97,15 @@ impl Config {
                     );
                 }
             }
+            if curve
+                .curve
+                .sensors
+                .first()
+                .is_some_and(|s| is_battery_sensor(s))
+            {
+                curve.curve.sensors.clear();
+                debug!("Curve sensor was Battery — using hottest non-battery sensor");
+            }
             curve.curve.points.truncate(MAX_CURVE_POINTS);
             curve.curve.sensors.truncate(8);
             for point in &mut curve.curve.points {
@@ -387,13 +396,11 @@ pub fn is_battery_sensor(name: &str) -> bool {
     name.eq_ignore_ascii_case("battery")
 }
 
-/// Temp driving fan curve: configured sensor or hottest non-battery fallback.
-///
-/// Deliberately prefers a real thermal sensor over Battery: battery
-/// temperature lags and can sit far below CPU temperature. Battery is only
-/// used when it is literally the only reading available, which beats leaving
-/// the fans at their last duty with no control input at all.
-pub fn curve_control_temp(temps: &BTreeMap<String, i32>, sensors: &[String]) -> i32 {
+/// Temp driving fan curve: configured non-Battery sensor or hottest non-Battery
+/// fallback. Returns `None` when only Battery readings are available, so the
+/// caller can hand fan control back to firmware instead of undercooling from a
+/// lagging battery temperature.
+pub fn curve_control_temp(temps: &BTreeMap<String, i32>, sensors: &[String]) -> Option<i32> {
     let non_battery = || {
         temps
             .iter()
@@ -402,17 +409,14 @@ pub fn curve_control_temp(temps: &BTreeMap<String, i32>, sensors: &[String]) -> 
             .max()
     };
     if sensors.is_empty() {
-        return non_battery()
-            .or_else(|| temps.values().copied().max())
-            .unwrap_or(0);
+        return non_battery();
     }
     sensors
         .iter()
+        .filter(|s| !is_battery_sensor(s))
         .filter_map(|s| temps.get(s).copied())
         .max()
         .or_else(non_battery)
-        .or_else(|| temps.values().copied().max())
-        .unwrap_or(0)
 }
 
 pub fn battery_health_pct(last_full_mah: u32, design_mah: u32) -> Option<u32> {
@@ -528,7 +532,7 @@ mod tests {
         temps.insert("F75303_CPU".into(), 55);
         temps.insert("Battery".into(), 90);
         temps.insert("PECI".into(), 48);
-        assert_eq!(curve_control_temp(&temps, &[]), 55);
+        assert_eq!(curve_control_temp(&temps, &[]), Some(55));
     }
 
     #[test]
@@ -536,7 +540,41 @@ mod tests {
         let mut temps = BTreeMap::new();
         temps.insert("F75303_CPU".into(), 55);
         temps.insert("PECI".into(), 70);
-        assert_eq!(curve_control_temp(&temps, &["PECI".into()]), 70);
+        assert_eq!(curve_control_temp(&temps, &["PECI".into()]), Some(70));
+    }
+
+    #[test]
+    fn validate_drops_battery_curve_sensor() {
+        let mut c = Config::default();
+        c.fan.curve = Some(GlobalCurveConfig {
+            curve: CurveConfig {
+                sensors: vec!["Battery".into()],
+                points: default_points(),
+                hysteresis_c: 2,
+                rate_limit_pct_per_step: 10,
+                rate_limit_down_pct_per_step: None,
+            },
+            poll_ms: 1000,
+        });
+        c.validate();
+        let sensors = &c.fan.curve.as_ref().unwrap().curve.sensors;
+        assert!(sensors.is_empty());
+    }
+
+    #[test]
+    fn curve_control_temp_battery_only_is_none() {
+        let mut temps = BTreeMap::new();
+        temps.insert("Battery".into(), 30);
+        assert_eq!(curve_control_temp(&temps, &[]), None);
+        assert_eq!(curve_control_temp(&temps, &["Battery".into()]), None);
+    }
+
+    #[test]
+    fn curve_control_temp_ignores_explicit_battery_selection() {
+        let mut temps = BTreeMap::new();
+        temps.insert("Battery".into(), 30);
+        temps.insert("F75303_CPU".into(), 65);
+        assert_eq!(curve_control_temp(&temps, &["Battery".into()]), Some(65));
     }
 
     #[test]

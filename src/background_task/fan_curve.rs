@@ -125,10 +125,16 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         }
         return Flow::Next;
     };
-    // Fail-safe: empty temps means EC read failed; hand back to firmware immediately.
-    // Previously waited 30s (CURVE_TEMP_FAILOVER_MS) holding last duty (could be 0%) → overheat.
-    if thermal.temps.is_empty() {
-        // The background loop already counted this empty read as a
+    // Fail-safe: no trustworthy temperature means the curve cannot safely drive
+    // the fans; hand back to firmware immediately.
+    let Some(control_temp) = crate::types::curve_control_temp(&thermal.temps, &ctx.curve_sensors)
+    else {
+        let reason = if thermal.temps.is_empty() {
+            "EC temps read failed"
+        } else {
+            "no non-battery temperature available"
+        };
+        // The background loop already counted an empty read as a
         // failure; counting here too would double-count one bad poll.
         // Throttle autofanctrl to once per second to avoid spamming EC
         if ctx.now_ms.saturating_sub(ctx.last_curve_failover_ms) >= CURVE_TEMP_FAILOVER_MS {
@@ -137,7 +143,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             }
             let ec_clone = Arc::clone(ctx.ec);
             match crate::ec_serial::exec(
-                "curve-empty-temps-handover",
+                "curve-invalid-temp-handover",
                 crate::util::EC_IO_TIMEOUT,
                 ec_clone,
                 move |ec| ec.autofanctrl(),
@@ -146,9 +152,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             {
                 Ok(Ok(())) => {
                     ctx.last_curve_failover_ms = ctx.now_ms;
-                    tracing::warn!(
-                        "Curve mode: EC temps read failed, handed fan control to firmware"
-                    );
+                    tracing::warn!("Curve mode: {}, handed fan control to firmware", reason);
                 }
                 Ok(Err(e)) => {
                     warn!("Curve fail-safe autofanctrl failed: {}", e);
@@ -170,8 +174,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             }
         }
         return Flow::Next;
-    }
-    let control_temp = crate::types::curve_control_temp(&thermal.temps, &ctx.curve_sensors);
+    };
     // Snapshot the points and drop the lock before any EC await below.
     let full_pts: Vec<[u32; 2]> = read_lock(&ctx.state.fan.curve_full_points).as_ref().clone();
     let mut next = ctx.curve_stepper.next(
@@ -331,4 +334,76 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         }
     }
     Flow::Done
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+    use crate::app::AppState;
+    use crate::background_task::{FanCtx, Flow};
+    use crate::cli::EcHw;
+    use crate::cli::ec_wrapper::ThermalData;
+    use crate::cli::ec_wrapper::tests::MockEc;
+    use crate::fan_control::CurveStepper;
+    use crate::types::FanControlMode;
+    use crate::util::with_write_lock;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn battery_only_readings_hand_back_to_firmware() {
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        state
+            .fan
+            .mode
+            .store(FanControlMode::Curve.to_u8() as u64, Ordering::Release);
+        state
+            .thermal
+            .last_success_ms
+            .store(60_000, Ordering::Release);
+        let mut temps = BTreeMap::new();
+        temps.insert("Battery".to_string(), 30);
+        with_write_lock(&state.thermal.data, |guard| {
+            *guard = Arc::new(Some(ThermalData {
+                temps: Arc::new(temps),
+                fans: smallvec::SmallVec::new(),
+            }));
+        });
+        let mock = Arc::new(MockEc::new());
+        let ec: Arc<dyn EcHw> = mock.clone();
+        let mut ramp = None;
+        let mut stepper = CurveStepper::new();
+        let mut ctx = FanCtx {
+            state: &state,
+            ec: &ec,
+            mode: FanControlMode::Curve,
+            now_ms: 60_000,
+            manual_duty: None,
+            curve_hysteresis: Some(2),
+            curve_rate_limit: Some(10),
+            curve_rate_limit_down: None,
+            curve_sensors: Vec::new(),
+            consecutive_ec_write_failures: 0,
+            last_duty_write_ms: 0,
+            last_curve_failover_ms: 0,
+            last_manual_duty: None,
+            manual_ramp_current: None,
+            manual_per_fan_ramp: &mut ramp,
+            curve_stepper: &mut stepper,
+            last_fan_mode: Some(FanControlMode::Curve),
+            last_unified_duty: None,
+            just_resumed: false,
+        };
+        assert!(matches!(run(&mut ctx).await, Flow::Next));
+        assert_eq!(*mock.ops.lock().unwrap(), vec!["autofanctrl".to_string()]);
+    }
 }
