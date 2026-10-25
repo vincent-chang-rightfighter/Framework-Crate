@@ -309,6 +309,26 @@ fn classify_readback(
     }
 }
 
+fn readback_time_clamp_mismatch(
+    rb_raw: u64,
+    pl1_enc: u32,
+    pl2_enc: u32,
+    params: &PowerLimitParams,
+) -> bool {
+    let (_, _, rb1_cl, rb1_y, rb1_z) = decode_power_limit(rb_raw, params.power_unit);
+    let (_, _, rb2_cl, rb2_y, rb2_z) = decode_power_limit(rb_raw >> 32, params.power_unit);
+    let exp1_y = (pl1_enc >> 17) & 0x1F;
+    let exp1_z = (pl1_enc >> 22) & 0x3;
+    let exp2_y = (pl2_enc >> 17) & 0x1F;
+    let exp2_z = (pl2_enc >> 22) & 0x3;
+    rb1_cl != params.pl1_clamped
+        || rb2_cl != params.pl2_clamped
+        || rb1_y != exp1_y
+        || rb1_z != exp1_z
+        || rb2_y != exp2_y
+        || rb2_z != exp2_z
+}
+
 /// A register that PL1/PL2 can be written to.
 ///
 /// MSR 0x610 and MCHBAR+0x59A0 differ only in these values, so the encoding,
@@ -522,6 +542,13 @@ fn write_power_limits(target: &LimitTarget<'_>, params: &PowerLimitParams) -> Re
             "{} write not reflected in read-back — register may be locked",
             target.label
         ));
+    }
+
+    if readback_time_clamp_mismatch(rb_out[0], pl1_enc, pl2_enc, params) {
+        debug!(
+            "{} time/clamp fields differ from the request; firmware may clamp the time window",
+            target.label
+        );
     }
 
     debug!(
@@ -743,6 +770,33 @@ mod tests {
             classify_readback(rb, pl1_enc, pl2_enc, &p),
             Readback::Matches
         );
+    }
+
+    #[test]
+    fn readback_time_clamp_check_catches_field_changes() {
+        let p = params(28.0, 35.0);
+        let (pl1_enc, pl2_enc) = encode_pair(&p);
+        assert!(!readback_time_clamp_mismatch(
+            pack_register(pl1_enc, pl2_enc),
+            pl1_enc,
+            pl2_enc,
+            &p
+        ));
+
+        let clamp_changed = pack_register(pl1_enc | (1 << 16), pl2_enc);
+        assert!(readback_time_clamp_mismatch(
+            clamp_changed,
+            pl1_enc,
+            pl2_enc,
+            &p
+        ));
+
+        let y = (pl1_enc >> 17) & 0x1F;
+        let z = (pl1_enc >> 22) & 0x3;
+        let time_changed =
+            encode_power_limit(p.pl1_watts, true, false, p.power_unit, y, (z + 1) & 0x3);
+        let rb = pack_register(time_changed, pl2_enc);
+        assert!(readback_time_clamp_mismatch(rb, pl1_enc, pl2_enc, &p));
     }
 
     #[test]
