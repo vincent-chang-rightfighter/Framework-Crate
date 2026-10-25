@@ -246,7 +246,6 @@ The file rotates once it grows past a size threshold, keeping `app.log.1` throug
 | `FRAMEWORK_CONTROL_CONFIG_DIR` | Overrides the config directory in debug/test builds. Must be absolute, with no `..` and no `\\?\` / `\\.\` prefix. Release builds ignore it |
 | `FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1` | Loads PawnIO module blobs whose hash is not pinned. Only after manual verification of a newer upstream release. Debug builds only; release builds always fail closed |
 | `FRAMEWORK_ALLOW_UNSIGNED_PAWNIO=1` | Loads the PawnIO DLL despite an Authenticode failure. For self-signed test DLLs. Debug builds only; release builds always fail closed |
-| `FRAMEWORK_PIN_CORE=1` | Pins background work to the first enumerated core. Off by default; the OS scheduler is better than the heuristic |
 
 ## Known Limitations
 

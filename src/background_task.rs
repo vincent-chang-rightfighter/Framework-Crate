@@ -115,52 +115,6 @@ fn reset_ec_after_failures(state: &AppState, failures: u32) {
         .store(true, Ordering::Release);
 }
 
-pub fn pin_to_slowest_core() {
-    // Pinning is disabled by default; OS scheduler is better than heuristic. Opt-in via FRAMEWORK_PIN_CORE=1
-    if std::env::var_os("FRAMEWORK_PIN_CORE").is_none() {
-        return;
-    }
-    // core_affinity order is OS enumeration, not perf order
-    if let Some(cores) = core_affinity::get_core_ids()
-        && !cores.is_empty()
-    {
-        // Prefer first core as E-core heuristic; previously used `last()` which is arbitrary.
-        let target = cores.first().copied().unwrap_or(cores[0]);
-        if core_affinity::set_for_current(target) {
-            tracing::debug!(
-                "[AFFINITY] Pinned to core (id={}) heuristic (cores={})",
-                target.id,
-                cores.len()
-            );
-            #[cfg(debug_assertions)]
-            verify_affinity(target.id);
-        } else {
-            tracing::debug!("[AFFINITY] Failed to pin to core {}", target.id);
-        }
-    }
-}
-
-#[cfg(debug_assertions)]
-fn verify_affinity(expected_id: usize) {
-    {
-        unsafe extern "system" {
-            fn GetCurrentProcessorNumber() -> u32;
-        }
-        let cur = unsafe { GetCurrentProcessorNumber() } as usize;
-        let ok = cur == expected_id;
-        tracing::debug!(
-            "[AFFINITY] Verify: cur={}, expected={} {}",
-            cur,
-            expected_id,
-            if ok {
-                "OK"
-            } else {
-                "mismatch (OS scheduled elsewhere)"
-            }
-        );
-    }
-}
-
 fn push_pd_ports_history(
     pd_ports: &Arc<RwLock<Arc<smallvec::SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>>>,
     history: &Arc<RwLock<Arc<crate::sub_state::PdPortsHistory>>>,
@@ -1278,11 +1232,6 @@ pub fn spawn(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pin_to_slowest_core_does_not_panic() {
-        pin_to_slowest_core();
-    }
 
     #[test]
     fn first_battery_sample_never_triggers_reset() {

@@ -30,7 +30,7 @@ pub use util::{read_lock, with_write_lock};
 
 include!(concat!(env!("OUT_DIR"), "/icon_rgba.rs"));
 
-/// Tokio executor with 2 workers for tray app; EC calls use blocking pool, workers cover async loop and iced tasks pinned to LP-E core.
+/// Tokio executor with 2 workers for the tray app; EC calls use the blocking pool.
 struct SmallTokioExecutor {
     rt: tokio::runtime::Runtime,
 }

@@ -5,7 +5,6 @@ use tokio::sync::watch;
 use tracing::warn;
 
 use crate::app::AppState;
-use crate::background_task::pin_to_slowest_core;
 use crate::types::{Config, SettingU8};
 use crate::util::read_lock;
 
@@ -73,8 +72,6 @@ async fn apply_battery_settings(cfg: &Config, state: &AppState) -> bool {
 
 pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState) {
     tokio::spawn(async move {
-        // NOTE: Pins calling thread; acceptable for lightweight long-lived task.
-        pin_to_slowest_core();
         let mut last_battery: Option<BatteryKey>;
 
         // Apply persisted charge limit once EC is ready; retry until available or shutdown.
