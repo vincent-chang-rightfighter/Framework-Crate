@@ -154,7 +154,14 @@ pub(super) fn load_persisted_bios_defaults() -> PersistedBios {
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         // Missing file: first run.
-        Err(_) => return PersistedBios::Missing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return PersistedBios::Missing,
+        Err(e) => {
+            warn!(
+                "bios_defaults.toml exists but cannot be read ({}); refusing to overwrite",
+                e
+            );
+            return PersistedBios::Unusable;
+        }
     };
     match toml::from_str::<BiosDefaults>(&content) {
         Ok(parsed) => {
@@ -282,6 +289,28 @@ mod tests {
         );
         // It must still be there: the corrupt copy is a backup, not a move.
         assert!(path.exists(), "the corrupt file must not be removed");
+
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", v) };
+        } else {
+            unsafe { std::env::remove_var("FRAMEWORK_CONTROL_CONFIG_DIR") };
+        }
+    }
+
+    #[test]
+    fn unreadable_file_is_not_treated_as_missing() {
+        let _env_guard = crate::config::CONFIG_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR");
+        unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", dir.path()) };
+
+        let path = dir.path().join("bios_defaults.toml");
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            matches!(load_persisted_bios_defaults(), PersistedBios::Unusable),
+            "an existing but unreadable path must not be captured over"
+        );
+        assert!(path.is_dir(), "the unreadable path must be left in place");
 
         if let Some(v) = prev {
             unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", v) };
