@@ -26,12 +26,26 @@ fn unique_tmp_extension() -> String {
 pub(crate) static CONFIG_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn config_path() -> Result<PathBuf, String> {
-    let config_dir = if let Some(os) = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR") {
-        let p = PathBuf::from(&os);
-        validate_config_dir(&p)?;
-        p
-    } else {
-        default_config_dir()
+    let config_dir = {
+        #[cfg(any(debug_assertions, test))]
+        {
+            if let Some(os) = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR") {
+                let p = PathBuf::from(&os);
+                validate_config_dir(&p)?;
+                p
+            } else {
+                default_config_dir()
+            }
+        }
+        #[cfg(not(any(debug_assertions, test)))]
+        {
+            if std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR").is_some() {
+                tracing::warn!(
+                    "FRAMEWORK_CONTROL_CONFIG_DIR is ignored in release builds; using the default config directory"
+                );
+            }
+            default_config_dir()
+        }
     };
     // create_dir_all is idempotent and cheap; avoid caching to prevent stale test dir reuse
     std::fs::create_dir_all(&config_dir).map_err(|e| {
@@ -69,6 +83,7 @@ pub fn config_path() -> Result<PathBuf, String> {
     Ok(canonical.join("config.toml"))
 }
 
+#[cfg(any(debug_assertions, test))]
 fn validate_config_dir(path: &std::path::Path) -> Result<(), String> {
     use std::path::Component;
     let s = path.to_string_lossy();
