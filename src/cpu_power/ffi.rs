@@ -135,56 +135,100 @@ fn classify_winget_output(output: &std::process::Output) -> WingetOutcome {
     WingetOutcome::Failed(super::modules::proc_failure_detail(output))
 }
 
-/// Resolves winget to an absolute path when possible. winget is a
-/// store-managed execution alias (not a System32 binary), so PATH lookup
-/// in an elevated process could pick a user-writable shim. Prefer the
-/// per-user WindowsApps alias and System32 `where.exe` resolution, and
-/// fall back to bare PATH only with a warning.
-fn resolve_winget() -> std::path::PathBuf {
-    // Prefer the OS-known LocalAppData (dirs uses SHGetKnownFolderPath,
-    // not env) so a spoofed LOCALAPPDATA cannot redirect execution.
-    // Fall back to env only if dirs is unavailable, and only accept a
-    // WindowsApps alias path.
-    let local_opt = dirs::data_local_dir()
-        .or_else(|| std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from));
-    if let Some(local) = local_opt {
-        let cand = local.join(r"Microsoft\WindowsApps\winget.exe");
-        // Only accept the expected alias location, not an arbitrary env path.
-        if cand
-            .to_string_lossy()
-            .contains(r"Microsoft\WindowsApps\winget.exe")
-            && cand.exists()
-        {
-            return cand;
-        }
-    }
-    // `where.exe` itself is pinned to System32, so the resolution does not
-    // depend on attacker-controlled PATH entries.
-    if let Ok(out) = std::process::Command::new(crate::util::system32_exe("where.exe"))
-        .arg("winget")
+fn winget_package_version(dir_name: &str) -> Option<Vec<u64>> {
+    let version = dir_name
+        .strip_prefix("Microsoft.DesktopAppInstaller_")?
+        .split('_')
+        .next()?;
+    let parts: Vec<u64> = version
+        .split('.')
+        .map(|p| p.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (!parts.is_empty()).then_some(parts)
+}
+
+fn trusted_winget_path(path: &std::path::Path) -> bool {
+    let Ok(canon) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    let Some(pf) = known_program_files() else {
+        return false;
+    };
+    let windows_apps = pf.join("WindowsApps");
+    let prefix = std::fs::canonicalize(&windows_apps).unwrap_or(windows_apps);
+    let canon_str = canon.to_string_lossy().replace('/', "\\").to_lowercase();
+    let prefix_str = prefix.to_string_lossy().replace('/', "\\").to_lowercase();
+    canon_str.starts_with(&prefix_str)
+        && canon_str
+            .rsplit('\\')
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("winget.exe"))
+}
+
+fn winget_package_from_appx() -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new(crate::util::powershell_exe())
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Select-Object -First 1).InstallLocation",
+        ])
         .creation_flags(0x08000000)
         .output()
-        && out.status.success()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let location = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if location.is_empty() {
+        return None;
+    }
+    let candidate = std::path::Path::new(&location).join("winget.exe");
+    candidate.is_file().then_some(candidate)
+}
+
+/// Resolves winget to a trusted absolute path. PATH lookup in an elevated
+/// process can pick a user-writable shim, so only Program Files\WindowsApps
+/// packages are accepted; the per-user alias directory is user-writable.
+fn resolve_winget() -> Result<std::path::PathBuf, String> {
+    let mut candidates: Vec<(Vec<u64>, std::path::PathBuf)> = Vec::new();
+    if let Some(pf) = known_program_files()
+        && let Ok(entries) = std::fs::read_dir(pf.join("WindowsApps"))
     {
-        let first = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if !first.is_empty() && std::path::Path::new(&first).exists() {
-            return std::path::PathBuf::from(first);
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(version) = winget_package_version(&name.to_string_lossy()) else {
+                continue;
+            };
+            let candidate = entry.path().join("winget.exe");
+            if candidate.is_file() {
+                candidates.push((version, candidate));
+            }
         }
     }
-    tracing::warn!("winget not found at absolute path, falling back to PATH lookup");
-    std::path::PathBuf::from("winget")
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, candidate) in candidates {
+        if trusted_winget_path(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    if let Some(candidate) = winget_package_from_appx()
+        && trusted_winget_path(&candidate)
+    {
+        return Ok(candidate);
+    }
+    Err(
+        "winget not found in a trusted location; install App Installer from the Microsoft Store, or download PawnIO manually from https://github.com/namazso/PawnIO/releases"
+            .to_string(),
+    )
 }
 
 /// Installs PawnIO via winget.
 pub fn install_pawnio() -> Result<(), String> {
     use std::process::Command;
     tracing::info!("Installing PawnIO via winget...");
-    let output = Command::new(resolve_winget())
+    let winget = resolve_winget()?;
+    let output = Command::new(winget)
         .args([
             "install",
             "-e",
@@ -323,7 +367,8 @@ pub fn invalidate_pawnio_version() {
 pub fn update_pawnio() -> Result<(), String> {
     use std::process::Command;
     tracing::info!("Updating PawnIO via winget...");
-    let output = Command::new(resolve_winget())
+    let winget = resolve_winget()?;
+    let output = Command::new(winget)
         .args([
             "upgrade",
             "-e",
@@ -690,6 +735,22 @@ pub(super) fn exec_ioctl(
 mod tests {
     use super::*;
     use std::os::windows::process::ExitStatusExt;
+
+    #[test]
+    fn winget_package_version_parses_numeric_components() {
+        assert_eq!(
+            winget_package_version("Microsoft.DesktopAppInstaller_1.27.430.0_x64__8wekyb3d8bbwe"),
+            Some(vec![1, 27, 430, 0])
+        );
+        assert_eq!(
+            winget_package_version("Microsoft.DesktopAppInstaller"),
+            None
+        );
+        assert_eq!(
+            winget_package_version("Microsoft.DesktopAppInstaller_x.y_z"),
+            None
+        );
+    }
 
     #[test]
     fn invalidate_authenticode_clears_the_cache() {
