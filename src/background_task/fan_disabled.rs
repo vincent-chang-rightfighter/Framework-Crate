@@ -49,6 +49,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                     } else {
                         ctx.consecutive_ec_write_failures = 0;
                         ctx.last_duty_write_ms = ctx.now_ms;
+                        ctx.state.fan.last_applied_duty.store(0, Ordering::Release);
                     }
                 }
                 Err(join_err) => {
@@ -74,4 +75,64 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         }
     }
     Flow::Done
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+    use crate::app::AppState;
+    use crate::background_task::{FanCtx, Flow};
+    use crate::cli::EcHw;
+    use crate::cli::ec_wrapper::tests::MockEc;
+    use crate::fan_control::CurveStepper;
+    use crate::types::FanControlMode;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn firmware_handover_clears_the_last_manual_duty() {
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        state
+            .fan
+            .mode
+            .store(FanControlMode::Disabled.to_u8() as u64, Ordering::Release);
+        state.fan.last_applied_duty.store(42, Ordering::Release);
+        let mock = Arc::new(MockEc::new());
+        let ec: Arc<dyn EcHw> = mock.clone();
+        let mut ramp = None;
+        let mut stepper = CurveStepper::new();
+        let mut ctx = FanCtx {
+            state: &state,
+            ec: &ec,
+            mode: FanControlMode::Disabled,
+            now_ms: 1_000,
+            manual_duty: None,
+            curve_hysteresis: None,
+            curve_rate_limit: None,
+            curve_rate_limit_down: None,
+            curve_sensors: Vec::new(),
+            consecutive_ec_write_failures: 0,
+            last_duty_write_ms: 0,
+            last_curve_failover_ms: 0,
+            last_manual_duty: Some(42),
+            manual_ramp_current: Some(42),
+            manual_per_fan_ramp: &mut ramp,
+            curve_stepper: &mut stepper,
+            last_fan_mode: Some(FanControlMode::Manual),
+            last_unified_duty: None,
+            just_resumed: false,
+        };
+        assert!(matches!(run(&mut ctx).await, Flow::Done));
+        assert_eq!(state.fan.last_applied_duty.load(Ordering::Acquire), 0);
+        assert_eq!(*mock.ops.lock().unwrap(), vec!["autofanctrl".to_string()]);
+    }
 }
