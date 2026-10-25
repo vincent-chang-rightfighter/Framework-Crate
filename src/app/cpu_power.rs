@@ -15,6 +15,18 @@ fn sync_restart_params(
     if write_ok { Some(applied) } else { previous }
 }
 
+fn sync_restart_after_reset(
+    was_sync: bool,
+    reset_ok: bool,
+    previous: Option<crate::cpu_power::PowerLimitParams>,
+) -> Option<crate::cpu_power::PowerLimitParams> {
+    if was_sync && !reset_ok {
+        previous
+    } else {
+        None
+    }
+}
+
 impl App {
     pub(crate) fn handle_cpu_power_message(&mut self, message: &Message) -> Option<Task<Message>> {
         match message {
@@ -439,6 +451,8 @@ impl App {
                 return Task::none();
             }
         };
+        let was_sync = self.state.cpu_power.sync_enabled.load(Ordering::Acquire);
+        let previous_sync = self.state.cpu_power.desired_sync_params();
         let cpu_power = self.state.cpu_power.clone();
         Task::perform(
             async move {
@@ -447,7 +461,15 @@ impl App {
                     crate::util::PAWNIO_IO_TIMEOUT,
                     move || {
                         cpu_power.stop_sync();
-                        crate::cpu_power::write_bios_defaults(&bios).map_err(|e| e.to_string())
+                        let result =
+                            crate::cpu_power::write_bios_defaults(&bios).map_err(|e| e.to_string());
+                        if let Some(params) =
+                            sync_restart_after_reset(was_sync, result.is_ok(), previous_sync)
+                            && let Err(e) = cpu_power.start_sync(params)
+                        {
+                            warn!("Failed to restart CPU power sync after reset: {}", e);
+                        }
+                        result
                     },
                 )
                 .await;
@@ -606,5 +628,51 @@ mod tests {
             Some(params(28.0))
         );
         assert_eq!(sync_restart_params(true, false, params(15.0), None), None);
+    }
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::sync_restart_after_reset;
+    use crate::cpu_power::PowerLimitParams;
+
+    fn params(pl1: f64) -> PowerLimitParams {
+        PowerLimitParams {
+            pl1_watts: pl1,
+            pl1_enabled: true,
+            pl1_clamped: false,
+            pl1_time_s: 28.0,
+            pl2_watts: 35.0,
+            pl2_enabled: true,
+            pl2_clamped: false,
+            pl2_time_s: 28.0,
+            power_unit: 0.125,
+            time_unit: 0.0009765625,
+        }
+    }
+
+    #[test]
+    fn successful_reset_leaves_sync_stopped() {
+        assert_eq!(
+            sync_restart_after_reset(true, true, Some(params(28.0))),
+            None
+        );
+    }
+
+    #[test]
+    fn failed_reset_restores_previous_sync() {
+        assert_eq!(
+            sync_restart_after_reset(true, false, Some(params(28.0))),
+            Some(params(28.0))
+        );
+        assert_eq!(sync_restart_after_reset(true, false, None), None);
+    }
+
+    #[test]
+    fn reset_does_not_start_sync_when_it_was_disabled() {
+        assert_eq!(
+            sync_restart_after_reset(false, false, Some(params(28.0))),
+            None
+        );
     }
 }
