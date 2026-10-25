@@ -1411,14 +1411,29 @@ fn write_task_xml(xml: &str) -> Result<String, String> {
 /// The release profile uses `panic = "abort"`, so a process killed mid-write
 /// (or by Task Scheduler) never reaches the removal and the file would
 /// otherwise accumulate in the temp directory forever.
+fn task_xml_is_stale(now: std::time::SystemTime, modified: std::time::SystemTime) -> bool {
+    now.duration_since(modified)
+        .map(|age| age > std::time::Duration::from_secs(3600))
+        .unwrap_or(false)
+}
+
 fn cleanup_task_xml_in(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    let now = std::time::SystemTime::now();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name.starts_with(TASK_XML_PREFIX) && name.ends_with(".xml") {
+        if !name.starts_with(TASK_XML_PREFIX) || !name.ends_with(".xml") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|modified| task_xml_is_stale(now, modified))
+            .unwrap_or(false);
+        if stale {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -2088,6 +2103,23 @@ mod tests {
         unsafe {
             RegDeleteKeyW(HKEY_CURRENT_USER, sub.as_ptr());
         }
+    }
+
+    #[test]
+    fn task_xml_cleanup_only_removes_old_files() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(7200);
+        assert!(super::task_xml_is_stale(
+            now,
+            now - std::time::Duration::from_secs(3700)
+        ));
+        assert!(!super::task_xml_is_stale(
+            now,
+            now - std::time::Duration::from_secs(60)
+        ));
+        assert!(!super::task_xml_is_stale(
+            now,
+            now + std::time::Duration::from_secs(60)
+        ));
     }
 
     #[test]
