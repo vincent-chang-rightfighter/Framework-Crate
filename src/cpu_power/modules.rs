@@ -1,10 +1,12 @@
 //! PawnIO Modules acquisition: download, hash verification, safe ZIP extraction,
 //! the local version marker, and the blob caches used by the limit paths.
 
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::sync::Arc;
 
 use tracing::{debug, warn};
+use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 const MODULES_DIR_NAME: &str = "modules";
 /// Marker file recording which upstream tag the local bins came from.
@@ -30,6 +32,26 @@ const MAX_MODULES_ZIP_BYTES: u64 = 32 * 1024 * 1024;
 /// Upper bound for total extracted staging bytes and member count.
 const MAX_STAGING_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ARCHIVE_MEMBERS: usize = 1024;
+/// Keep room for logs and normal writes after staging is filled to the cap.
+const STAGING_FREE_SPACE_MARGIN: u64 = 16 * 1024 * 1024;
+
+fn has_staging_space(free: Option<u64>) -> bool {
+    free.is_none_or(|bytes| bytes >= MAX_STAGING_BYTES.saturating_add(STAGING_FREE_SPACE_MARGIN))
+}
+
+fn free_space_bytes(dir: &std::path::Path) -> Option<u64> {
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut free = 0u64;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(free)
+}
 
 /// Reads the locally installed modules tag recorded at download time.
 /// Length-capped like the update-check tag gate.
@@ -567,7 +589,7 @@ fn run_extraction_with_cap(
                 "archive extraction timed out".to_string(),
             ));
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -611,12 +633,19 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
     if let Some(line) = tar_listing_has_unsafe_member(&meta_out.stdout) {
         return Err(format!("archive contains link or special member: {}", line));
     }
-    if let Some(total) = parse_tar_declared_bytes(&meta_out.stdout)
-        && total > MAX_STAGING_BYTES
-    {
+    let Some(total) = parse_tar_declared_bytes(&meta_out.stdout) else {
+        return Err("failed to determine archive size from tar listing".to_string());
+    };
+    if total > MAX_STAGING_BYTES {
         return Err(format!(
             "archive declares {} bytes, exceeding the {} byte limit",
             total, MAX_STAGING_BYTES
+        ));
+    }
+    if !has_staging_space(free_space_bytes(dir)) {
+        return Err(format!(
+            "not enough free disk space for up to {} bytes of staging",
+            MAX_STAGING_BYTES
         ));
     }
     // 2. Extract into a fresh staging dir (never directly into modules dir).
@@ -1013,6 +1042,18 @@ mod tests {
             true
         ));
         assert!(!fallback_overwrite_allowed(Some("0.2.12"), true));
+    }
+
+    #[test]
+    fn staging_space_requires_cap_plus_margin() {
+        assert!(has_staging_space(None));
+        assert!(has_staging_space(Some(
+            MAX_STAGING_BYTES + STAGING_FREE_SPACE_MARGIN
+        )));
+        assert!(!has_staging_space(Some(
+            MAX_STAGING_BYTES + STAGING_FREE_SPACE_MARGIN - 1
+        )));
+        assert!(!has_staging_space(Some(0)));
     }
 
     #[test]
