@@ -4,7 +4,6 @@ use crate::types::FanControlMode;
 use crate::util::read_lock;
 use iced::Task;
 use std::sync::atomic::Ordering;
-use tracing::{debug, warn};
 
 impl App {
     pub(crate) fn handle_tray_message(&mut self, message: &Message) -> Option<Task<Message>> {
@@ -147,54 +146,19 @@ impl App {
                             self.pl_custom_applied.store(false, Ordering::Release);
                         }
                         let cpu_power = self.state.cpu_power.clone();
-                        let bios = cpu_power.bios_defaults();
-                        let custom_applied = self.pl_custom_applied.clone();
                         let after = {
                             let cpu_power = cpu_power.clone();
                             move || {
-                                if let Some(params) = desired {
+                                if let Some(params) = desired
+                                    && was_sync
+                                {
                                     // Resume sync with user-desired params, not post-resume readback.
-                                    if was_sync {
-                                        let _ = cpu_power.start_sync(params);
-                                        return;
-                                    }
+                                    let _ = cpu_power.start_sync(params);
+                                    return;
                                 }
-                                // Fallback: no desired sync, check current flag.
                                 if cpu_power.sync_enabled.load(Ordering::Acquire) {
                                     let info = cpu_power.snapshot();
                                     let _ = cpu_power.start_sync(info.msr_limit_params());
-                                } else if custom_applied.load(Ordering::Acquire) {
-                                    cpu_power.stop_sync();
-                                    if let Some(bios) = bios {
-                                        let Some(ac_now) = crate::cpu_power::read_ac_present()
-                                        else {
-                                            debug!(
-                                                "Resume: AC state unknown; skipping BIOS defaults restore"
-                                            );
-                                            return;
-                                        };
-                                        let source_matches = bios.captured_on_ac == ac_now;
-                                        if !source_matches {
-                                            debug!(
-                                                "Resume: BIOS snapshot captured on {} but now on {}; skipping restore",
-                                                if bios.captured_on_ac { "AC" } else { "battery" },
-                                                if ac_now { "AC" } else { "battery" }
-                                            );
-                                        } else {
-                                            match crate::cpu_power::write_bios_defaults(&bios) {
-                                                Ok(crate::cpu_power::BiosRestore::Full) => {}
-                                                Ok(crate::cpu_power::BiosRestore::Partial(e)) => {
-                                                    warn!(
-                                                        "Resume restore partial (MSR done): {}",
-                                                        e
-                                                    )
-                                                }
-                                                Err(e) => {
-                                                    warn!("Resume write failed: {}", e)
-                                                }
-                                            }
-                                        }
-                                    }
                                 }
                             }
                         };

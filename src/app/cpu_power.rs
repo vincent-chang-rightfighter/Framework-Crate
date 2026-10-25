@@ -377,6 +377,7 @@ impl App {
                 match result {
                     Ok(crate::cpu_power::BiosRestore::Full) => {
                         self.cpu_power_error = None;
+                        self.pl_custom_applied.store(false, Ordering::Release);
                         self.state
                             .lifecycle
                             .pl_reset_pending
@@ -386,6 +387,7 @@ impl App {
                         warn!("CPU power reset partial: {}", e);
                         self.cpu_power_error =
                             Some(format!("MSR reset done; MMIO mirror may differ: {}", e));
+                        self.pl_custom_applied.store(false, Ordering::Release);
                         self.state
                             .lifecycle
                             .pl_reset_pending
@@ -426,7 +428,6 @@ impl App {
         if !self.cpu_power_supported() {
             return Task::none();
         }
-        self.pl_custom_applied.store(false, Ordering::Release);
         self.cpu_power_error = None;
         let bios = match self.state.cpu_power.bios_defaults() {
             Some(b) => b,
