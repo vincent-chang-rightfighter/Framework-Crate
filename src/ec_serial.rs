@@ -294,6 +294,12 @@ where
 }
 
 #[cfg(test)]
+pub(crate) fn global_dispatch_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli::ec_wrapper::tests::MockEc;

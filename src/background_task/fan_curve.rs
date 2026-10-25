@@ -353,6 +353,7 @@ mod tests {
 
     #[tokio::test]
     async fn battery_only_readings_hand_back_to_firmware() {
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
         let state = AppState {
             system: Default::default(),
             fan: Default::default(),

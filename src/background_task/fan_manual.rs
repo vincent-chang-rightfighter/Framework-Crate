@@ -324,6 +324,7 @@ mod tests {
 
     #[tokio::test]
     async fn unified_toggle_forces_a_fan_write() {
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
         let state = AppState {
             system: Default::default(),
             fan: Default::default(),
