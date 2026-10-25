@@ -211,6 +211,7 @@ pub fn spawn_message_pump(
     command_rx: mpsc::Receiver<TrayCommand>,
     icon_ready_tx: mpsc::SyncSender<bool>,
     thread_ready_tx: mpsc::SyncSender<()>,
+    shutdown_ack_tx: mpsc::SyncSender<()>,
     app_hwnd: isize,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -225,6 +226,7 @@ pub fn spawn_message_pump(
         })) {
             tracing::error!("Tray message pump panicked: {:?}", e);
         }
+        let _ = shutdown_ack_tx.try_send(());
     })
 }
 

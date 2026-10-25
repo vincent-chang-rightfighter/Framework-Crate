@@ -27,6 +27,7 @@ pub struct TrayManager {
     event_rx: Option<mpsc::Receiver<TrayEvent>>,
     icon_ready_rx: Option<mpsc::Receiver<bool>>,
     thread_ready_rx: Option<mpsc::Receiver<()>>,
+    shutdown_ack_rx: Option<mpsc::Receiver<()>>,
     initialized: bool,
     thread_ready: bool,
     icon_requested: bool,
@@ -61,6 +62,7 @@ impl TrayManager {
             event_rx: None,
             icon_ready_rx: None,
             thread_ready_rx: None,
+            shutdown_ack_rx: None,
             initialized: false,
             thread_ready: false,
             icon_requested: false,
@@ -96,13 +98,22 @@ impl TrayManager {
         let (command_tx, command_rx) = mpsc::channel();
         let (icon_ready_tx, icon_ready_rx) = mpsc::sync_channel(1);
         let (thread_ready_tx, thread_ready_rx) = mpsc::sync_channel(1);
+        let (shutdown_ack_tx, shutdown_ack_rx) = mpsc::sync_channel(1);
 
-        let handle = spawn_message_pump(event_tx, command_rx, icon_ready_tx, thread_ready_tx, hwnd);
+        let handle = spawn_message_pump(
+            event_tx,
+            command_rx,
+            icon_ready_tx,
+            thread_ready_tx,
+            shutdown_ack_tx,
+            hwnd,
+        );
 
         self.command_tx = Some(command_tx);
         self.event_rx = Some(event_rx);
         self.icon_ready_rx = Some(icon_ready_rx);
         self.thread_ready_rx = Some(thread_ready_rx);
+        self.shutdown_ack_rx = Some(shutdown_ack_rx);
         self.thread_handle = Some(handle);
         self.initialized = true;
         self.thread_ready = false;
@@ -193,24 +204,35 @@ impl TrayManager {
         crate::system_info::hide_window_to_tray(self.hwnd);
     }
 
-    /// Requests tray thread shutdown without blocking; thread exits with process.
+    /// Requests tray shutdown and waits briefly for cleanup before detaching.
     pub fn shutdown(&mut self) {
-        if !self.initialized {
+        if !self.initialized && self.thread_handle.is_none() {
             return;
         }
         if let Some(tx) = self.command_tx.take() {
             let _ = tx.send(TrayCommand::Shutdown);
         }
         notify_tray_thread();
+        if let Some(rx) = self.shutdown_ack_rx.take()
+            && rx.recv_timeout(std::time::Duration::from_secs(1)).is_err()
+        {
+            tracing::warn!("Tray pump did not acknowledge shutdown within 1s");
+        }
+        if let Some(handle) = self.thread_handle.take() {
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                tracing::warn!("Tray pump still running after shutdown; detaching");
+            }
+        }
         self.event_rx = None;
         self.icon_ready_rx = None;
         self.thread_ready_rx = None;
-        self.thread_handle = None;
         self.pending_reinit_hwnd = None;
         self.initialized = false;
         self.thread_ready = false;
         self.icon_requested = false;
-        tracing::info!("Tray shutdown requested (thread detached)");
+        tracing::info!("Tray shutdown complete");
     }
 
     pub fn receive_event(&self) -> Option<TrayEvent> {
@@ -241,6 +263,7 @@ impl TrayManager {
         self.event_rx = None;
         self.icon_ready_rx = None;
         self.thread_ready_rx = None;
+        self.shutdown_ack_rx = None;
         // Keep thread_handle to allow poll_reinit/is_alive to join; will be cleared on next init or poll
         if self.thread_handle.as_ref().is_some_and(|h| h.is_finished()) {
             self.thread_handle = None;
@@ -281,6 +304,7 @@ impl TrayManager {
         self.event_rx = None;
         self.icon_ready_rx = None;
         self.thread_ready_rx = None;
+        self.shutdown_ack_rx = None;
         self.command_tx = None;
         self.initialized = false;
         self.thread_ready = false;
