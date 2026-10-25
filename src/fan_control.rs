@@ -113,8 +113,8 @@ pub fn calculate_duty_from_curve(temp: i32, full_points: &[[u32; 2]]) -> u32 {
     let temp = temp as f64;
     for w in full_points.windows(2) {
         // windows(2) always yields 2-element slices; index directly so a
-        // logic error degrades to a skipped segment instead of aborting
-        // the process (release uses panic=abort, which would freeze fans).
+        // logic error degrades to a skipped segment instead of panicking
+        // in the fan control path.
         if w.len() != 2 {
             continue;
         }

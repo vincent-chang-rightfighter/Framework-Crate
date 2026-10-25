@@ -50,7 +50,6 @@ pub(crate) fn charge_limit_display(limit: Option<crate::types::SettingU8>) -> (b
 
 pub(crate) fn view_battery_info(
     battery: &crate::cli::ec_wrapper::BatteryData,
-    charging: bool,
 ) -> Element<'_, Message> {
     let mut rows = column![].spacing(4);
 
@@ -94,7 +93,11 @@ pub(crate) fn view_battery_info(
         ]);
     }
     if let Some(v) = battery.present_rate_ma {
-        let prefix = if charging { "" } else { "-" };
+        let prefix = if battery.discharging == Some(true) {
+            "-"
+        } else {
+            ""
+        };
         rows = rows.push(row![
             text("Current:").size(FONT_BODY),
             space::horizontal(),
@@ -206,7 +209,7 @@ pub(crate) fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
             charge_limit_enabled,
             charge_limit_value,
         ));
-        content = content.push(view_battery_info(&battery.power_info, charging));
+        content = content.push(view_battery_info(&battery.power_info));
 
         if let Some(verbose) =
             view_battery_verbose(pal, &battery.power_info, app.show_battery_details)

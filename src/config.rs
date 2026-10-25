@@ -597,6 +597,7 @@ fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
          # poll_ms = 200..2000             (sensor read interval)\n\
          # ui_refresh_ms = 50..1000        (UI refresh interval)\n\
          # selected_sensors = [\"Sensor Name\", ...]\n\
+         # chart_window_seconds = 15 | 30 | 60  (temperature chart window)\n\
          #\n\
          # [battery]\n\
          # [battery.charge_limit_max_pct]\n\

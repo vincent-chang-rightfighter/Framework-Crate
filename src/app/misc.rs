@@ -50,6 +50,10 @@ impl App {
                     with_write_lock(&self.state.thermal.history, |hist| {
                         Arc::make_mut(hist).set_window(*secs);
                     });
+                    self.mutate_config(|cfg| {
+                        cfg.telemetry.chart_window_seconds = *secs;
+                    });
+                    self.save_config();
                     self.mark_dirty();
                 }
                 Some(Task::none())

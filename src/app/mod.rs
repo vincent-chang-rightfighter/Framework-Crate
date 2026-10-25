@@ -354,6 +354,10 @@ impl App {
             },
         };
 
+        with_write_lock(&state.thermal.history, |h| {
+            Arc::make_mut(h).set_window(loaded_config.telemetry.chart_window_seconds);
+        });
+
         let cpu = system_info::cpu_name();
         let mem = system_info::total_memory_gb();
         let os = system_info::os_version();
@@ -369,7 +373,7 @@ impl App {
             cli_present: false,
             startup_error: None,
             show_sensor_settings: false,
-            chart_window_seconds: crate::temp_chart::HISTORY_SECONDS,
+            chart_window_seconds: loaded_config.telemetry.chart_window_seconds,
             show_curve_settings: false,
             show_cpu_power_settings: false,
             show_battery_details: false,

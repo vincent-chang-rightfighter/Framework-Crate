@@ -56,6 +56,10 @@ impl Config {
             .telemetry
             .ui_refresh_ms
             .clamp(UI_REFRESH_MS_MIN, UI_REFRESH_MS_MAX);
+        if !crate::temp_chart::HISTORY_WINDOW_OPTIONS.contains(&self.telemetry.chart_window_seconds)
+        {
+            self.telemetry.chart_window_seconds = default_chart_window_seconds();
+        }
 
         if let Some(ref mut manual) = self.fan.manual {
             manual.duty_pct = manual.duty_pct.clamp(DUTY_PCT_MIN, DUTY_PCT_MAX);
@@ -353,6 +357,10 @@ fn default_telemetry_ui_ms() -> u64 {
     500
 }
 
+fn default_chart_window_seconds() -> i64 {
+    crate::temp_chart::HISTORY_SECONDS
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TelemetryConfig {
     #[serde(default = "default_telemetry_poll_ms")]
@@ -361,6 +369,8 @@ pub struct TelemetryConfig {
     pub ui_refresh_ms: u64,
     #[serde(default)]
     pub selected_sensors: Vec<String>,
+    #[serde(default = "default_chart_window_seconds")]
+    pub chart_window_seconds: i64,
 }
 
 impl Default for TelemetryConfig {
@@ -369,6 +379,7 @@ impl Default for TelemetryConfig {
             poll_ms: 500,
             ui_refresh_ms: 500,
             selected_sensors: Vec::new(),
+            chart_window_seconds: default_chart_window_seconds(),
         }
     }
 }
@@ -508,6 +519,25 @@ mod tests {
         c.telemetry.ui_refresh_ms = 500;
         c.validate();
         assert_eq!(c.telemetry.ui_refresh_ms, 500);
+    }
+
+    #[test]
+    fn validate_chart_window_unknown_falls_back_to_default() {
+        let mut c = Config::default();
+        c.telemetry.chart_window_seconds = 17;
+        c.validate();
+        assert_eq!(
+            c.telemetry.chart_window_seconds,
+            crate::temp_chart::HISTORY_SECONDS
+        );
+    }
+
+    #[test]
+    fn validate_chart_window_known_value_unchanged() {
+        let mut c = Config::default();
+        c.telemetry.chart_window_seconds = 60;
+        c.validate();
+        assert_eq!(c.telemetry.chart_window_seconds, 60);
     }
 
     #[test]

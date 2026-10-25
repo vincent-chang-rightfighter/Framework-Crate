@@ -8,6 +8,23 @@ use iced::widget::{button, column, container, space, text};
 use iced::{Element, Length};
 use std::sync::atomic::Ordering;
 
+fn quit_mode_messages(mode: FanControlMode) -> (&'static str, &'static str) {
+    match mode {
+        FanControlMode::Curve => (
+            "Fan is in curve mode (temperature-controlled)",
+            "Curve control will stop. Fan will be fixed to current duty.",
+        ),
+        FanControlMode::Manual => (
+            "Fan is in manual mode",
+            "Manual control will stop. Fan will be fixed to current duty.",
+        ),
+        FanControlMode::Disabled => (
+            "Fan is in automatic mode (firmware control)",
+            "Firmware control will remain active after exit.",
+        ),
+    }
+}
+
 pub(crate) fn view_quit_warning(app: &App) -> Element<'_, Message> {
     let config = read_lock(&app.state.lifecycle.config);
     let current_duty = app.state.fan.last_applied_duty.load(Ordering::Acquire) as u32;
@@ -16,23 +33,11 @@ pub(crate) fn view_quit_warning(app: &App) -> Element<'_, Message> {
     let mut content = column![].spacing(12).padding(20);
     content = content.push(text("Framework Crate").size(20));
     content = content.push(rule::horizontal(1).style(rule_style));
-    let is_curve = config.fan.mode == FanControlMode::Curve;
-    let mode_label = if is_curve {
-        "Fan is in curve mode (temperature-controlled)"
-    } else {
-        "Fan is in manual mode"
-    };
+    let (mode_label, stop_label) = quit_mode_messages(config.fan.mode);
     content = content.push(text(mode_label).size(FONT_BODY));
     content = content.push(text(format!("Current duty: {}%", current_duty)).size(FONT_BODY));
     content = content.push(space::horizontal().height(4));
-    content = content.push(
-        text(if is_curve {
-            "Curve control will stop. Fan will be fixed to current duty."
-        } else {
-            "Manual control will stop. Fan will be fixed to current duty."
-        })
-        .size(FONT_BODY),
-    );
+    content = content.push(text(stop_label).size(FONT_BODY));
     content = content.push(text("Choose how to handle the fan before closing:").size(FONT_BODY));
     content = content.push(rule::horizontal(1).style(rule_style));
 
@@ -70,4 +75,30 @@ pub(crate) fn view_quit_warning(app: &App) -> Element<'_, Message> {
         .center_x(Length::Fill)
         .center_y(Length::Fill)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_mode_uses_automatic_labels() {
+        let (label, stop) = quit_mode_messages(FanControlMode::Disabled);
+        assert!(label.contains("automatic"));
+        assert!(stop.contains("remain active"));
+    }
+
+    #[test]
+    fn manual_mode_uses_manual_labels() {
+        let (label, stop) = quit_mode_messages(FanControlMode::Manual);
+        assert!(label.contains("manual"));
+        assert!(stop.contains("Manual"));
+    }
+
+    #[test]
+    fn curve_mode_uses_curve_labels() {
+        let (label, stop) = quit_mode_messages(FanControlMode::Curve);
+        assert!(label.contains("curve"));
+        assert!(stop.contains("Curve"));
+    }
 }

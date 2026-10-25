@@ -819,6 +819,7 @@ mod tests {
                 poll_ms: 1000,
                 ui_refresh_ms: 200,
                 selected_sensors: vec!["CPU".into(), "Battery".into()],
+                chart_window_seconds: 60,
             },
             theme: "light".to_string(),
         };

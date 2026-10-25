@@ -470,7 +470,7 @@ mod tests {
     #[test]
     fn view_battery_info_empty_battery() {
         let bat = default_battery_info();
-        let _el = view_battery_info(&bat, false);
+        let _el = view_battery_info(&bat);
     }
 
     #[test]
@@ -478,7 +478,7 @@ mod tests {
         let mut bat = default_battery_info();
         bat.last_full_charge_capacity_mah = Some(4500);
         bat.design_capacity_mah = Some(5000);
-        let _el = view_battery_info(&bat, true);
+        let _el = view_battery_info(&bat);
     }
 
     #[test]
@@ -486,14 +486,14 @@ mod tests {
         let mut bat = default_battery_info();
         bat.remaining_capacity_mah = Some(4500);
         bat.design_capacity_mah = None;
-        let _el = view_battery_info(&bat, false);
+        let _el = view_battery_info(&bat);
     }
 
     #[test]
     fn view_battery_info_with_cycles() {
         let mut bat = default_battery_info();
         bat.cycle_count = Some(150);
-        let _el = view_battery_info(&bat, false);
+        let _el = view_battery_info(&bat);
     }
 
     #[test]
@@ -501,8 +501,8 @@ mod tests {
         let mut bat = default_battery_info();
         bat.present_voltage_mv = Some(12000);
         bat.present_rate_ma = Some(2500);
-        let _el = view_battery_info(&bat, true);
-        let _el2 = view_battery_info(&bat, false);
+        let _el = view_battery_info(&bat);
+        let _el2 = view_battery_info(&bat);
     }
 
     #[test]

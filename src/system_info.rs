@@ -1408,9 +1408,9 @@ fn write_task_xml(xml: &str) -> Result<String, String> {
 
 /// Removes task documents left behind by a previous run.
 ///
-/// The release profile uses `panic = "abort"`, so a process killed mid-write
-/// (or by Task Scheduler) never reaches the removal and the file would
-/// otherwise accumulate in the temp directory forever.
+/// A process killed mid-write (or by Task Scheduler) never reaches the
+/// removal, so the file would otherwise accumulate in the temp directory
+/// forever.
 fn task_xml_is_stale(now: std::time::SystemTime, modified: std::time::SystemTime) -> bool {
     now.duration_since(modified)
         .map(|age| age > std::time::Duration::from_secs(3600))
