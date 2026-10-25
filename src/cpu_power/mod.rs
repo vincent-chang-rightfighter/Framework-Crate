@@ -382,6 +382,7 @@ mod tests {
             pl2_enabled: true,
             pl2_clamped: false,
             pl2_time_s: 28.0,
+            max_time_s: None,
             power_unit: 0.125,
             time_unit: 0.0009765625,
         };

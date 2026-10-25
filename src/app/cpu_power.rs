@@ -265,6 +265,7 @@ impl App {
                     pl2_enabled: self.pl2_enabled,
                     pl2_clamped: self.pl2_clamped,
                     pl2_time_s: info.pl2_time_s,
+                    max_time_s: info.max_time_s,
                     power_unit: info.power_unit,
                     time_unit: info.time_unit,
                 };
@@ -338,6 +339,7 @@ impl App {
                     pl2_enabled: self.pl2_enabled,
                     pl2_clamped: self.pl2_clamped,
                     pl2_time_s: info.pl2_time_s,
+                    max_time_s: info.max_time_s,
                     power_unit: info.power_unit,
                     time_unit: info.time_unit,
                 };
@@ -571,6 +573,13 @@ impl App {
                 crate::cpu_power::LIMIT_MAX_TIME_S
             ));
         }
+        if let Some(max) = self.state.cpu_power.snapshot().max_time_s
+            && pl1_time > max
+        {
+            return Err(format!(
+                "PL1 time must not exceed the firmware maximum of {max:.0}s"
+            ));
+        }
         if self.pl1_enabled && self.pl2_enabled && pl1 > pl2 {
             return Err(format!(
                 "PL1 ({:.1}W) must not exceed PL2 ({:.1}W)",
@@ -612,6 +621,7 @@ mod tests {
             pl2_enabled: true,
             pl2_clamped: false,
             pl2_time_s: 28.0,
+            max_time_s: None,
             power_unit: 0.125,
             time_unit: 0.0009765625,
         }
@@ -658,6 +668,7 @@ mod reset_tests {
             pl2_enabled: true,
             pl2_clamped: false,
             pl2_time_s: 28.0,
+            max_time_s: None,
             power_unit: 0.125,
             time_unit: 0.0009765625,
         }

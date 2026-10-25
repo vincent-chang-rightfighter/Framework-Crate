@@ -5,6 +5,7 @@ use tracing::debug;
 use super::ffi::{exec_ioctl, open_handle};
 use super::limits::{
     CpuPowerInfo, CpuPowerUnavailable, PowerRegister, decode_power_limit, decode_time_window,
+    decode_time_window_bounds,
 };
 use super::modules::{load_intel_mchbar_blob, load_intel_msr_blob};
 
@@ -78,6 +79,25 @@ pub(super) fn read_cpu_power() -> CpuPowerInfo {
     }
     if !units_ok {
         return info;
+    }
+
+    // Read MSR 0x614 for the firmware-supported time-window range. Optional:
+    // older firmware may not expose it, so failure keeps the old advisory
+    // read-back behavior.
+    if let Some(ref handle) = msr_handle {
+        let mut out = [0u64; 1];
+        match exec_ioctl(handle, "ioctl_read_msr", &[0x614], &mut out) {
+            Ok(_) => {
+                (info.max_time_s, info.min_time_s) = decode_time_window_bounds(out[0]);
+                debug!(
+                    "MSR 0x614 time window: min={:?}s max={:?}s",
+                    info.min_time_s, info.max_time_s
+                );
+            }
+            Err(reason) => {
+                debug!("MSR 0x614 unavailable, time-window bounds unknown: {reason:?}");
+            }
+        }
     }
 
     // Read MSR 0x610 for static PL1/PL2.

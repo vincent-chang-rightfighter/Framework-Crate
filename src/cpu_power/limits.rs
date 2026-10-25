@@ -86,6 +86,10 @@ pub struct CpuPowerInfo {
     pub pl2_mmio_enabled: bool,
     pub pl2_mmio_clamped: bool,
     pub pl2_mmio_time_s: f64,
+    /// Firmware-supported range from MSR 0x614, in seconds. `None` keeps the
+    /// read-back time-window check advisory.
+    pub min_time_s: Option<f64>,
+    pub max_time_s: Option<f64>,
     pub power_unit: f64,
     pub time_unit: f64,
     pub available: bool,
@@ -129,6 +133,7 @@ impl CpuPowerInfo {
             pl2_enabled: self.pl2_msr_enabled,
             pl2_clamped: self.pl2_msr_clamped,
             pl2_time_s: self.pl2_time_s,
+            max_time_s: self.max_time_s,
             power_unit: self.power_unit,
             time_unit: self.time_unit,
         }
@@ -190,6 +195,14 @@ pub(super) fn decode_time_window(y: u32, z: u32, time_unit: f64) -> f64 {
     (1u64 << y) as f64 * (1.0 + z as f64 / 4.0) * time_unit
 }
 
+/// Decodes MSR_PKG_POWER_INFO (0x614) time-window bounds in seconds.
+/// Bits 54:48 and 62:56 are the max and min window; zero means unspecified.
+pub(super) fn decode_time_window_bounds(raw: u64) -> (Option<f64>, Option<f64>) {
+    let max = ((raw >> 48) & 0x7F) as f64;
+    let min = ((raw >> 56) & 0x7F) as f64;
+    ((max > 0.0).then_some(max), (min > 0.0).then_some(min))
+}
+
 /// Encodes time window into Y and Z fields.
 fn encode_time_window(time_s: f64, time_unit: f64) -> (u32, u32) {
     if time_unit <= 0.0 || time_s <= 0.0 {
@@ -242,6 +255,10 @@ pub struct PowerLimitParams {
     pub pl2_enabled: bool,
     pub pl2_clamped: bool,
     pub pl2_time_s: f64,
+    /// Firmware maximum time window from MSR 0x614, if known. Used to turn
+    /// read-back time differences into failures only inside the supported
+    /// range; `None` keeps the old advisory behavior.
+    pub max_time_s: Option<f64>,
     pub power_unit: f64,
     pub time_unit: f64,
 }
@@ -330,6 +347,36 @@ fn readback_time_clamp_mismatch(
         || rb1_z != exp1_z
         || rb2_y != exp2_y
         || rb2_z != exp2_z
+}
+
+/// A time-window mismatch that is safe to treat as a failed write: the request
+/// is inside the firmware-declared maximum, so the firmware had no legitimate
+/// reason to clamp it. Without 0x614 bounds, stay advisory.
+fn readback_time_mismatch(
+    rb_raw: u64,
+    pl1_enc: u32,
+    pl2_enc: u32,
+    params: &PowerLimitParams,
+) -> bool {
+    let Some(max_time) = params.max_time_s else {
+        return false;
+    };
+    let (_, _, _, rb1_y, rb1_z) = decode_power_limit(rb_raw, params.power_unit);
+    let (_, _, _, rb2_y, rb2_z) = decode_power_limit(rb_raw >> 32, params.power_unit);
+    let exp1_y = (pl1_enc >> 17) & 0x1F;
+    let exp1_z = (pl1_enc >> 22) & 0x3;
+    let exp2_y = (pl2_enc >> 17) & 0x1F;
+    let exp2_z = (pl2_enc >> 22) & 0x3;
+    let exp1 = decode_time_window(exp1_y, exp1_z, params.time_unit);
+    let exp2 = decode_time_window(exp2_y, exp2_z, params.time_unit);
+    let rb1 = decode_time_window(rb1_y, rb1_z, params.time_unit);
+    let rb2 = decode_time_window(rb2_y, rb2_z, params.time_unit);
+    let tolerance = |expected: f64| (expected.abs() * 0.01).max(params.time_unit * 4.0);
+    let in_range = |requested: f64| requested <= max_time + tolerance(requested);
+    (params.pl1_enabled && in_range(params.pl1_time_s) && (rb1 - exp1).abs() > tolerance(exp1))
+        || (params.pl2_enabled
+            && in_range(params.pl2_time_s)
+            && (rb2 - exp2).abs() > tolerance(exp2))
 }
 
 /// A register that PL1/PL2 can be written to.
@@ -452,6 +499,14 @@ pub fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
                 "invalid {name}: enabled limit requires a positive time window ({v})"
             ));
         }
+        if enabled
+            && let Some(max) = params.max_time_s
+            && v > max + f64::EPSILON
+        {
+            return Err(format!(
+                "invalid {name}: exceeds firmware maximum {max:.0}s ({v}s)"
+            ));
+        }
     }
     // An enabled 0W (or near-zero) limit hard-throttles the CPU into an
     // apparent hang; require a floor for enabled limits.
@@ -543,6 +598,13 @@ fn write_power_limits(target: &LimitTarget<'_>, params: &PowerLimitParams) -> Re
         );
         return Err(format!(
             "{} write not reflected in read-back — register may be locked",
+            target.label
+        ));
+    }
+
+    if readback_time_mismatch(rb_out[0], pl1_enc, pl2_enc, params) {
+        return Err(format!(
+            "{} time window not reflected in read-back — firmware may be clamping it",
             target.label
         ));
     }
@@ -642,6 +704,7 @@ pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<BiosRestore, String> {
         pl2_enabled: bios.pl2_enabled,
         pl2_clamped: bios.pl2_clamped,
         pl2_time_s: bios.pl2_time_s,
+        max_time_s: None,
         power_unit,
         time_unit,
     })?;
@@ -656,6 +719,7 @@ pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<BiosRestore, String> {
             pl2_enabled: bios.pl2_mmio_enabled,
             pl2_clamped: bios.pl2_mmio_clamped,
             pl2_time_s: bios.pl2_mmio_time_s,
+            max_time_s: None,
             power_unit,
             time_unit,
         })
@@ -694,6 +758,7 @@ mod tests {
             pl2_enabled: true,
             pl2_clamped: false,
             pl2_time_s: 28.0,
+            max_time_s: None,
             power_unit: POWER_UNIT,
             time_unit: TIME_UNIT,
         }
@@ -802,6 +867,55 @@ mod tests {
             encode_power_limit(p.pl1_watts, true, false, p.power_unit, y, (z + 1) & 0x3);
         let rb = pack_register(time_changed, pl2_enc);
         assert!(readback_time_clamp_mismatch(rb, pl1_enc, pl2_enc, &p));
+    }
+
+    #[test]
+    fn decode_time_window_bounds_reads_614_fields() {
+        let raw = (28u64 << 48) | (1u64 << 56);
+        assert_eq!(decode_time_window_bounds(raw), (Some(28.0), Some(1.0)));
+        assert_eq!(decode_time_window_bounds(0), (None, None));
+        assert_eq!(decode_time_window_bounds(28u64 << 48), (Some(28.0), None));
+    }
+
+    #[test]
+    fn validate_limit_params_enforces_firmware_max_time() {
+        let mut p = params(30.0, 35.0);
+        p.max_time_s = Some(20.0);
+        assert!(validate_limit_params(&p).is_err());
+        p.max_time_s = Some(28.0);
+        assert!(validate_limit_params(&p).is_ok());
+    }
+
+    #[test]
+    fn strict_time_readback_only_fails_inside_the_firmware_range() {
+        let mut p = params(28.0, 35.0);
+        p.max_time_s = Some(30.0);
+        let (pl1_enc, pl2_enc) = encode_pair(&p);
+        assert!(!readback_time_mismatch(
+            pack_register(pl1_enc, pl2_enc),
+            pl1_enc,
+            pl2_enc,
+            &p
+        ));
+
+        let y = (pl1_enc >> 17) & 0x1F;
+        let z = (pl1_enc >> 22) & 0x3;
+        let time_changed =
+            encode_power_limit(p.pl1_watts, true, false, p.power_unit, y, (z + 1) & 0x3);
+        let rb = pack_register(time_changed, pl2_enc);
+        assert!(readback_time_mismatch(rb, pl1_enc, pl2_enc, &p));
+
+        let mut unknown_max = p;
+        unknown_max.max_time_s = None;
+        assert!(!readback_time_mismatch(rb, pl1_enc, pl2_enc, &unknown_max));
+
+        let mut too_low_max = p;
+        too_low_max.max_time_s = Some(10.0);
+        assert!(!readback_time_mismatch(rb, pl1_enc, pl2_enc, &too_low_max));
+
+        let mut disabled = p;
+        disabled.pl1_enabled = false;
+        assert!(!readback_time_mismatch(rb, pl1_enc, pl2_enc, &disabled));
     }
 
     #[test]
@@ -1190,6 +1304,7 @@ mod unit_bounds_tests {
             pl2_enabled: true,
             pl2_clamped: false,
             pl2_time_s: 28.0,
+            max_time_s: None,
             power_unit: 0.125,
             time_unit: 0.0009765625,
         }
