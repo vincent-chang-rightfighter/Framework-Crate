@@ -14,6 +14,19 @@ fn unified_transition_resets(prev: Option<bool>, now: bool) -> bool {
     prev != Some(now)
 }
 
+fn active_manual_duty_low(
+    unified: bool,
+    manual_duty: Option<u32>,
+    per_fan: &[u32],
+    fan_count: usize,
+) -> bool {
+    if unified {
+        manual_duty.is_none_or(|d| d < 60)
+    } else {
+        fan_count > 0 && per_fan.iter().take(fan_count).any(|&d| d < 60)
+    }
+}
+
 /// Drives Manual mode: unified single ramp, or one ramp per fan.
 pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     let unified_now = ctx.state.fan.unified_duty.load(Ordering::Acquire);
@@ -43,13 +56,15 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 .max()
                 .unwrap_or(0);
             if max_temp >= 80 {
-                let unified_low = ctx.manual_duty.is_none_or(|d| d < 60);
-                // Per-fan path uses per_fan_duty, not manual_duty.
-                let per_fan_low = {
+                let unified = ctx.state.fan.unified_duty.load(Ordering::Acquire);
+                let low = if unified {
+                    active_manual_duty_low(true, ctx.manual_duty, &[], 0)
+                } else {
                     let per_fan = crate::util::read_lock(&ctx.state.fan.per_fan_duty);
-                    !per_fan.is_empty() && per_fan.iter().any(|&d| d < 60)
+                    let fan_count = ctx.state.fan.fan_count.load(Ordering::Acquire) as usize;
+                    active_manual_duty_low(false, ctx.manual_duty, &per_fan, fan_count)
                 };
-                if unified_low || per_fan_low {
+                if low {
                     tracing::warn!(
                         "Manual mode: {}C (non-battery max) with sub-60% duty, handing to firmware",
                         max_temp
@@ -310,6 +325,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
 
 #[cfg(test)]
 mod tests {
+    use super::active_manual_duty_low;
     use super::run;
     use super::unified_transition_resets;
     use crate::app::AppState;
@@ -391,5 +407,18 @@ mod tests {
     fn unchanged_unified_mode_keeps_ramps() {
         assert!(!unified_transition_resets(Some(true), true));
         assert!(!unified_transition_resets(Some(false), false));
+    }
+
+    #[test]
+    fn high_temp_guard_uses_only_the_active_unified_path() {
+        assert!(active_manual_duty_low(true, Some(50), &[0], 1));
+        assert!(!active_manual_duty_low(true, Some(100), &[0], 1));
+    }
+
+    #[test]
+    fn high_temp_guard_uses_only_active_per_fan_entries() {
+        assert!(active_manual_duty_low(false, Some(100), &[50, 100], 2));
+        assert!(!active_manual_duty_low(false, Some(50), &[100, 50], 1));
+        assert!(!active_manual_duty_low(false, Some(50), &[], 0));
     }
 }
