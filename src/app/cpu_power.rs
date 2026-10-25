@@ -3,6 +3,18 @@ use iced::Task;
 use std::sync::atomic::Ordering;
 use tracing::{error, warn};
 
+fn sync_restart_params(
+    was_sync: bool,
+    write_ok: bool,
+    applied: crate::cpu_power::PowerLimitParams,
+    previous: Option<crate::cpu_power::PowerLimitParams>,
+) -> Option<crate::cpu_power::PowerLimitParams> {
+    if !was_sync {
+        return None;
+    }
+    if write_ok { Some(applied) } else { previous }
+}
+
 impl App {
     pub(crate) fn handle_cpu_power_message(&mut self, message: &Message) -> Option<Task<Message>> {
         match message {
@@ -244,14 +256,28 @@ impl App {
                     power_unit: info.power_unit,
                     time_unit: info.time_unit,
                 };
+                let was_sync = self.state.cpu_power.sync_enabled.load(Ordering::Acquire);
+                let previous_sync = self.state.cpu_power.desired_sync_params();
+                let cpu_power = self.state.cpu_power.clone();
                 Some(Task::perform(
                     async move {
                         let _guard = crate::util::cpu_power_mutex().lock().await;
                         crate::util::spawn_blocking_with_timeout(
                             crate::util::PAWNIO_IO_TIMEOUT,
                             move || {
-                                crate::cpu_power::write_msr_pl1_pl2_public(params)
-                                    .map_err(|e| e.to_string())
+                                cpu_power.stop_sync();
+                                let result = crate::cpu_power::write_msr_pl1_pl2_public(params)
+                                    .map_err(|e| e.to_string());
+                                if let Some(params) = sync_restart_params(
+                                    was_sync,
+                                    result.is_ok(),
+                                    params,
+                                    previous_sync,
+                                ) && let Err(e) = cpu_power.start_sync(params)
+                                {
+                                    warn!("Failed to restart CPU power sync after apply: {}", e);
+                                }
+                                result
                             },
                         )
                         .await
@@ -266,20 +292,7 @@ impl App {
                         self.pl_custom_applied.store(true, Ordering::Release);
                         self.pl_fields_dirty = false;
                         self.cpu_power_error = None;
-                        // Refresh readback and restart sync with fresh values if enabled.
-                        let cpu_power = self.state.cpu_power.clone();
-                        let after = {
-                            let cpu_power = cpu_power.clone();
-                            move || {
-                                // Re-read flag; user may have toggled sync during refresh.
-                                if !cpu_power.sync_enabled.load(Ordering::Acquire) {
-                                    return;
-                                }
-                                let info = cpu_power.snapshot();
-                                let _ = cpu_power.start_sync(info.msr_limit_params());
-                            }
-                        };
-                        return Some(refresh_cpu_power_task(cpu_power, after));
+                        return Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}));
                     }
                     Err(e) => {
                         error!("Failed to write PL1/PL2: {}", e);
@@ -546,5 +559,51 @@ impl App {
         self.pl2_enabled = p2en;
         self.pl1_clamped = p1cl;
         self.pl2_clamped = p2cl;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sync_restart_params;
+    use crate::cpu_power::PowerLimitParams;
+
+    fn params(pl1: f64) -> PowerLimitParams {
+        PowerLimitParams {
+            pl1_watts: pl1,
+            pl1_enabled: true,
+            pl1_clamped: false,
+            pl1_time_s: 28.0,
+            pl2_watts: 35.0,
+            pl2_enabled: true,
+            pl2_clamped: false,
+            pl2_time_s: 28.0,
+            power_unit: 0.125,
+            time_unit: 0.0009765625,
+        }
+    }
+
+    #[test]
+    fn apply_keeps_sync_disabled_when_it_was_disabled() {
+        assert_eq!(
+            sync_restart_params(false, true, params(15.0), Some(params(28.0))),
+            None
+        );
+    }
+
+    #[test]
+    fn successful_apply_restarts_sync_with_new_params() {
+        assert_eq!(
+            sync_restart_params(true, true, params(15.0), Some(params(28.0))),
+            Some(params(15.0))
+        );
+    }
+
+    #[test]
+    fn failed_apply_restores_previous_sync_params() {
+        assert_eq!(
+            sync_restart_params(true, false, params(15.0), Some(params(28.0))),
+            Some(params(28.0))
+        );
+        assert_eq!(sync_restart_params(true, false, params(15.0), None), None);
     }
 }
