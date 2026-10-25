@@ -301,6 +301,8 @@ This project is developed with AI coding agents (pair-programming / review / ref
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+# One-time: cargo install cargo-audit --version 0.22.2 --locked
+cargo audit
 # Long-horizon EC dispatcher soak (randomized ops + quit storm, ~2 min at 20000 iterations)
 EC_SOAK_ITERS=20000 cargo test --locked --release ec_serial
 ```

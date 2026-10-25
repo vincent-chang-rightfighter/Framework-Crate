@@ -4,16 +4,23 @@
 # grace periods: an entry past its date must be re-justified or dropped.
 [advisories]
 ignore = [
-    # paste 1.0.15 unmaintained (RUSTSEC-2024-0436). Transitive via the iced
-    # 0.14 macro stack. Upstream-only fix. Review by 2027-04.
+    # paste 1.0.15, unmaintained (RUSTSEC-2024-0436). Transitive via
+    # wgpu's Metal backend (metal -> wgpu-hal -> wgpu -> iced_wgpu), i.e.
+    # Apple-only. This app is Windows-only and never compiles that target;
+    # cargo audit scans every lockfile target regardless. No vulnerability
+    # is reported, only the maintenance status. Review by 2027-04.
     "RUSTSEC-2024-0436",
-    # ttf-parser 0.25.1 unmaintained (RUSTSEC-2026-0192). Transitive via
-    # fontdb/cosmic-text. Upstream-only fix. Review by 2027-04.
+    # ttf-parser 0.25.1, unmaintained (RUSTSEC-2026-0192). Transitive via
+    # fontdb 0.23 -> cosmic-text 0.15 -> cryoglyph/iced_graphics -> iced.
+    # The app parses only system/embedded fonts, not user-supplied font
+    # files. No vulnerability is reported; upstream must migrate to skrifa.
+    # Review by 2027-04.
     "RUSTSEC-2026-0192",
-    # lru 0.16.4 unsound pop() under panic-unwind (RUSTSEC-2026-0253).
-    # Not exploitable here: nothing panics in the glyph-cache path, so the
-    # unsound unwind path is unreachable. Release uses unwind (not abort) so
-    # the background supervisor and fan handover survive panics. Transitive
-    # via cryoglyph/iced_wgpu. Upstream-only fix. Review by 2027-04.
+    # lru 0.16.4, unsound pop() under panic-unwind (RUSTSEC-2026-0253).
+    # Trigger requires a stored key whose Drop panics during pop. The only
+    # cache here is cryoglyph's glyph cache keyed by cosmic_text::CacheKey,
+    # a Copy struct of plain data (no Drop), so the dangling-node path is
+    # unreachable. Fixed in lru >=0.18.2; cryoglyph pins 0.16.x, so this is
+    # upstream-only. Review by 2027-04.
     "RUSTSEC-2026-0253",
 ]
