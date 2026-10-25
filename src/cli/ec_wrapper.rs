@@ -717,23 +717,7 @@ impl EcHw for EcClient {
     }
 
     fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]> {
-        let mut cards = SmallVec::new();
-        match self
-            .ec
-            .read_board_id_hc(framework_lib::chromium_ec::commands::BoardIdType::Mainboard)
-        {
-            Ok(Some(board_id)) => {
-                if board_id != 0 {
-                    cards.push(ExpansionCard {
-                        name: format!("Board ID: {:#06x}", board_id),
-                        active_firmware: None,
-                    });
-                }
-            }
-            Ok(None) => {}
-            Err(e) => tracing::debug!("expansion_cards: board ID query failed: {:?}", e),
-        }
-        cards
+        SmallVec::new()
     }
 }
 
