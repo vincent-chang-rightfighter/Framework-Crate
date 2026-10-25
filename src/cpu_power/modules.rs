@@ -377,6 +377,124 @@ fn validate_staging(staging: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+fn parse_tar_declared_bytes(out: &[u8]) -> Option<u64> {
+    let text = String::from_utf8_lossy(out);
+    let mut total: u64 = 0;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 5 {
+            return None;
+        }
+        // bsdtar verbose: mode, nlink, uid, gid, size, date, name.
+        let size = fields[4].parse::<u64>().ok()?;
+        total = total.checked_add(size)?;
+    }
+    Some(total)
+}
+
+enum ExtractionFailure {
+    Failed,
+    Rejected(String),
+}
+
+fn staging_size_within(staging: &std::path::Path, cap: u64) -> Result<bool, String> {
+    let mut stack = vec![staging.to_path_buf()];
+    let mut total: u64 = 0;
+    while let Some(p) = stack.pop() {
+        let entries = std::fs::read_dir(&p)
+            .map_err(|e| format!("read staging during extraction failed: {}", e))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|e| format!("read staging entry during extraction failed: {}", e))?;
+            let ft = entry
+                .file_type()
+                .map_err(|e| format!("staging file_type during extraction failed: {}", e))?;
+            if ft.is_symlink() {
+                return Err(format!(
+                    "staging contains symlink: {}",
+                    entry.path().display()
+                ));
+            }
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                total = total.saturating_add(
+                    entry
+                        .metadata()
+                        .map_err(|e| format!("staging metadata during extraction failed: {}", e))?
+                        .len(),
+                );
+                if total > cap {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn kill_and_reap(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while child.try_wait().ok().flatten().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn run_extraction_with_cap(
+    command: &mut std::process::Command,
+    staging: &std::path::Path,
+) -> Result<(), ExtractionFailure> {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|_| ExtractionFailure::Failed)?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                return match staging_size_within(staging, MAX_STAGING_BYTES) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(ExtractionFailure::Rejected(format!(
+                        "staging exceeds {} bytes after extraction, refusing to continue",
+                        MAX_STAGING_BYTES
+                    ))),
+                    Err(e) => Err(ExtractionFailure::Rejected(e)),
+                };
+            }
+            Ok(Some(_)) => return Err(ExtractionFailure::Failed),
+            Ok(None) => {}
+            Err(_) => return Err(ExtractionFailure::Failed),
+        }
+        match staging_size_within(staging, MAX_STAGING_BYTES) {
+            Ok(true) => {}
+            Ok(false) => {
+                kill_and_reap(&mut child);
+                return Err(ExtractionFailure::Rejected(format!(
+                    "staging exceeds {} bytes during extraction, refusing to continue",
+                    MAX_STAGING_BYTES
+                )));
+            }
+            Err(e) => {
+                kill_and_reap(&mut child);
+                return Err(ExtractionFailure::Rejected(e));
+            }
+        }
+        if start.elapsed() >= Duration::from_secs(30) {
+            kill_and_reap(&mut child);
+            return Err(ExtractionFailure::Rejected(
+                "archive extraction timed out".to_string(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Validates archive members, extracts into a fresh staging dir, then
 /// promotes only the two expected verified bins into `dir`.
 fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Result<(), String> {
@@ -406,36 +524,61 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
             return Err(format!("archive contains unsafe path: {}", m));
         }
     }
+    if let Ok(size_out) = std::process::Command::new(crate::util::system32_exe("tar.exe"))
+        .args(["-tvf", &zip_tmp.display().to_string()])
+        .creation_flags(0x08000000)
+        .output()
+        && size_out.status.success()
+        && let Some(total) = parse_tar_declared_bytes(&size_out.stdout)
+        && total > MAX_STAGING_BYTES
+    {
+        return Err(format!(
+            "archive declares {} bytes, exceeding the {} byte limit",
+            total, MAX_STAGING_BYTES
+        ));
+    }
     // 2. Extract into a fresh staging dir (never directly into modules dir).
     let staging = fresh_staging_dir(dir)?;
     let cleanup = |staging: &std::path::Path, zip: &std::path::Path| {
         let _ = std::fs::remove_file(zip);
         let _ = std::fs::remove_dir_all(staging);
     };
-    let tar_out = std::process::Command::new(crate::util::system32_exe("tar.exe"))
+    let mut tar_command = std::process::Command::new(crate::util::system32_exe("tar.exe"));
+    tar_command
         .args([
             "-xf",
             &zip_tmp.display().to_string(),
             "-C",
             &staging.display().to_string(),
         ])
-        .creation_flags(0x08000000)
-        .output();
-    let tar_ok = matches!(&tar_out, Ok(o) if o.status.success());
-    if !tar_ok {
-        let ps = format!(
-            "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-            ps_escape(&zip_tmp.display().to_string()),
-            ps_escape(&staging.display().to_string())
-        );
-        let ps_out = std::process::Command::new(crate::util::powershell_exe())
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
-            .creation_flags(0x08000000)
-            .output()
-            .map_err(|e| format!("extraction failed (tar and powershell unavailable): {}", e))?;
-        if !ps_out.status.success() {
+        .creation_flags(0x08000000);
+    match run_extraction_with_cap(&mut tar_command, &staging) {
+        Ok(()) => {}
+        Err(ExtractionFailure::Rejected(e)) => {
             cleanup(&staging, zip_tmp);
-            return Err("extraction failed".to_string());
+            return Err(e);
+        }
+        Err(ExtractionFailure::Failed) => {
+            let ps = format!(
+                "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+                ps_escape(&zip_tmp.display().to_string()),
+                ps_escape(&staging.display().to_string())
+            );
+            let mut ps_command = std::process::Command::new(crate::util::powershell_exe());
+            ps_command
+                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
+                .creation_flags(0x08000000);
+            match run_extraction_with_cap(&mut ps_command, &staging) {
+                Ok(()) => {}
+                Err(ExtractionFailure::Rejected(e)) => {
+                    cleanup(&staging, zip_tmp);
+                    return Err(e);
+                }
+                Err(ExtractionFailure::Failed) => {
+                    cleanup(&staging, zip_tmp);
+                    return Err("extraction failed".to_string());
+                }
+            }
         }
     }
     // 3. Reject symlinks planted inside staging and cap extracted bytes.
