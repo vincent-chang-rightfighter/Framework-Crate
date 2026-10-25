@@ -74,6 +74,7 @@ pub(super) struct FanCtx<'a> {
     pub manual_per_fan_ramp: &'a mut Option<Vec<u32>>,
     pub curve_stepper: &'a mut CurveStepper,
     pub last_fan_mode: Option<crate::types::FanControlMode>,
+    pub last_unified_duty: Option<bool>,
     pub just_resumed: bool,
 }
 
@@ -459,6 +460,7 @@ pub fn spawn(state: AppState) {
                         Some(init_fan_mode)
                     };
                 let mut last_manual_duty: Option<u32> = None;
+                let mut last_unified_duty: Option<bool> = None;
                 let mut consecutive_ec_failures: u32 = 0;
                 // Battery reads share the EC but must not wash out thermal
                 // failures (or vice versa): a healthy battery would hide a
@@ -531,6 +533,7 @@ pub fn spawn(state: AppState) {
                         last_resume_ts = resume_ts;
                         curve_stepper.reset();
                         last_manual_duty = None;
+                        last_unified_duty = None;
                         manual_ramp_current = None;
                         manual_per_fan_ramp = None;
                         // EC reverts to firmware control during sleep. Force the next
@@ -569,6 +572,7 @@ pub fn spawn(state: AppState) {
                     {
                         curve_stepper.reset();
                         last_manual_duty = None;
+                        last_unified_duty = None;
                         manual_ramp_current = None;
                         manual_per_fan_ramp = None;
                         last_fan_mode = None;
@@ -1025,6 +1029,7 @@ pub fn spawn(state: AppState) {
                             curve_stepper.reset();
                         }
                         last_manual_duty = None;
+                        last_unified_duty = None;
                         manual_per_fan_ramp = None;
                         if matches!(mode, crate::types::FanControlMode::Manual) {
                             // Prefer last written duty; fallback to RPM estimate.
@@ -1061,6 +1066,7 @@ pub fn spawn(state: AppState) {
                         manual_per_fan_ramp: &mut manual_per_fan_ramp,
                         curve_stepper: &mut curve_stepper,
                         last_fan_mode,
+                        last_unified_duty,
                         just_resumed,
                     };
                     let flow = match &mode {
@@ -1075,6 +1081,7 @@ pub fn spawn(state: AppState) {
                     last_manual_duty = ctx.last_manual_duty;
                     manual_ramp_current = ctx.manual_ramp_current;
                     last_fan_mode = ctx.last_fan_mode;
+                    last_unified_duty = ctx.last_unified_duty;
                     match flow {
                         Flow::Done => {
                             last_fan_mode = Some(mode);

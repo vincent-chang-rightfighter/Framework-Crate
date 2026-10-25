@@ -10,8 +10,20 @@ use super::{
 };
 use crate::util::read_lock;
 
+fn unified_transition_resets(prev: Option<bool>, now: bool) -> bool {
+    prev != Some(now)
+}
+
 /// Drives Manual mode: unified single ramp, or one ramp per fan.
 pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
+    let unified_now = ctx.state.fan.unified_duty.load(Ordering::Acquire);
+    if unified_transition_resets(ctx.last_unified_duty, unified_now) {
+        ctx.last_unified_duty = Some(unified_now);
+        ctx.last_manual_duty = None;
+        ctx.manual_ramp_current = None;
+        *ctx.manual_per_fan_ramp = None;
+        ctx.last_duty_write_ms = 0;
+    }
     // High-temp guard: Manual low duty with fresh hot readings would cook
     // the machine while stale detection stays quiet. Hand back to firmware.
     // Checked before the stale path so fresh-hot still trips. Threshold
@@ -102,7 +114,15 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     let unified = ctx.state.fan.unified_duty.load(Ordering::Acquire);
     if unified {
         if let Some(target) = ctx.manual_duty {
-            let current = ctx.manual_ramp_current.unwrap_or(target);
+            let current = ctx
+                .manual_ramp_current
+                .or_else(|| {
+                    let last = ctx.state.fan.last_applied_duty.load(Ordering::Acquire) as u32;
+                    (last > 0)
+                        .then_some(last)
+                        .or_else(|| estimate_duty_from_thermal(ctx.state))
+                })
+                .unwrap_or(target);
             let next = crate::fan_control::apply_rate_limit(current, target, 10);
             let converged = ctx.last_manual_duty == Some(next);
             // Re-assert periodically even when converged to recover missed resume.
@@ -286,4 +306,89 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         }
     }
     Flow::Done
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+    use super::unified_transition_resets;
+    use crate::app::AppState;
+    use crate::background_task::{FanCtx, Flow};
+    use crate::cli::EcHw;
+    use crate::cli::ec_wrapper::tests::MockEc;
+    use crate::fan_control::CurveStepper;
+    use crate::types::FanControlMode;
+    use crate::util::with_write_lock;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn unified_toggle_forces_a_fan_write() {
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        state
+            .fan
+            .mode
+            .store(FanControlMode::Manual.to_u8() as u64, Ordering::Release);
+        state.fan.unified_duty.store(false, Ordering::Release);
+        state.fan.fan_count.store(1, Ordering::Release);
+        state
+            .thermal
+            .last_success_ms
+            .store(60_000, Ordering::Release);
+        with_write_lock(&state.fan.per_fan_duty, |guard| {
+            *guard = Arc::new(vec![100]);
+        });
+        let mock = Arc::new(MockEc::new());
+        let ec: Arc<dyn EcHw> = mock.clone();
+        let mut ramp = Some(vec![100]);
+        let mut stepper = CurveStepper::new();
+        let mut ctx = FanCtx {
+            state: &state,
+            ec: &ec,
+            mode: FanControlMode::Manual,
+            now_ms: 60_000,
+            manual_duty: Some(100),
+            curve_hysteresis: None,
+            curve_rate_limit: None,
+            curve_rate_limit_down: None,
+            curve_sensors: Vec::new(),
+            consecutive_ec_write_failures: 0,
+            last_duty_write_ms: 60_000,
+            last_curve_failover_ms: 0,
+            last_manual_duty: Some(100),
+            manual_ramp_current: Some(100),
+            manual_per_fan_ramp: &mut ramp,
+            curve_stepper: &mut stepper,
+            last_fan_mode: Some(FanControlMode::Manual),
+            last_unified_duty: Some(true),
+            just_resumed: false,
+        };
+        assert!(matches!(run(&mut ctx).await, Flow::Done));
+        let ops = mock.ops.lock().unwrap();
+        assert!(
+            ops.iter().any(|op| op == "set_fan_duty(100,Some(0))"),
+            "unified transition must re-write the per-fan duty: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn unified_toggle_resets_manual_bookkeeping() {
+        assert!(unified_transition_resets(None, true));
+        assert!(unified_transition_resets(Some(true), false));
+        assert!(unified_transition_resets(Some(false), true));
+    }
+
+    #[test]
+    fn unchanged_unified_mode_keeps_ramps() {
+        assert!(!unified_transition_resets(Some(true), true));
+        assert!(!unified_transition_resets(Some(false), false));
+    }
 }
