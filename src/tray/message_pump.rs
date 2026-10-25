@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
@@ -19,6 +19,9 @@ const WM_TRAYICON: u32 = WM_APP + 1;
 const WM_COMMAND_READY: u32 = WM_APP + 2;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONUP: u32 = 0x0205;
+const WM_QUERYENDSESSION: u32 = 0x0011;
+const WM_ENDSESSION: u32 = 0x0016;
+static SESSION_HANDOVER_DONE: AtomicBool = AtomicBool::new(false);
 // Explorer restart notification is a registered message, not a fixed
 // constant. Must be queried via `RegisterWindowMessageW("TaskbarCreated")`.
 
@@ -94,6 +97,19 @@ unsafe extern "system" fn tray_wnd_proc(
     wparam: usize,
     lparam: isize,
 ) -> isize {
+    if msg == WM_QUERYENDSESSION {
+        return 1;
+    }
+    if msg == WM_ENDSESSION {
+        if wparam != 0
+            && SESSION_HANDOVER_DONE
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            super::run_session_end_hook();
+        }
+        return 0;
+    }
     if msg == WM_TRAYICON {
         let lparam_u32 = lparam as u32;
         if lparam_u32 == WM_LBUTTONUP {

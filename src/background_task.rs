@@ -450,6 +450,30 @@ pub fn spawn(state: AppState) {
     // failures older than an hour so only a real crash loop trips the
     // firmware handover below.
     const OUTER_FAILURE_WINDOW_MS: u64 = 3_600_000;
+    let hook_state = state.clone();
+    crate::tray::set_session_end_hook(move || {
+        hook_state.lifecycle.shutdown.store(true, Ordering::Release);
+        let ec_opt = { read_lock(&hook_state.system.ec_client) };
+        let Some(ec) = ec_opt.as_ref().as_ref() else {
+            return;
+        };
+        let limit = read_lock(&hook_state.lifecycle.config)
+            .battery
+            .charge_limit_max_pct;
+        let ec = Arc::clone(ec);
+        let _ = crate::ec_serial::exec_blocking(
+            "session-end-handover",
+            std::time::Duration::from_secs(2),
+            ec,
+            move |ec| {
+                let _ = ec.autofanctrl();
+                if let Some(limit) = limit {
+                    let pct = if limit.enabled { limit.value } else { 100 };
+                    let _ = ec.charge_limit_set(0, pct);
+                }
+            },
+        );
+    });
     tokio::spawn(async move {
         let mut consecutive_failures: u32 = 0;
         let mut last_outer_failure_ms: u64 = 0;

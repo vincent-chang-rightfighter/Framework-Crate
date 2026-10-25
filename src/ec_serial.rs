@@ -27,6 +27,7 @@
 use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
@@ -75,12 +76,29 @@ struct Job {
     op: &'static str,
     client: Arc<dyn EcHw>,
     run: BoxedEcCall,
-    reply: oneshot::Sender<JobReply>,
+    reply: Reply,
+    force: bool,
+}
+
+enum Reply {
+    Async(oneshot::Sender<JobReply>),
+    Blocking(std::sync::mpsc::Sender<JobReply>),
 }
 
 enum JobReply {
     Value(Box<dyn Any + Send>),
     Failed(String),
+}
+
+fn send_reply(reply: Reply, value: JobReply) {
+    match reply {
+        Reply::Async(tx) => {
+            let _ = tx.send(value);
+        }
+        Reply::Blocking(tx) => {
+            let _ = tx.send(value);
+        }
+    }
 }
 
 /// Max queued ops; beyond this `exec` fails fast instead of piling up
@@ -93,39 +111,53 @@ const QUEUE_CAP: usize = 16;
 /// empty and the next `sender()` call rebuilds it instead of wedging
 /// every future caller on a dead channel.
 static SLOT: std::sync::Mutex<Option<mpsc::Sender<Job>>> = std::sync::Mutex::new(None);
+static WRITES_CLOSED: AtomicBool = AtomicBool::new(false);
+
+fn lock_slot() -> std::sync::MutexGuard<'static, Option<mpsc::Sender<Job>>> {
+    SLOT.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn sender() -> mpsc::Sender<Job> {
-    let mut slot = SLOT.lock().unwrap();
+    let mut slot = lock_slot();
     if let Some(tx) = slot.as_ref() {
         if !tx.is_closed() {
             return tx.clone();
         }
-        // Worker died: drop the dead handle so a fresh one is built below.
         *slot = None;
     }
     let (tx, rx) = mpsc::channel(QUEUE_CAP);
-    tokio::spawn(worker_loop(rx));
+    tokio::spawn(worker_loop(rx, &WRITES_CLOSED));
     *slot = Some(tx.clone());
     tx
 }
 
-async fn worker_loop(mut rx: mpsc::Receiver<Job>) {
+fn existing_sender() -> Option<mpsc::Sender<Job>> {
+    let slot = lock_slot();
+    slot.as_ref().filter(|tx| !tx.is_closed()).cloned()
+}
+
+async fn worker_loop(mut rx: mpsc::Receiver<Job>, writes_closed: &'static AtomicBool) {
     while let Some(job) = rx.recv().await {
         tracing::trace!("EC dispatch {}", job.op);
+        let Job {
+            client,
+            run,
+            reply,
+            force,
+            ..
+        } = job;
+        if !force && writes_closed.load(Ordering::Acquire) {
+            send_reply(reply, JobReply::Failed("EC writes closed".to_string()));
+            continue;
+        }
         // The blocking call runs on the pool, but this task does not take
         // the next job until it finishes: at most one driver call is ever
         // in flight, so hardware execution order always matches dispatch
         // order and a late orphan cannot overtake a newer write.
-        let handle = tokio::task::spawn_blocking(move || (job.run)(job.client));
+        let handle = tokio::task::spawn_blocking(move || run(client));
         match handle.await {
-            Ok(any) => {
-                let _ = job.reply.send(JobReply::Value(any));
-            }
-            Err(e) => {
-                let _ = job
-                    .reply
-                    .send(JobReply::Failed(format!("EC task panicked: {e}")));
-            }
+            Ok(any) => send_reply(reply, JobReply::Value(any)),
+            Err(e) => send_reply(reply, JobReply::Failed(format!("EC task panicked: {e}"))),
         }
     }
 }
@@ -153,7 +185,8 @@ where
             let out: T = f(ec);
             Box::new(out) as Box<dyn Any + Send>
         }),
-        reply: reply_tx,
+        reply: Reply::Async(reply_tx),
+        force: false,
     };
     match tx.try_send(job) {
         Ok(()) => {}
@@ -195,16 +228,91 @@ where
     dispatch(&tx, op, timeout, client, f).await
 }
 
+fn dispatch_blocking<F, T>(
+    tx: &mpsc::Sender<Job>,
+    op: &'static str,
+    timeout: Duration,
+    client: Arc<dyn EcHw>,
+    f: F,
+) -> Result<T, DispatchError>
+where
+    F: FnOnce(Arc<dyn EcHw>) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    use std::sync::mpsc::RecvTimeoutError;
+    use tokio::sync::mpsc::error::TrySendError;
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let job = Job {
+        op,
+        client,
+        run: Box::new(move |ec| {
+            let out: T = f(ec);
+            Box::new(out) as Box<dyn Any + Send>
+        }),
+        reply: Reply::Blocking(reply_tx),
+        force: true,
+    };
+    match tx.try_send(job) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => return Err(DispatchError::Overloaded { op }),
+        Err(TrySendError::Closed(_)) => {
+            return Err(DispatchError::Failed(
+                "EC dispatcher closed during shutdown".to_string(),
+            ));
+        }
+    }
+    match reply_rx.recv_timeout(timeout) {
+        Ok(JobReply::Value(any)) => any
+            .downcast()
+            .map(|b| *b)
+            .map_err(|_| DispatchError::Failed(format!("EC reply type mismatch for {op}"))),
+        Ok(JobReply::Failed(e)) => Err(DispatchError::Failed(e)),
+        Err(RecvTimeoutError::Timeout) => Err(DispatchError::TimedOut { op, after: timeout }),
+        Err(RecvTimeoutError::Disconnected) => {
+            Err(DispatchError::Failed("EC dispatcher gone".to_string()))
+        }
+    }
+}
+
+/// Closes the write fence and runs one final job through the single EC writer.
+/// Used by the session-end path, which cannot await inside the window procedure.
+pub fn exec_blocking<F, T>(
+    op: &'static str,
+    timeout: Duration,
+    client: Arc<dyn EcHw>,
+    f: F,
+) -> Result<T, DispatchError>
+where
+    F: FnOnce(Arc<dyn EcHw>) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let tx = existing_sender().ok_or_else(|| {
+        DispatchError::Failed("EC dispatcher unavailable during shutdown".to_string())
+    })?;
+    WRITES_CLOSED.store(true, Ordering::Release);
+    dispatch_blocking(&tx, op, timeout, client, f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli::ec_wrapper::tests::MockEc;
 
+    fn local_worker_with_fence() -> (
+        mpsc::Sender<Job>,
+        tokio::task::JoinHandle<()>,
+        &'static AtomicBool,
+    ) {
+        let fence: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let (tx, rx) = mpsc::channel(QUEUE_CAP);
+        let h = tokio::spawn(worker_loop(rx, fence));
+        (tx, h, fence)
+    }
+
     /// Independent writer per test (not the prod global): a hang in one
     /// test must not stall another.
     fn local_worker() -> (mpsc::Sender<Job>, tokio::task::JoinHandle<()>) {
-        let (tx, rx) = mpsc::channel(QUEUE_CAP);
-        let h = tokio::spawn(worker_loop(rx));
+        let (tx, h, _fence) = local_worker_with_fence();
         (tx, h)
     }
 
@@ -384,5 +492,47 @@ mod tests {
         }
         assert!(rejected > 0, "queue must shed load when wedged");
         mock.set_hang(false);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_handover_closes_fence_and_keeps_order() {
+        let mock = Arc::new(MockEc::new());
+        let client: Arc<dyn EcHw> = mock.clone();
+        let (tx, _h, fence) = local_worker_with_fence();
+
+        let c = client.clone();
+        dispatch(&tx, "before", Duration::from_secs(5), c, move |ec| {
+            ec.set_fan_duty(20, None)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        fence.store(true, Ordering::Release);
+        let c = client.clone();
+        dispatch_blocking(&tx, "handover", Duration::from_secs(5), c, move |ec| {
+            ec.autofanctrl()
+        })
+        .unwrap()
+        .unwrap();
+
+        let c = client.clone();
+        let after: Result<Result<(), String>, DispatchError> =
+            dispatch(&tx, "after", Duration::from_secs(5), c, move |ec| {
+                ec.set_fan_duty(30, None)
+            })
+            .await;
+        assert!(matches!(
+            after,
+            Err(DispatchError::Failed(ref e)) if e == "EC writes closed"
+        ));
+
+        assert_eq!(
+            *mock.ops.lock().unwrap(),
+            vec![
+                "set_fan_duty(20,None)".to_string(),
+                "autofanctrl".to_string()
+            ]
+        );
     }
 }

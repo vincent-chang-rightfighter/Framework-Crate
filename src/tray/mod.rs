@@ -1,12 +1,25 @@
 pub mod event;
 pub mod message_pump;
 
+use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 pub use event::{TrayCommand, TrayEvent};
 use message_pump::notify_tray_thread;
 pub use message_pump::spawn_message_pump;
+
+static SESSION_END_HOOK: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+pub(crate) fn set_session_end_hook(hook: impl Fn() + Send + Sync + 'static) {
+    let _ = SESSION_END_HOOK.set(Box::new(hook));
+}
+
+pub(super) fn run_session_end_hook() {
+    if let Some(hook) = SESSION_END_HOOK.get() {
+        hook();
+    }
+}
 
 pub struct TrayManager {
     hwnd: isize,
