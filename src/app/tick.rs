@@ -1,10 +1,14 @@
-use super::{App, Message, refresh_cpu_power_task, tick_task};
+use super::{App, Message, PL_RESET_RETRY_MS, refresh_cpu_power_task, tick_task};
 use crate::style::{IDLE_THRESHOLD_MS, UI_HIDDEN_INTERVAL_MS, UI_IDLE_INTERVAL_MS};
 use crate::system_info;
 use iced::Task;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tracing::warn;
+
+fn reset_retry_allowed(now_ms: u64, retry_at_ms: u64) -> bool {
+    retry_at_ms == 0 || now_ms >= retry_at_ms
+}
 
 impl App {
     pub(crate) fn handle_tick_message(&mut self) -> Task<Message> {
@@ -53,9 +57,15 @@ impl App {
             }
         }
 
+        let now_ms = crate::util::monotonic_ms();
+        let reset_retry_at = self
+            .state
+            .lifecycle
+            .pl_reset_retry_at_ms
+            .load(Ordering::Acquire);
         // AC→battery: reset PL1/PL2 to BIOS defaults. The pending flag is
-        // cleared by CpuPowerResetDone on success, so a failed reset keeps
-        // retrying instead of silently dropping the restore.
+        // cleared by CpuPowerResetDone on success; failures schedule a retry
+        // instead of hammering the hardware every tick.
         if self.cpu_power_supported()
             && self
                 .state
@@ -63,21 +73,29 @@ impl App {
                 .pl_reset_pending
                 .load(Ordering::Acquire)
             && self.pl_custom_applied.load(Ordering::Acquire)
+            && reset_retry_allowed(now_ms, reset_retry_at)
         {
             if self.state.cpu_power.bios_defaults().is_none() {
+                self.state
+                    .lifecycle
+                    .pl_reset_retry_at_ms
+                    .store(now_ms.saturating_add(PL_RESET_RETRY_MS), Ordering::Release);
                 tracing::warn!(
-                    "AC→battery reset pending but BIOS defaults unavailable, will retry"
+                    "AC→battery reset pending but BIOS defaults unavailable; retrying in {}s",
+                    PL_RESET_RETRY_MS / 1000
                 );
             } else {
                 tracing::info!("AC→battery: resetting PL1/PL2 to BIOS defaults");
+                self.state
+                    .lifecycle
+                    .pl_reset_retry_at_ms
+                    .store(now_ms.saturating_add(PL_RESET_RETRY_MS), Ordering::Release);
                 return Task::batch([
                     self.handle_cpu_power_sync_reset(),
                     tick_task(self.tick_interval_ms),
                 ]);
             }
         }
-
-        let now_ms = crate::util::monotonic_ms();
         let idle = now_ms.saturating_sub(
             self.state
                 .lifecycle
@@ -262,5 +280,18 @@ impl App {
                 .store(false, Ordering::Release);
         }
         // else: new updates arrived during build, will rebuild next call
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reset_retry_allowed;
+
+    #[test]
+    fn reset_retry_honors_the_backoff_deadline() {
+        assert!(reset_retry_allowed(1_000, 0));
+        assert!(!reset_retry_allowed(1_000, 2_000));
+        assert!(reset_retry_allowed(2_000, 2_000));
+        assert!(reset_retry_allowed(3_000, 2_000));
     }
 }

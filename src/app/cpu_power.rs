@@ -1,4 +1,4 @@
-use super::{App, Message, refresh_cpu_power_task, stop_sync_task};
+use super::{App, Message, PL_RESET_RETRY_MS, refresh_cpu_power_task, stop_sync_task};
 use iced::Task;
 use std::sync::atomic::Ordering;
 use tracing::{error, warn};
@@ -394,6 +394,10 @@ impl App {
                             .lifecycle
                             .pl_reset_pending
                             .store(false, Ordering::Release);
+                        self.state
+                            .lifecycle
+                            .pl_reset_retry_at_ms
+                            .store(0, Ordering::Release);
                     }
                     Ok(crate::cpu_power::BiosRestore::Partial(e)) => {
                         warn!("CPU power reset partial: {}", e);
@@ -404,10 +408,18 @@ impl App {
                             .lifecycle
                             .pl_reset_pending
                             .store(false, Ordering::Release);
+                        self.state
+                            .lifecycle
+                            .pl_reset_retry_at_ms
+                            .store(0, Ordering::Release);
                     }
                     Err(e) => {
                         warn!("CPU power reset failed: {}", e);
                         self.cpu_power_error = Some(format!("Reset failed: {}", e));
+                        self.state.lifecycle.pl_reset_retry_at_ms.store(
+                            crate::util::monotonic_ms().saturating_add(PL_RESET_RETRY_MS),
+                            Ordering::Release,
+                        );
                     }
                 }
                 self.mark_dirty();

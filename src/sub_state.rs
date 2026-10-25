@@ -175,6 +175,7 @@ pub struct LifecycleState {
     /// NOTE: Set on WM_POWERBROADCAST resume; triggers EC client reset.
     pub last_resume_ts: Arc<AtomicU64>,
     pub pl_reset_pending: Arc<AtomicBool>,
+    pub pl_reset_retry_at_ms: Arc<AtomicU64>,
     pub fan_reset_pending: Arc<AtomicBool>,
 }
 
@@ -191,6 +192,7 @@ impl Default for LifecycleState {
             view_generation: Arc::new(AtomicU64::new(1)),
             last_resume_ts: Arc::new(AtomicU64::new(0)),
             pl_reset_pending: Arc::new(AtomicBool::new(false)),
+            pl_reset_retry_at_ms: Arc::new(AtomicU64::new(0)),
             fan_reset_pending: Arc::new(AtomicBool::new(false)),
         }
     }

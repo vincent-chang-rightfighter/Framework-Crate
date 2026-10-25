@@ -43,6 +43,7 @@ const WINDOW_MIN_HEIGHT: f32 = 400.0;
 const RESIZE_EPSILON: f32 = 0.5;
 /// Maximum debug report files kept in temp directory.
 const MAX_DEBUG_REPORTS: usize = 5;
+pub(crate) const PL_RESET_RETRY_MS: u64 = 30_000;
 
 /// Monotonic version for config snapshots to prevent stale debounced writes from overwriting newer saves.
 fn next_config_version() -> u64 {
@@ -348,6 +349,7 @@ impl App {
                 view_generation: Arc::new(AtomicU64::new(1)),
                 last_resume_ts: Arc::new(AtomicU64::new(0)),
                 pl_reset_pending: Arc::new(AtomicBool::new(false)),
+                pl_reset_retry_at_ms: Arc::new(AtomicU64::new(0)),
                 fan_reset_pending: Arc::new(AtomicBool::new(false)),
             },
         };
