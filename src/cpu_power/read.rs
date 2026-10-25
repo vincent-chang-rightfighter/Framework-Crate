@@ -107,12 +107,10 @@ pub(super) fn read_cpu_power() -> CpuPowerInfo {
 
     // Read MMIO at MCHBAR+0x59A0 via IntelMCHBAR.
     let mmio_offset = 0x59A0u64;
-    let mut mmio_ok = false;
     if let Some(ref handle) = mchbar_handle {
         let mut out = [0u64; 1];
         match exec_ioctl(handle, "ioctl_read_qword", &[mmio_offset], &mut out) {
             Ok(_) => {
-                mmio_ok = true;
                 let raw = out[0];
                 let (pl1, pl1_en, pl1_cl, pl1_y, pl1_z) = decode_power_limit(raw, info.power_unit);
                 let (pl2, pl2_en, pl2_cl, pl2_y, pl2_z) =
@@ -144,10 +142,11 @@ pub(super) fn read_cpu_power() -> CpuPowerInfo {
         }
     }
 
-    // Nothing was readable, so the card has no live values. The cause recorded
-    // above already says which register refused and why; do not overwrite it
-    // with a summary that loses both.
-    if !msr610_ok && !mmio_ok {
+    // The MSR half is the primary register used by edit fields, BIOS
+    // snapshots and the sync thread. MMIO alone leaves those consumers with
+    // zeroed values, so treat the read as unavailable and keep the root cause
+    // recorded above.
+    if !msr610_ok {
         return info;
     }
     info.available = true;
