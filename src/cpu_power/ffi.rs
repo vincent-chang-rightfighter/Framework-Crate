@@ -223,23 +223,91 @@ fn resolve_winget() -> Result<std::path::PathBuf, String> {
     )
 }
 
+fn run_command_with_timeout(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    command
+        .creation_flags(0x08000000)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("failed to run winget: {e}"))?;
+    let mut stdout = child.stdout.take();
+    let (out_tx, out_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut out) = stdout {
+            let _ = out.read_to_end(&mut buf);
+        }
+        let _ = out_tx.send(buf);
+    });
+    let mut stderr = child.stderr.take();
+    let (err_tx, err_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut err) = stderr {
+            let _ = err.read_to_end(&mut buf);
+        }
+        let _ = err_tx.send(buf);
+    });
+
+    let start = Instant::now();
+    loop {
+        match child
+            .try_wait()
+            .map_err(|e| format!("failed to wait for winget: {e}"))?
+        {
+            Some(status) => {
+                let stdout = out_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap_or_default();
+                let stderr = err_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap_or_default();
+                return Ok(std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let reap_deadline = Instant::now() + Duration::from_secs(1);
+                    while child.try_wait().ok().flatten().is_none()
+                        && Instant::now() < reap_deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    return Err(format!("winget timed out after {}s", timeout.as_secs()));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
 /// Installs PawnIO via winget.
 pub fn install_pawnio() -> Result<(), String> {
     use std::process::Command;
     tracing::info!("Installing PawnIO via winget...");
     let winget = resolve_winget()?;
-    let output = Command::new(winget)
-        .args([
-            "install",
-            "-e",
-            "--id",
-            "namazso.PawnIO",
-            "--accept-package-agreements",
-            "--accept-source-agreements",
-        ])
-        .creation_flags(0x08000000)
-        .output()
-        .map_err(|e| format!("failed to run winget: {}", e))?;
+    let mut command = Command::new(winget);
+    command.args([
+        "install",
+        "-e",
+        "--id",
+        "namazso.PawnIO",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+    ]);
+    let output = run_command_with_timeout(command, std::time::Duration::from_secs(55))?;
     match classify_winget_output(&output) {
         WingetOutcome::Success => {
             tracing::info!("PawnIO installed successfully");
@@ -365,23 +433,16 @@ pub fn update_pawnio() -> Result<(), String> {
     use std::process::Command;
     tracing::info!("Updating PawnIO via winget...");
     let winget = resolve_winget()?;
-    let output = Command::new(winget)
-        .args([
-            "upgrade",
-            "-e",
-            "--id",
-            "namazso.PawnIO",
-            "--accept-package-agreements",
-            "--accept-source-agreements",
-        ])
-        .creation_flags(0x08000000)
-        .output();
-    // winget itself unrunnable (missing/not in PATH): fall back to install,
-    // which reports the cause with a manual-download hint.
-    let output = match output {
-        Ok(out) => out,
-        Err(_) => return install_pawnio(),
-    };
+    let mut command = Command::new(winget);
+    command.args([
+        "upgrade",
+        "-e",
+        "--id",
+        "namazso.PawnIO",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+    ]);
+    let output = run_command_with_timeout(command, std::time::Duration::from_secs(55))?;
     match classify_winget_output(&output) {
         WingetOutcome::Success => {
             tracing::info!("PawnIO upgraded successfully");
@@ -765,6 +826,16 @@ pub(super) fn exec_ioctl(
 mod tests {
     use super::*;
     use std::os::windows::process::ExitStatusExt;
+
+    #[test]
+    fn run_command_with_timeout_captures_output() {
+        let mut command = std::process::Command::new(crate::util::system32_exe("cmd.exe"));
+        command.args(["/c", "echo hello"]);
+        let output =
+            run_command_with_timeout(command, std::time::Duration::from_secs(5)).expect("run");
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("hello"));
+    }
 
     #[test]
     fn winget_package_version_parses_numeric_components() {
