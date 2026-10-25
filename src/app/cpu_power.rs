@@ -181,7 +181,7 @@ impl App {
                         self.modules_download_error = None;
                         self.cpu_power_error = None;
                         self.pl_fields_dirty = false;
-                        crate::cpu_power::invalidate_pawnio_version();
+                        crate::cpu_power::reset_dll_fns();
                         return Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}));
                     }
                     Err(e) => {

@@ -428,10 +428,18 @@ pub fn update_pawnio_modules() -> Result<(), String> {
     download_and_extract_modules()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthenticodeOutcome {
+    Valid,
+    Invalid,
+    Unavailable,
+}
+
 /// Cached Authenticode verdict for the loaded DLL. Clearable on purpose:
 /// `reset_dll_fns` drops it so an upgraded DLL is re-verified instead of
-/// inheriting the previous file's result.
-static AUTHENTICODE: parking_lot::Mutex<Option<Result<(), &'static str>>> =
+/// inheriting the previous file's result. Transient PowerShell failures are
+/// not cached, so Retry can recover without restarting the app.
+static AUTHENTICODE: parking_lot::Mutex<Option<AuthenticodeOutcome>> =
     parking_lot::Mutex::new(None);
 
 /// Drops the cached Authenticode verdict. Called with the DLL pointers so an
@@ -441,18 +449,42 @@ fn invalidate_authenticode() {
 }
 
 fn cached_authenticode_status(p: &std::path::Path) -> Result<(), &'static str> {
-    {
-        let guard = AUTHENTICODE.lock();
-        if let Some(cached) = *guard {
-            return cached;
-        }
+    if let Some(cached) = *AUTHENTICODE.lock() {
+        return match cached {
+            AuthenticodeOutcome::Valid => Ok(()),
+            AuthenticodeOutcome::Invalid => Err("DLL authenticode not valid"),
+            AuthenticodeOutcome::Unavailable => Err("authenticode check failed"),
+        };
     }
-    let result = check_authenticode(p);
-    *AUTHENTICODE.lock() = Some(result);
-    result
+    match check_authenticode(p) {
+        AuthenticodeOutcome::Valid => {
+            *AUTHENTICODE.lock() = Some(AuthenticodeOutcome::Valid);
+            Ok(())
+        }
+        AuthenticodeOutcome::Invalid => {
+            *AUTHENTICODE.lock() = Some(AuthenticodeOutcome::Invalid);
+            Err("DLL authenticode not valid")
+        }
+        AuthenticodeOutcome::Unavailable => Err("authenticode check failed"),
+    }
 }
 
-fn check_authenticode(p: &std::path::Path) -> Result<(), &'static str> {
+fn classify_authenticode_output(success: bool, stdout: &[u8]) -> AuthenticodeOutcome {
+    if !success {
+        return AuthenticodeOutcome::Unavailable;
+    }
+    let txt = String::from_utf8_lossy(stdout);
+    let txt = txt.trim();
+    if txt.eq_ignore_ascii_case("true") {
+        AuthenticodeOutcome::Valid
+    } else if txt.eq_ignore_ascii_case("false") {
+        AuthenticodeOutcome::Invalid
+    } else {
+        AuthenticodeOutcome::Unavailable
+    }
+}
+
+fn check_authenticode(p: &std::path::Path) -> AuthenticodeOutcome {
     let out = std::process::Command::new(crate::util::powershell_exe())
         .args([
             "-NoProfile",
@@ -464,18 +496,9 @@ fn check_authenticode(p: &std::path::Path) -> Result<(), &'static str> {
         ])
         .creation_flags(0x08000000)
         .output();
-    let out = match out {
-        Ok(out) => out,
-        Err(_) => return Err("authenticode check failed"),
-    };
-    if !out.status.success() {
-        return Err("authenticode check failed");
-    }
-    let txt = String::from_utf8_lossy(&out.stdout);
-    if txt.trim().eq_ignore_ascii_case("true") {
-        Ok(())
-    } else {
-        Err("DLL authenticode not valid")
+    match out {
+        Ok(out) => classify_authenticode_output(out.status.success(), &out.stdout),
+        Err(_) => AuthenticodeOutcome::Unavailable,
     }
 }
 
@@ -756,9 +779,29 @@ mod tests {
     fn invalidate_authenticode_clears_the_cache() {
         // White-box: the whole point of Mutex<Option<…>> over OnceLock is
         // clearability, so pin that property directly. No PowerShell runs.
-        *AUTHENTICODE.lock() = Some(Ok(()));
+        *AUTHENTICODE.lock() = Some(AuthenticodeOutcome::Valid);
         invalidate_authenticode();
         assert!(AUTHENTICODE.lock().is_none());
+    }
+
+    #[test]
+    fn authenticode_output_classification_only_caches_definitive_results() {
+        assert_eq!(
+            classify_authenticode_output(true, b"True\r\n"),
+            AuthenticodeOutcome::Valid
+        );
+        assert_eq!(
+            classify_authenticode_output(true, b"False"),
+            AuthenticodeOutcome::Invalid
+        );
+        assert_eq!(
+            classify_authenticode_output(false, b"True"),
+            AuthenticodeOutcome::Unavailable
+        );
+        assert_eq!(
+            classify_authenticode_output(true, b""),
+            AuthenticodeOutcome::Unavailable
+        );
     }
 
     fn test_output(code: u32, stdout: &str, stderr: &str) -> std::process::Output {
