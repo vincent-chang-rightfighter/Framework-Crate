@@ -489,7 +489,7 @@ fn backup_corrupt_config(path: &std::path::Path) {
     }
 }
 
-fn refuse_symlink(path: &std::path::Path) -> Result<(), String> {
+pub(crate) fn refuse_symlink(path: &std::path::Path) -> Result<(), String> {
     if let Ok(meta) = std::fs::symlink_metadata(path)
         && meta.file_type().is_symlink()
     {

@@ -131,17 +131,37 @@ pub(super) fn bios_defaults_valid(d: &BiosDefaults) -> bool {
 
 /// Backs up a corrupt or invalid snapshot aside and refuses to overwrite it.
 fn quarantine_corrupt(path: &std::path::Path, reason: String) -> PersistedBios {
-    let backup = path.with_extension(format!("toml.corrupt-{}", crate::util::current_time_ms()));
-    match std::fs::copy(path, &backup) {
-        Ok(_) => warn!(
+    let backup = path.with_extension("toml.corrupt");
+    if backup.exists() {
+        tracing::debug!(
+            "bios_defaults.toml is still corrupt ({}); keeping existing backup {}",
+            reason,
+            backup.display()
+        );
+        return PersistedBios::Unusable;
+    }
+    let copied = (|| {
+        let mut src = std::fs::File::open(path)?;
+        let mut dst = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&backup)?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.sync_all()
+    })();
+    match copied {
+        Ok(()) => warn!(
             "bios_defaults.toml is corrupt ({}); backed up to {} — NOT overwriting with live values. Delete the file to re-capture.",
             reason,
             backup.display()
         ),
-        Err(be) => warn!(
-            "bios_defaults.toml is corrupt ({}) and backup failed: {}",
-            reason, be
-        ),
+        Err(be) => {
+            let _ = std::fs::remove_file(&backup);
+            warn!(
+                "bios_defaults.toml is corrupt ({}) and backup failed: {}",
+                reason, be
+            );
+        }
     }
     PersistedBios::Unusable
 }
@@ -150,6 +170,13 @@ pub(super) fn load_persisted_bios_defaults() -> PersistedBios {
     let Ok(path) = bios_defaults_path() else {
         return PersistedBios::Unavailable;
     };
+    if let Err(e) = crate::config::refuse_symlink(&path) {
+        warn!(
+            "bios_defaults.toml is a symlink ({}); refusing to read it",
+            e
+        );
+        return PersistedBios::Unusable;
+    }
     if path.exists() {
         crate::config::warn_if_world_writable(&path);
     }
@@ -446,6 +473,46 @@ mod tests {
             } else {
                 std::env::remove_var("FRAMEWORK_CONTROL_CONFIG_DIR");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod stable_backup_tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_backup_is_not_duplicated_on_reload() {
+        let _env_guard = crate::config::CONFIG_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR");
+        unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", dir.path()) };
+
+        let path = dir.path().join("bios_defaults.toml");
+        std::fs::write(&path, "this is not = valid = toml [[[").unwrap();
+        assert!(matches!(
+            load_persisted_bios_defaults(),
+            PersistedBios::Unusable
+        ));
+        assert!(matches!(
+            load_persisted_bios_defaults(),
+            PersistedBios::Unusable
+        ));
+        let backups = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("bios_defaults.toml.corrupt")
+            })
+            .count();
+        assert_eq!(backups, 1, "reloading must not create another backup");
+
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", v) };
+        } else {
+            unsafe { std::env::remove_var("FRAMEWORK_CONTROL_CONFIG_DIR") };
         }
     }
 }
