@@ -332,17 +332,65 @@ fn fresh_staging_dir(dir: &std::path::Path) -> Result<std::path::PathBuf, String
     Ok(staging)
 }
 
-/// Rejects ZIP-slip members: parent refs, absolute paths, drive letters.
+fn component_is_reserved(comp: &str) -> bool {
+    let base = comp.split('.').next().unwrap_or(comp).to_ascii_uppercase();
+    matches!(
+        base.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+            | "CONIN$"
+            | "CONOUT$"
+    )
+}
+
+/// Rejects ZIP-slip members: parent refs, absolute paths, drive letters,
+/// alternate data streams, Windows-reserved names, and components that
+/// Win32 would trim or reinterpret.
 fn member_path_safe(name: &str) -> bool {
     let n = name.replace('\\', "/");
-    if n.starts_with('/') {
+    if n.is_empty() || n.len() > 4096 || n.starts_with('/') {
         return false;
     }
     if n.len() >= 2 && n.as_bytes()[1] == b':' {
         return false;
     }
     for comp in n.split('/') {
-        if comp == ".." {
+        if comp.is_empty()
+            || comp == "."
+            || comp == ".."
+            || comp.ends_with('.')
+            || comp.ends_with(' ')
+            || comp.chars().count() > 255
+        {
+            return false;
+        }
+        if comp
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+        {
+            return false;
+        }
+        if component_is_reserved(comp) {
             return false;
         }
     }
@@ -401,6 +449,27 @@ fn parse_tar_declared_bytes(out: &[u8]) -> Option<u64> {
         total = total.checked_add(size)?;
     }
     Some(total)
+}
+
+/// Rejects link and special-file members before extraction. Only regular
+/// files and directories are allowed; tar may otherwise create a symlink
+/// and write a later member through it before the post-extraction scan runs.
+fn tar_listing_has_unsafe_member(out: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(out);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mode = line.split_whitespace().next().unwrap_or("");
+        let Some(kind) = mode.chars().next() else {
+            return Some(line.to_string());
+        };
+        if !matches!(kind, '-' | 'd') || line.contains(" link to ") {
+            return Some(line.to_string());
+        }
+    }
+    None
 }
 
 enum ExtractionFailure {
@@ -531,12 +600,18 @@ fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Resul
             return Err(format!("archive contains unsafe path: {}", m));
         }
     }
-    if let Ok(size_out) = std::process::Command::new(crate::util::system32_exe("tar.exe"))
+    let meta_out = std::process::Command::new(crate::util::system32_exe("tar.exe"))
         .args(["-tvf", &zip_tmp.display().to_string()])
         .creation_flags(0x08000000)
         .output()
-        && size_out.status.success()
-        && let Some(total) = parse_tar_declared_bytes(&size_out.stdout)
+        .map_err(|e| format!("failed to inspect archive (tar.exe missing?): {}", e))?;
+    if !meta_out.status.success() {
+        return Err("failed to inspect archive contents".to_string());
+    }
+    if let Some(line) = tar_listing_has_unsafe_member(&meta_out.stdout) {
+        return Err(format!("archive contains link or special member: {}", line));
+    }
+    if let Some(total) = parse_tar_declared_bytes(&meta_out.stdout)
         && total > MAX_STAGING_BYTES
     {
         return Err(format!(
@@ -954,6 +1029,64 @@ mod tests {
         assert_eq!(parse_tar_declared_bytes(listing), Some(6916));
         assert_eq!(parse_tar_declared_bytes(b""), Some(0));
         assert_eq!(parse_tar_declared_bytes(b"not a tar listing"), None);
+    }
+
+    #[test]
+    fn member_path_safe_rejects_windows_aliases() {
+        for bad in [
+            "/abs",
+            "C:/x",
+            "C:x",
+            "../x",
+            "a/../b",
+            "a:b",
+            "a/b:c",
+            "dir./file",
+            "dir /file",
+            "CON",
+            "con.txt",
+            "NUL",
+            "COM1",
+            "LPT9.log",
+            "a//b",
+            "a/./b",
+            "a<b",
+            "a?.txt",
+            "a\\..\\b",
+        ] {
+            assert!(!member_path_safe(bad), "accepted unsafe member {bad:?}");
+        }
+        for good in [
+            "IntelMSR.bin",
+            "sub/dir/IntelMCHBAR.bin",
+            "file.with.dots",
+            "_ok",
+            "COM10",
+        ] {
+            assert!(member_path_safe(good), "rejected safe member {good:?}");
+        }
+    }
+
+    #[test]
+    fn tar_listing_rejects_links_and_special_files() {
+        let regular = b"-rw-r--r--  0 0 0 12 Jan 25 21:40 file.bin\n\
+drwxr-xr-x  0 0 0  0 Jan 25 21:40 dir/\n";
+        assert!(tar_listing_has_unsafe_member(regular).is_none());
+        assert!(
+            tar_listing_has_unsafe_member(
+                b"lrwxrwxrwx  0 0 0 0 Jan 25 21:40 link -> /etc/passwd\n"
+            )
+            .is_some()
+        );
+        assert!(
+            tar_listing_has_unsafe_member(
+                b"hrw-r--r--  0 0 0 12 Jan 25 21:40 hard link to file.bin\n"
+            )
+            .is_some()
+        );
+        assert!(
+            tar_listing_has_unsafe_member(b"prw-r--r--  0 0 0 0 Jan 25 21:40 pipe\n").is_some()
+        );
     }
 
     #[test]
