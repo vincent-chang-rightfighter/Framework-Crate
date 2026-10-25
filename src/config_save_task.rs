@@ -21,6 +21,10 @@ fn battery_key(cfg: &Config) -> BatteryKey {
     cfg.battery.charge_limit_max_pct
 }
 
+fn apply_battery_state(key: BatteryKey, applied: bool) -> Option<BatteryKey> {
+    applied.then_some(key)
+}
+
 async fn apply_battery_when_ready(cfg: &Config, state: &AppState) -> bool {
     for _ in 0..50 {
         if state.lifecycle.shutdown.load(Ordering::Acquire) {
@@ -152,10 +156,8 @@ pub fn spawn(mut config_rx: watch::Receiver<(Arc<Config>, u64)>, state: AppState
 
             let key = battery_key(&cfg_for_battery);
             if last_battery.as_ref() != Some(&key) {
-                // Retry on failure; only advance on success.
-                if apply_battery_settings(&cfg_for_battery, &state).await {
-                    last_battery = Some(key);
-                }
+                let applied = apply_battery_settings(&cfg_for_battery, &state).await;
+                last_battery = apply_battery_state(key, applied);
             }
         }
     });
@@ -209,6 +211,16 @@ mod tests {
         });
 
         assert_eq!(battery_key(&cfg1), battery_key(&cfg2));
+    }
+
+    #[test]
+    fn failed_battery_apply_keeps_the_setting_pending_for_retry() {
+        let key = Some(SettingU8 {
+            enabled: true,
+            value: 80,
+        });
+        assert_eq!(apply_battery_state(key, true), Some(key));
+        assert_eq!(apply_battery_state(key, false), None);
     }
 
     #[test]
