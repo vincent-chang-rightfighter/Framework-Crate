@@ -16,6 +16,24 @@ fn set_first_failure(info: &mut CpuPowerInfo, cause: CpuPowerUnavailable) {
     }
 }
 
+pub(super) fn decode_rapl_units(raw: u64) -> (f64, f64) {
+    let power_bits = (raw & 0xF) as u32;
+    let time_bits = ((raw >> 16) & 0xF) as u32;
+    let power_unit = 1.0 / (1u32 << power_bits) as f64;
+    let time_unit = 1.0 / (1u32 << time_bits) as f64;
+    (power_unit, time_unit)
+}
+
+/// Reads MSR 0x606 live, so writes never trust persisted RAPL units.
+pub(super) fn read_rapl_units() -> Result<(f64, f64), String> {
+    let blob = load_intel_msr_blob().map_err(|e| e.to_string())?;
+    let handle = open_handle(&blob).map_err(|e| e.to_string())?;
+    let mut out = [0u64; 1];
+    exec_ioctl(&handle, "ioctl_read_msr", &[0x606], &mut out)
+        .map_err(|e| format!("failed to read RAPL units: {e:?}"))?;
+    Ok(decode_rapl_units(out[0]))
+}
+
 /// Reads all CPU power info via PawnIO modules.
 pub(super) fn read_cpu_power() -> CpuPowerInfo {
     let mut info = CpuPowerInfo::default();
@@ -42,14 +60,10 @@ pub(super) fn read_cpu_power() -> CpuPowerInfo {
         let mut out = [0u64; 1];
         match exec_ioctl(handle, "ioctl_read_msr", &[0x606], &mut out) {
             Ok(_) => {
-                let raw = out[0];
-                let unit_bits = (raw & 0xF) as u32;
-                info.power_unit = 1.0 / (1u32 << unit_bits) as f64;
-                let time_bits = ((raw >> 16) & 0xF) as u32;
-                info.time_unit = 1.0 / (1u32 << time_bits) as f64;
+                (info.power_unit, info.time_unit) = decode_rapl_units(out[0]);
                 debug!(
-                    "Power unit: {} W/unit (bits={}), time unit: {} s/unit (bits={})",
-                    info.power_unit, unit_bits, info.time_unit, time_bits
+                    "Power unit: {} W/unit, time unit: {} s/unit",
+                    info.power_unit, info.time_unit
                 );
                 units_ok = true;
             }
@@ -157,6 +171,14 @@ pub(super) fn read_cpu_power() -> CpuPowerInfo {
 mod tests {
     use super::*;
     use crate::cpu_power::ffi::IoctlFailure;
+
+    #[test]
+    fn decode_rapl_units_uses_the_expected_bit_fields() {
+        let raw = 3u64 | (10u64 << 16);
+        let (power_unit, time_unit) = decode_rapl_units(raw);
+        assert!((power_unit - 0.125).abs() < 1e-12);
+        assert!((time_unit - 1.0 / 1024.0).abs() < 1e-12);
+    }
 
     #[test]
     fn set_first_failure_keeps_the_earliest_cause() {

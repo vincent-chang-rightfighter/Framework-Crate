@@ -346,6 +346,11 @@ pub const LIMIT_MAX_TIME_S: f64 = 120.0;
 /// progress and the machine appears hung.
 pub const LIMIT_MIN_ENABLED_WATTS: f64 = 5.0;
 
+/// RAPL units are 1/2^n with n in 0..=15, so the plausible range is narrow.
+pub(super) fn plausible_rapl_unit(unit: f64) -> bool {
+    unit.is_finite() && (1.0 / 32768.0..=1.0).contains(&unit)
+}
+
 /// Per-model PL ceiling (hard safety cap). 120W is the absolute ceiling
 /// for Desktop; smaller chassis get lower caps so a typo can't cook the
 /// VRM for minutes. Unknown models fall back to a safe 65W.
@@ -379,6 +384,14 @@ pub fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
         }
         if v < 0.0 {
             return Err(format!("invalid {name}: negative ({v})"));
+        }
+    }
+    for (name, v) in [
+        ("power_unit", params.power_unit),
+        ("time_unit", params.time_unit),
+    ] {
+        if !plausible_rapl_unit(v) {
+            return Err(format!("invalid {name}: implausible RAPL unit ({v})"));
         }
     }
     for (name, v) in [
@@ -582,6 +595,7 @@ pub enum BiosRestore {
 
 /// Writes both MSR and MMIO from `BiosDefaults` to restore factory state.
 pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<BiosRestore, String> {
+    let (power_unit, time_unit) = super::read::read_rapl_units()?;
     write_msr_pl1_pl2_public(PowerLimitParams {
         pl1_watts: bios.pl1_watts,
         pl1_enabled: bios.pl1_enabled,
@@ -591,8 +605,8 @@ pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<BiosRestore, String> {
         pl2_enabled: bios.pl2_enabled,
         pl2_clamped: bios.pl2_clamped,
         pl2_time_s: bios.pl2_time_s,
-        power_unit: bios.power_unit,
-        time_unit: bios.time_unit,
+        power_unit,
+        time_unit,
     })?;
     // MMIO may be absent on older files; best-effort only, but reported.
     if (bios.pl1_mmio_watts > 0.0 || bios.pl2_mmio_watts > 0.0)
@@ -605,8 +619,8 @@ pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<BiosRestore, String> {
             pl2_enabled: bios.pl2_mmio_enabled,
             pl2_clamped: bios.pl2_mmio_clamped,
             pl2_time_s: bios.pl2_mmio_time_s,
-            power_unit: bios.power_unit,
-            time_unit: bios.time_unit,
+            power_unit,
+            time_unit,
         })
     {
         return Ok(BiosRestore::Partial(e));
@@ -1095,5 +1109,37 @@ mod tests {
         assert_eq!(info.effective_pl2(), 25.0);
         info.pl1_msr_enabled = true;
         assert_eq!(info.effective_pl1(), 15.0);
+    }
+}
+
+#[cfg(test)]
+mod unit_bounds_tests {
+    use super::*;
+
+    fn params() -> PowerLimitParams {
+        PowerLimitParams {
+            pl1_watts: 30.0,
+            pl1_enabled: true,
+            pl1_clamped: false,
+            pl1_time_s: 28.0,
+            pl2_watts: 35.0,
+            pl2_enabled: true,
+            pl2_clamped: false,
+            pl2_time_s: 28.0,
+            power_unit: 0.125,
+            time_unit: 0.0009765625,
+        }
+    }
+
+    #[test]
+    fn implausible_rapl_units_are_rejected() {
+        for bad in [0.0, 1e-9, 1.5, 2.0] {
+            let mut p = params();
+            p.power_unit = bad;
+            assert!(validate_limit_params(&p).is_err(), "power_unit={bad}");
+            let mut p = params();
+            p.time_unit = bad;
+            assert!(validate_limit_params(&p).is_err(), "time_unit={bad}");
+        }
     }
 }

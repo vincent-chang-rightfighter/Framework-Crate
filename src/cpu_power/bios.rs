@@ -115,10 +115,8 @@ pub(super) fn bios_defaults_valid(d: &BiosDefaults) -> bool {
         && times
             .iter()
             .all(|v| v.is_finite() && *v >= 0.0 && *v <= LIMIT_MAX_TIME_S)
-        && d.power_unit.is_finite()
-        && d.power_unit > 0.0
-        && d.time_unit.is_finite()
-        && d.time_unit > 0.0
+        && super::limits::plausible_rapl_unit(d.power_unit)
+        && super::limits::plausible_rapl_unit(d.time_unit)
         && watts
             .iter()
             .zip(enabled)
