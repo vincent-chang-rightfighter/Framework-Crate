@@ -43,8 +43,8 @@ pub(crate) fn view_charge_limit_section(enabled: bool, value: u32) -> Element<'s
 /// Unset limit means no cap; show as disabled at 100%.
 pub(crate) fn charge_limit_display(limit: Option<crate::types::SettingU8>) -> (bool, u32) {
     match limit {
-        Some(l) => (l.enabled, l.value as u32),
-        None => (false, CHARGE_LIMIT_MAX),
+        Some(l) if l.enabled => (true, l.value as u32),
+        Some(_) | None => (false, CHARGE_LIMIT_MAX),
     }
 }
 

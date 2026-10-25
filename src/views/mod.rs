@@ -457,6 +457,17 @@ mod tests {
     }
 
     #[test]
+    fn charge_limit_display_disabled_shows_no_cap() {
+        assert_eq!(
+            charge_limit_display(Some(crate::types::SettingU8 {
+                enabled: false,
+                value: 80
+            })),
+            (false, 100)
+        );
+    }
+
+    #[test]
     fn view_battery_info_empty_battery() {
         let bat = default_battery_info();
         let _el = view_battery_info(&bat, false);
