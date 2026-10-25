@@ -26,13 +26,15 @@ pub fn fetch_latest_tag() -> Option<String> {
             "=https",
             "--tlsv1.2",
             "--max-time",
-            "15",
+            "10",
             "--max-filesize",
             "1048576",
             "--retry",
             "1",
             "--retry-delay",
             "2",
+            "--retry-max-time",
+            "15",
             LATEST_RELEASE_API,
         ])
         .creation_flags(0x08000000)
