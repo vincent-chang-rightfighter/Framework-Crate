@@ -1,6 +1,6 @@
 use parking_lot::RwLock;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
 use tracing::warn;
 
 use crate::app::AppState;
@@ -24,6 +24,14 @@ pub(super) const MAX_EC_IO_FAILURES: u32 = 5;
 
 /// Consecutive EC write failures before reinitializing client (separate from reads).
 pub(super) const MAX_EC_WRITE_FAILURES: u32 = 5;
+
+static EC_INIT_SEM: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+
+fn try_ec_init_permit(
+    sem: &Arc<tokio::sync::Semaphore>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    sem.clone().try_acquire_owned().ok()
+}
 
 /// Re-assert interval for converged fan duty; recovers fans if resume event was missed.
 pub(super) const FAN_REASSERT_INTERVAL_MS: u64 = 30_000;
@@ -636,10 +644,20 @@ pub fn spawn(state: AppState) {
                             if !bg_state2.system.ec_init_done.load(Ordering::Acquire) {
                                 continue;
                             }
+                            let sem = EC_INIT_SEM
+                                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)));
+                            let Some(permit) = try_ec_init_permit(sem) else {
+                                tracing::debug!("EC init already in flight; waiting");
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                continue;
+                            };
                             let state_cl = bg_state2.clone();
                             match crate::util::spawn_blocking_with_timeout(
                                 crate::util::EC_IO_TIMEOUT,
-                                cli::EcClient::new,
+                                move || {
+                                    let _permit = permit;
+                                    cli::EcClient::new()
+                                },
                             )
                             .await
                             {
@@ -1274,5 +1292,14 @@ mod tests {
             *read_lock(&state.fan.per_fan_duty),
             vec![50, 50, 30, 30, 50, 50]
         );
+    }
+
+    #[test]
+    fn ec_init_permits_only_one_attempt_at_a_time() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let first = try_ec_init_permit(&sem).expect("first permit");
+        assert!(try_ec_init_permit(&sem).is_none());
+        drop(first);
+        assert!(try_ec_init_permit(&sem).is_some());
     }
 }
