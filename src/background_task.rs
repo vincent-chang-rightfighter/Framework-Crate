@@ -213,6 +213,10 @@ fn shutdown_requested(state: &AppState) -> bool {
     state.lifecycle.shutdown.load(Ordering::Acquire)
 }
 
+fn ac_transition_pending(prev_ac: bool, ac_now: bool, had_prior_sample: bool) -> bool {
+    had_prior_sample && prev_ac && !ac_now
+}
+
 fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
     if fan_count == 0 {
         return;
@@ -731,10 +735,11 @@ pub fn spawn(state: AppState) {
                             Ok(Ok(bat)) => {
                                 consecutive_battery_failures = 0;
                                 let ac_now = bat.ac_present == Some(true);
-                                // Signal PL reset on AC->battery transition (only on success to avoid spurious).
+                                let had_prior_sample =
+                                    bg_state2.battery.last_success_ms.load(Ordering::Acquire) != 0;
                                 let ac_was =
                                     bg_state2.battery.prev_ac_present.load(Ordering::Acquire);
-                                if ac_was && !ac_now {
+                                if ac_transition_pending(ac_was, ac_now, had_prior_sample) {
                                     bg_state2
                                         .lifecycle
                                         .pl_reset_pending
@@ -1173,6 +1178,18 @@ mod tests {
     #[test]
     fn pin_to_slowest_core_does_not_panic() {
         pin_to_slowest_core();
+    }
+
+    #[test]
+    fn first_battery_sample_never_triggers_reset() {
+        assert!(!ac_transition_pending(true, false, false));
+    }
+
+    #[test]
+    fn ac_to_battery_after_first_sample_triggers_reset() {
+        assert!(ac_transition_pending(true, false, true));
+        assert!(!ac_transition_pending(false, false, true));
+        assert!(!ac_transition_pending(true, true, true));
     }
 
     #[test]

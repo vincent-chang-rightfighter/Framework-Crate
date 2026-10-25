@@ -166,7 +166,13 @@ impl App {
                                 } else if custom_applied.load(Ordering::Acquire) {
                                     cpu_power.stop_sync();
                                     if let Some(bios) = bios {
-                                        let ac_now = crate::cpu_power::read_ac_present();
+                                        let Some(ac_now) = crate::cpu_power::read_ac_present()
+                                        else {
+                                            debug!(
+                                                "Resume: AC state unknown; skipping BIOS defaults restore"
+                                            );
+                                            return;
+                                        };
                                         let source_matches = bios.captured_on_ac == ac_now;
                                         if !source_matches {
                                             debug!(

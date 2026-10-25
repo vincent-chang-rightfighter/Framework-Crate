@@ -136,6 +136,10 @@ impl CpuPowerState {
         if !info.available {
             return;
         }
+        let Some(captured_on_ac) = read_ac_present() else {
+            tracing::warn!("AC state unknown; deferring BIOS defaults capture");
+            return;
+        };
         // Validate live values before persisting: a tainted overclocked
         // snapshot must not become the permanent "factory" Reset target.
         {
@@ -158,15 +162,13 @@ impl CpuPowerState {
                 pl2_mmio_time_s: info.pl2_mmio_time_s,
                 power_unit: info.power_unit,
                 time_unit: info.time_unit,
-                captured_on_ac: true,
+                captured_on_ac,
             };
             if !bios_defaults_valid(&probe) {
                 tracing::warn!("Live PL values out of range, refusing to persist as BIOS defaults");
                 return;
             }
         }
-        // Record power source to prevent cross-source restore on resume.
-        let captured_on_ac = read_ac_present();
         let defaults = BiosDefaults {
             pl1_watts: info.pl1_msr,
             pl1_enabled: info.pl1_msr_enabled,

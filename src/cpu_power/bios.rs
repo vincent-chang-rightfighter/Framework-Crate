@@ -48,16 +48,23 @@ fn bios_defaults_path() -> Result<std::path::PathBuf, String> {
         .join("bios_defaults.toml"))
 }
 
-/// Reads current AC-present state from shared snapshot (defaults to AC).
-pub fn read_ac_present() -> bool {
-    *BATTERY_AC_SNAPSHOT.read()
+fn resolve_ac_present(snapshot: Option<bool>, has_battery: bool) -> Option<bool> {
+    snapshot.or_else(|| (!has_battery).then_some(true))
 }
 
-static BATTERY_AC_SNAPSHOT: parking_lot::RwLock<bool> = parking_lot::RwLock::new(true);
+/// Reads current AC-present state from shared snapshot.
+pub fn read_ac_present() -> Option<bool> {
+    resolve_ac_present(
+        *BATTERY_AC_SNAPSHOT.read(),
+        crate::cli::ec_wrapper::detect_platform().has_battery(),
+    )
+}
+
+static BATTERY_AC_SNAPSHOT: parking_lot::RwLock<Option<bool>> = parking_lot::RwLock::new(None);
 
 /// Publishes AC state for `read_ac_present`.
 pub fn publish_ac_snapshot(ac_present: bool) {
-    *BATTERY_AC_SNAPSHOT.write() = ac_present;
+    *BATTERY_AC_SNAPSHOT.write() = Some(ac_present);
 }
 
 /// Outcome of looking for the persisted BIOS factory snapshot.
@@ -212,6 +219,14 @@ pub(super) fn persist_bios_defaults(defaults: &BiosDefaults) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktops_report_ac_when_snapshot_is_unknown() {
+        assert_eq!(resolve_ac_present(None, false), Some(true));
+        assert_eq!(resolve_ac_present(None, true), None);
+        assert_eq!(resolve_ac_present(Some(false), false), Some(false));
+        assert_eq!(resolve_ac_present(Some(true), true), Some(true));
+    }
 
     #[test]
     fn bios_defaults_toml_roundtrip() {
