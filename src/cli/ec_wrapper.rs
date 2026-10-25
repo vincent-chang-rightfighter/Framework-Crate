@@ -419,6 +419,16 @@ impl EcClient {
     }
 }
 
+fn decode_ec_temperature(byte: u8) -> Option<i32> {
+    match byte {
+        0xFC..=0xFF => None,
+        _ => {
+            let temp = byte as i32 - 73;
+            (-40..=125).contains(&temp).then_some(temp)
+        }
+    }
+}
+
 impl EcHw for EcClient {
     fn thermal(&self) -> Result<ThermalData, String> {
         let mut temps = BTreeMap::new();
@@ -428,19 +438,11 @@ impl EcHw for EcClient {
 
         if let Some(data) = self.ec.read_memory(0x00, 0x0F) {
             for (i, &byte) in data.iter().enumerate() {
-                match byte {
-                    0xFC..=0xFF => continue,
-                    _ => {
-                        let temp = byte as i32 - 73;
-                        // Drop implausible low readings (e.g. 0x00 decodes to -73°C).
-                        // Keep 0°C as valid in cold ambient; only filter negatives.
-                        if temp < 0 {
-                            continue;
-                        }
-                        let name = sensor_name(platform, i);
-                        temps.insert(name, temp);
-                    }
-                }
+                let Some(temp) = decode_ec_temperature(byte) else {
+                    continue;
+                };
+                let name = sensor_name(platform, i);
+                temps.insert(name, temp);
             }
         }
 
@@ -724,6 +726,17 @@ impl EcHw for EcClient {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn ec_temperature_decoder_keeps_cold_readings_and_drops_sentinels() {
+        assert_eq!(decode_ec_temperature(0xFC), None);
+        assert_eq!(decode_ec_temperature(0xFF), None);
+        assert_eq!(decode_ec_temperature(0x00), None);
+        assert_eq!(decode_ec_temperature(73 - 5), Some(-5));
+        assert_eq!(decode_ec_temperature(73), Some(0));
+        assert_eq!(decode_ec_temperature(73 + 125), Some(125));
+        assert_eq!(decode_ec_temperature(73 + 126), None);
+    }
 
     #[test]
     fn framework12_core3_maps_to_laptop12() {
