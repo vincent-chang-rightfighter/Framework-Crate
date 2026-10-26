@@ -227,7 +227,7 @@ Toggling **launch at startup** on the About page registers a Windows scheduled t
 Notes:
 
 - **Enabling it requires an elevated process.** The task is registered with `RunLevel=HighestAvailable`, so the app reports a readable message instead of letting `schtasks` emit its localized access-denied text.
-- **The executable must live in an administrator-only directory.** `HighestAvailable` runs the image elevated at logon, so a portable copy in a user-writable folder is refused; install under `Program Files` (or another admin-only root).
+- **Portable paths are allowed, with a warning.** `HighestAvailable` runs the image elevated at logon, so a copy in a user-writable folder could be replaced to gain elevation; the app warns for common locations such as Downloads/Desktop/Temp.
 - `schtasks` output is decoded using the OEM code page so non-English messages stay readable.
 - After creating the task the app queries it back, so success is only reported once the task is actually queryable.
 - The task document is written as UTF-16LE to the admin-only `%ProgramData%\FrameworkCrate\tasks` directory under an unpredictable hashed name, then removed. Debug/unelevated test runs use `%TEMP%`. A process killed mid-write never reaches the removal, so stale documents are cleaned up on the next run.

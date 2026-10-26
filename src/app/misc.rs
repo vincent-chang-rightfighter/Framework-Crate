@@ -158,48 +158,11 @@ impl App {
                     |msg| msg,
                 ))
             }
-            Message::StartupLaunchQueried(state) => {
-                use crate::system_info::StartupTaskState;
-                match state {
-                    StartupTaskState::Safe { .. } => {
-                        if !self.startup_launch_touched {
-                            self.startup_launch_enabled = true;
-                            self.startup_launch_error = None;
-                        }
-                    }
-                    StartupTaskState::Missing => {
-                        if !self.startup_launch_touched {
-                            self.startup_launch_enabled = false;
-                        }
-                    }
-                    StartupTaskState::Unsafe { command } => {
-                        warn!("Removing unsafe startup task pointing to: {}", command);
-                        self.startup_launch_error = Some(format!(
-                            "Startup task points to a user-writable executable ({command}); \
-                             install under Program Files and re-enable"
-                        ));
-                        if !self.startup_launch_touched {
-                            self.startup_launch_enabled = false;
-                            self.mark_dirty();
-                            return Some(Task::perform(
-                                async {
-                                    crate::util::spawn_blocking_with_timeout(
-                                        std::time::Duration::from_secs(15),
-                                        || crate::system_info::set_startup_launch(false),
-                                    )
-                                    .await
-                                    .unwrap_or_else(Err)
-                                },
-                                |res| Message::StartupLaunchSet(false, res),
-                            ));
-                        }
-                    }
-                    StartupTaskState::Unreadable(e) => {
-                        self.startup_launch_error =
-                            Some(format!("Cannot inspect the startup task: {e}"));
-                    }
+            Message::StartupLaunchQueried(enabled) => {
+                if !self.startup_launch_touched {
+                    self.startup_launch_enabled = *enabled;
+                    self.mark_dirty();
                 }
-                self.mark_dirty();
                 Some(Task::none())
             }
             Message::StartupLaunchSet(enabled, result) => {

@@ -605,76 +605,6 @@ pub fn startup_launch_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Result of inspecting the registered task, including the executable it
-/// would run. The boolean query above cannot detect an old task pointing at a
-/// user-writable image.
-#[derive(Debug, Clone, PartialEq)]
-pub enum StartupTaskState {
-    Missing,
-    Safe { command: String },
-    Unsafe { command: String },
-    Unreadable(String),
-}
-
-pub(crate) fn inspect_startup_task() -> StartupTaskState {
-    let out = match schtasks_output(&["/Query", "/TN", STARTUP_TASK_NAME, "/XML"]) {
-        Ok(out) if out.status.success() => out,
-        Ok(_) => return StartupTaskState::Missing,
-        Err(e) => return StartupTaskState::Unreadable(e),
-    };
-    let xml = decode_task_xml(&out.stdout);
-    let Some(command) = parse_task_command(&xml) else {
-        return StartupTaskState::Unreadable("startup task XML has no command".to_string());
-    };
-    if startup_exe_is_admin_only(std::path::Path::new(&command)) {
-        StartupTaskState::Safe { command }
-    } else {
-        StartupTaskState::Unsafe { command }
-    }
-}
-
-fn decode_task_xml(bytes: &[u8]) -> String {
-    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        let mut units = Vec::with_capacity(rest.len() / 2);
-        for pair in rest.chunks(2) {
-            if let [a, b] = pair {
-                units.push(u16::from_le_bytes([*a, *b]));
-            }
-        }
-        return String::from_utf16_lossy(&units);
-    }
-    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        let mut units = Vec::with_capacity(rest.len() / 2);
-        for pair in rest.chunks(2) {
-            if let [a, b] = pair {
-                units.push(u16::from_be_bytes([*a, *b]));
-            }
-        }
-        return String::from_utf16_lossy(&units);
-    }
-    decode_console_bytes(bytes)
-}
-
-fn unescape_task_xml_text(value: &str) -> String {
-    value
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-}
-
-fn parse_task_command(xml: &str) -> Option<String> {
-    const OPEN: &str = "<Command>";
-    const CLOSE: &str = "</Command>";
-    let start = xml.find(OPEN)? + OPEN.len();
-    let rest = &xml[start..];
-    let end = rest.find(CLOSE)?;
-    let command = unescape_task_xml_text(rest[..end].trim());
-    let command = command.trim_matches('"').trim();
-    (!command.is_empty()).then(|| command.to_string())
-}
-
 /// Runs schtasks with a 5s timeout so a hung Task Scheduler service cannot
 /// freeze the UI thread (toggle handler) or delay startup.
 /// Decodes console child-process output. schtasks errors on zh-TW systems
@@ -1557,41 +1487,26 @@ fn validate_task_command_path(exe: &str) -> Result<(), String> {
     if exe.ends_with('\\') {
         return Err("exe path must not end with backslash".to_string());
     }
-    Ok(())
-}
-
-/// Whether `path` is inside `root` (case-insensitive, separator-aware).
-fn path_is_under(path: &std::path::Path, root: &std::path::Path) -> bool {
-    let path = path.to_string_lossy().to_lowercase();
-    let mut root = root.to_string_lossy().to_lowercase();
-    while root.ends_with(['\\', '/']) {
-        root.pop();
-    }
-    root.push('\\');
-    path.starts_with(&root)
-}
-
-/// The startup task runs with `HighestAvailable`, so the executable must live
-/// in an administrator-only directory. A portable copy in a user-writable
-/// folder would let a standard user replace it and gain elevation at logon.
-fn startup_exe_is_admin_only(exe: &std::path::Path) -> bool {
-    let Ok(exe) = std::fs::canonicalize(exe) else {
-        return false;
-    };
-    let mut roots = Vec::new();
-    for key in [
-        "ProgramFiles",
-        "ProgramFiles(x86)",
-        "ProgramW6432",
-        "SystemRoot",
+    // HighestAvailable runs elevated at logon: an exe in a user-writable
+    // dir (Downloads/Desktop/Temp) can be replaced to gain elevation. Warn
+    // so portable runs stay a conscious choice.
+    let lower = exe.to_lowercase();
+    for risky in [
+        "downloads",
+        "desktop",
+        "\\temp\\",
+        "\\tmp\\",
+        "appdata\\local\\temp",
     ] {
-        if let Some(root) = std::env::var_os(key)
-            && let Ok(root) = std::fs::canonicalize(root)
-        {
-            roots.push(root);
+        if lower.contains(risky) {
+            tracing::warn!(
+                "startup exe is in a user-writable dir ({}); move to Program Files for HighestAvailable safety",
+                exe
+            );
+            break;
         }
     }
-    roots.iter().any(|root| path_is_under(&exe, root))
+    Ok(())
 }
 
 /// Builds the startup task document for `exe`.
@@ -1616,13 +1531,6 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     let output = if enabled {
         cleanup_stale_task_xml();
         let exe = std::env::current_exe().map_err(|e| format!("cannot resolve exe path: {e}"))?;
-        if !startup_exe_is_admin_only(&exe) {
-            return Err(
-                "Launch at Startup requires the app to be installed in Program Files or Windows; \
-                 refusing a user-writable executable path"
-                    .to_string(),
-            );
-        }
         let exe_str = exe.to_str().ok_or("exe path is not valid UTF-8")?;
         // Bounded by schtasks_output timeout so a hung Task Scheduler cannot freeze the UI.
         let xml = build_startup_task(exe_str, &current_user_id()?)?;
@@ -2051,51 +1959,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_task_command_parser_handles_xml_entities() {
-        let xml = r#"<Task><Actions><Exec><Command>&quot;C:\Program Files\Framework Crate\framework-crate.exe&quot;</Command></Exec></Actions></Task>"#;
-        assert_eq!(
-            super::parse_task_command(xml).as_deref(),
-            Some(r"C:\Program Files\Framework Crate\framework-crate.exe")
-        );
-        let ampersand = "<Command>C:\\A&amp;B\\app.exe</Command>";
-        assert_eq!(
-            super::parse_task_command(ampersand).as_deref(),
-            Some(r"C:\A&B\app.exe")
-        );
-        assert_eq!(super::parse_task_command("<Task/>"), None);
-    }
-
-    #[test]
-    fn startup_task_xml_decoder_handles_utf16_bom() {
-        let text = "<Command>C:\\app.exe</Command>";
-        let mut bytes = vec![0xFF, 0xFE];
-        for unit in text.encode_utf16() {
-            bytes.extend_from_slice(&unit.to_le_bytes());
-        }
-        assert_eq!(super::decode_task_xml(&bytes), text);
-    }
-
-    #[test]
-    fn startup_path_requires_an_admin_only_root() {
-        assert!(super::path_is_under(
-            std::path::Path::new(r"C:\Program Files\Framework Crate\framework-crate.exe"),
-            std::path::Path::new(r"C:\Program Files")
-        ));
-        assert!(super::path_is_under(
-            std::path::Path::new(r"c:\program files\Framework Crate\framework-crate.exe"),
-            std::path::Path::new(r"C:\Program Files")
-        ));
-        assert!(!super::path_is_under(
-            std::path::Path::new(r"C:\Program FilesEvil\framework-crate.exe"),
-            std::path::Path::new(r"C:\Program Files")
-        ));
-        assert!(!super::path_is_under(
-            std::path::Path::new(r"C:\Users\vince\Downloads\framework-crate.exe"),
-            std::path::Path::new(r"C:\Program Files")
-        ));
-    }
-
-    #[test]
     fn startup_task_rejects_dangerous_paths_offline() {
         // Runs without elevation, unlike the schtasks round-trip test below.
         let base = r"C:\app\framework-crate.exe";
@@ -2299,7 +2162,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires elevation and an executable under Program Files; run an installed build"]
     fn startup_launch_scheduled_task_round_trip() {
         // Round-trip: enable creates the ONLOGON task, disable deletes it.
         // Registering a /RL HIGHEST task requires elevation, so skip
