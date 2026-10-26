@@ -12,3 +12,15 @@ updates:
           - "*"
     commit-message:
       prefix: "ci"
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    # Group routine updates, but keep the pinned framework_lib/PawnIO-related
+    # review manual because they affect hardware behavior.
+    groups:
+      cargo:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "deps"
