@@ -341,6 +341,27 @@ pub fn enforce_monotonic_duties(points: &mut [[u32; 2]]) {
     }
 }
 
+/// Linear duty at `temp` over sorted points. Used only to decide whether the
+/// rendered curve needs a synthetic 80C floor point; the control path has its
+/// own clamp in `fan_control::calculate_duty_from_curve`.
+fn duty_at_temp(points: &[[u32; 2]], temp: u32) -> u32 {
+    for w in points.windows(2) {
+        let (x1, y1) = (w[0][0] as f64, w[0][1] as f64);
+        let (x2, y2) = (w[1][0] as f64, w[1][1] as f64);
+        if temp as f64 <= x1 {
+            return y1 as u32;
+        }
+        if temp as f64 <= x2 {
+            if x2 == x1 {
+                return y2 as u32;
+            }
+            let ratio = (temp as f64 - x1) / (x2 - x1);
+            return (y1 + ratio * (y2 - y1)).round() as u32;
+        }
+    }
+    100
+}
+
 pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
     // BTreeMap sorted by temp; keep max duty on duplicates to match validate.
     // High-temp floor lives here (not only in validate) so runtime drags
@@ -374,6 +395,14 @@ pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
     // Interpolation is only safe when duty is non-decreasing with
     // temperature; otherwise a rising temperature can lower fan speed.
     enforce_monotonic_duties(&mut full);
+    // The control path clamps >=80C to 60%, but the canvas draws this
+    // polyline. Add the floor point so the rendered curve cannot show a
+    // sub-60% line at 80C while the fan actually runs at 60%.
+    if duty_at_temp(&full, 80) < 60 && !full.iter().any(|p| p[0] == 80) {
+        full.push([80, 60]);
+        full.sort_by_key(|p| p[0]);
+        enforce_monotonic_duties(&mut full);
+    }
     full
 }
 
@@ -881,6 +910,24 @@ mod tests {
         assert!(!pts.iter().any(|p| p[0] == 105));
         assert!(pts.contains(&[100, 100]));
         assert!(pts.contains(&[110, 100]));
+    }
+
+    #[test]
+    fn curve_full_points_inserts_the_displayed_80c_floor_point() {
+        let pts = curve_full_points(&[[79, 0], [85, 60]]);
+        assert!(
+            pts.contains(&[80, 60]),
+            "canvas needs a 60% point at 80C: {pts:?}"
+        );
+    }
+
+    #[test]
+    fn curve_full_points_keeps_points_already_above_the_80c_floor() {
+        let pts = curve_full_points(&[[79, 90], [85, 90]]);
+        assert!(
+            !pts.contains(&[80, 60]),
+            "an already-safe curve must not be lowered: {pts:?}"
+        );
     }
 
     #[test]
