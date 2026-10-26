@@ -471,6 +471,12 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Number of UTF-16 units needed for a registry byte count, rounded up so an
+/// odd (malformed) REG_SZ size cannot under-allocate the output buffer.
+fn registry_u16_buffer_len(bytes: u32) -> usize {
+    (bytes as usize).div_ceil(2)
+}
+
 fn registry_query_value(hkey: HKEY, value_name: *const u16) -> Option<String> {
     let mut buf_size: u32 = 0;
     let mut data_type: u32 = 0;
@@ -496,8 +502,11 @@ fn registry_query_value(hkey: HKEY, value_name: *const u16) -> Option<String> {
         return None;
     }
 
-    let mut buf: Vec<u16> = vec![0u16; (buf_size / 2) as usize];
-    let mut size = buf_size;
+    // Round up: a malformed odd byte count must not make the API write past
+    // the allocation. REG_SZ is normally even, but this is unsafe code and
+    // the value comes from the registry, so fail safe here.
+    let mut buf: Vec<u16> = vec![0u16; registry_u16_buffer_len(buf_size)];
+    let mut size = (buf.len() * 2) as u32;
 
     // SAFETY: Second call with correctly sized buffer.
     let rc = unsafe {
@@ -2074,6 +2083,14 @@ mod tests {
     }
 
     #[test]
+    fn registry_buffer_rounds_odd_byte_counts_up() {
+        assert_eq!(super::registry_u16_buffer_len(0), 0);
+        assert_eq!(super::registry_u16_buffer_len(2), 1);
+        assert_eq!(super::registry_u16_buffer_len(3), 2);
+        assert_eq!(super::registry_u16_buffer_len(4), 2);
+    }
+
+    #[test]
     fn registry_empty_sz_reads_as_empty_string() {
         // Round-trips an empty REG_SZ through HKCU: exercises the
         // sub-nul-size path that used to be misreported as missing.
@@ -2162,6 +2179,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "creates and deletes a real scheduled task; run elevated on a disposable machine"]
     fn startup_launch_scheduled_task_round_trip() {
         // Round-trip: enable creates the ONLOGON task, disable deletes it.
         // Registering a /RL HIGHEST task requires elevation, so skip
