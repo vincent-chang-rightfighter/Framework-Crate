@@ -1015,21 +1015,27 @@ mod tests {
             std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", dir.path());
         }
 
+        // Versions are process-global and other tests may have advanced the
+        // counter; start above the current value so this test is order-safe.
+        let base = LAST_SAVED_VERSION
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(10);
+
         let mut old = Config::default();
         old.fan.mode = FanControlMode::Manual;
         old.fan.manual = Some(ManualConfig { duty_pct: 30 });
-        crate::config::save_versioned(&old, 100, true).unwrap();
+        crate::config::save_versioned(&old, base, true).unwrap();
 
         let mut new = Config::default();
         new.fan.mode = FanControlMode::Manual;
         new.fan.manual = Some(ManualConfig { duty_pct: 70 });
-        crate::config::save_versioned(&new, 200, true).unwrap();
+        crate::config::save_versioned(&new, base + 100, true).unwrap();
 
         // Stale write (lower version than the on-disk newest) must be skipped.
         let mut stale = Config::default();
         stale.fan.mode = FanControlMode::Manual;
         stale.fan.manual = Some(ManualConfig { duty_pct: 10 });
-        crate::config::save_versioned(&stale, 150, true).unwrap();
+        crate::config::save_versioned(&stale, base + 50, true).unwrap();
 
         let path = crate::config::config_path().unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
