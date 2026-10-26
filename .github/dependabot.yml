@@ -22,5 +22,11 @@ updates:
       cargo:
         patterns:
           - "*"
+    ignore:
+      # Stay on parking_lot 0.12 until iced/wgpu move to 0.13. Upgrading
+      # now links two parking_lot generations and raises the MSRV to 1.95.
+      - dependency-name: parking_lot
+        update-types:
+          - version-update:semver-minor
     commit-message:
       prefix: "deps"
