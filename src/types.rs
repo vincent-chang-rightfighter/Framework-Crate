@@ -61,6 +61,14 @@ impl Config {
             self.telemetry.chart_window_seconds = default_chart_window_seconds();
         }
 
+        // Normalize mode-specific config so a hand-edited file cannot leave
+        // the background loop with a missing curve/manual section forever.
+        if self.fan.mode == FanControlMode::Curve && self.fan.curve.is_none() {
+            self.fan.curve = Some(GlobalCurveConfig::default());
+        }
+        if self.fan.mode == FanControlMode::Manual && self.fan.manual.is_none() {
+            self.fan.manual = Some(ManualConfig { duty_pct: 50 });
+        }
         if let Some(ref mut manual) = self.fan.manual {
             manual.duty_pct = manual.duty_pct.clamp(DUTY_PCT_MIN, DUTY_PCT_MAX);
         }
@@ -160,33 +168,17 @@ impl Config {
                 }
                 filtered.sort_by_key(|p| p[0]);
             }
-            // Downgrade 6-point configs (previous 92°C addition) back to 5
-            if filtered.len() == 6 {
-                if let Some(pos) = filtered.iter().position(|p| p[0] == 92) {
-                    filtered.remove(pos);
-                } else {
-                    filtered.truncate(5);
-                }
-            } else if filtered.len() > 6 {
-                let desired = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
-                let mut trimmed: Vec<[u32; 2]> = Vec::new();
-                for &[t, _] in &desired {
-                    if let Some(&p) = filtered.iter().find(|p| p[0] == t) {
-                        trimmed.push(p);
-                    }
-                }
-                for &p in &filtered {
-                    if trimmed.len() >= 5 {
-                        break;
-                    }
-                    if !trimmed.contains(&p) {
-                        trimmed.push(p);
-                    }
-                }
-                trimmed.sort_by_key(|p| p[0]);
-                trimmed.truncate(5);
-                filtered = trimmed;
-            }
+            // Preserve user-authored points. Earlier versions silently
+            // downgraded 6-point curves to 5 (dropping 92C), which lost
+            // hand-edited settings on every load. Only the absolute safety
+            // cap applies now.
+            filtered.truncate(MAX_CURVE_POINTS.saturating_sub(2));
+            // Duty must never decrease as temperature rises. Without this,
+            // a legal pair such as [79, 0] -> [85, 60] interpolates to a
+            // sub-60% duty at 80C even though both stored points obey the
+            // per-point floor. Raising later points keeps the curve safe
+            // and also makes interpolation monotonic.
+            enforce_monotonic_duties(&mut filtered);
             // Append locked endpoints
             filtered.push([CURVE_TEMP_LOCK_START, 100]);
             filtered.push([CURVE_TEMP_MAX, 100]);
@@ -281,7 +273,7 @@ pub struct ManualConfig {
     pub duty_pct: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CurveConfig {
     #[serde(default)]
     pub sensors: Vec<String>,
@@ -295,12 +287,33 @@ pub struct CurveConfig {
     pub rate_limit_down_pct_per_step: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+impl Default for CurveConfig {
+    fn default() -> Self {
+        Self {
+            sensors: Vec::new(),
+            points: default_points(),
+            hysteresis_c: default_hysteresis_c(),
+            rate_limit_pct_per_step: default_rate_limit_pct_per_step(),
+            rate_limit_down_pct_per_step: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GlobalCurveConfig {
     #[serde(flatten)]
     pub curve: CurveConfig,
     #[serde(default = "default_poll_ms")]
     pub poll_ms: u64,
+}
+
+impl Default for GlobalCurveConfig {
+    fn default() -> Self {
+        Self {
+            curve: CurveConfig::default(),
+            poll_ms: default_poll_ms(),
+        }
+    }
 }
 
 fn default_points() -> Vec<[u32; 2]> {
@@ -315,6 +328,17 @@ fn default_hysteresis_c() -> u32 {
 }
 fn default_rate_limit_pct_per_step() -> u32 {
     10
+}
+
+/// Enforces non-decreasing duty over points already sorted by temperature.
+/// Raises later duties instead of lowering earlier ones, so a drag can never
+/// make a warmer temperature spin the fan slower.
+pub fn enforce_monotonic_duties(points: &mut [[u32; 2]]) {
+    let mut floor = 0;
+    for point in points {
+        floor = floor.max(point[1]);
+        point[1] = floor;
+    }
 }
 
 pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
@@ -346,7 +370,10 @@ pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
     // Force locked zone 100–110°C to 100% (user cannot change).
     map.insert(CURVE_TEMP_LOCK_START, 100);
     map.insert(CURVE_TEMP_MAX, 100);
-    let full: Vec<[u32; 2]> = map.into_iter().map(|(t, d)| [t, d]).collect();
+    let mut full: Vec<[u32; 2]> = map.into_iter().map(|(t, d)| [t, d]).collect();
+    // Interpolation is only safe when duty is non-decreasing with
+    // temperature; otherwise a rising temperature can lower fan speed.
+    enforce_monotonic_duties(&mut full);
     full
 }
 
@@ -662,6 +689,75 @@ mod tests {
     }
 
     #[test]
+    fn curve_config_default_is_usable() {
+        // Deriving Default used to leave points empty and poll_ms at 0,
+        // so switching to Curve created an undraggable, 200ms-poll curve
+        // until the config was saved and reloaded.
+        let cfg = GlobalCurveConfig::default();
+        assert_eq!(cfg.curve.points, default_points());
+        assert_eq!(cfg.poll_ms, default_poll_ms());
+        assert_eq!(cfg.curve.hysteresis_c, default_hysteresis_c());
+        assert_eq!(
+            cfg.curve.rate_limit_pct_per_step,
+            default_rate_limit_pct_per_step()
+        );
+    }
+
+    #[test]
+    fn validate_curve_mode_without_curve_creates_default() {
+        let mut c = Config::default();
+        c.fan.mode = FanControlMode::Curve;
+        c.validate();
+        let curve = c.fan.curve.expect("curve mode must get a default curve");
+        assert_eq!(curve.curve.points, {
+            let mut expected = default_points();
+            expected.push([CURVE_TEMP_LOCK_START, 100]);
+            expected.push([CURVE_TEMP_MAX, 100]);
+            expected
+        });
+    }
+
+    #[test]
+    fn validate_manual_mode_without_manual_creates_default() {
+        let mut c = Config::default();
+        c.fan.mode = FanControlMode::Manual;
+        c.validate();
+        assert_eq!(c.fan.manual.map(|m| m.duty_pct), Some(50));
+    }
+
+    #[test]
+    fn validate_enforces_monotonic_duty() {
+        let mut c = Config::default();
+        c.fan.curve = Some(GlobalCurveConfig {
+            curve: CurveConfig {
+                sensors: vec![],
+                points: vec![[30, 100], [60, 0], [80, 0]],
+                hysteresis_c: 2,
+                rate_limit_pct_per_step: 10,
+                rate_limit_down_pct_per_step: None,
+            },
+            poll_ms: 1000,
+        });
+        c.validate();
+        let pts = &c.fan.curve.as_ref().unwrap().curve.points;
+        let mut previous = 0;
+        for p in pts {
+            assert!(
+                p[1] >= previous,
+                "duty dropped in validated points: {pts:?}"
+            );
+            previous = p[1];
+        }
+    }
+
+    #[test]
+    fn enforce_monotonic_duties_raises_not_lowers() {
+        let mut points = [[30, 20], [45, 10], [60, 80], [75, 40]];
+        enforce_monotonic_duties(&mut points);
+        assert_eq!(points, [[30, 20], [45, 20], [60, 80], [75, 80]]);
+    }
+
+    #[test]
     fn validate_curve_points_clamp() {
         let mut c = Config::default();
         c.fan.curve = Some(GlobalCurveConfig {
@@ -745,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_downgrades_6_with_92_to_5() {
+    fn validate_preserves_a_six_point_curve() {
         let mut c = Config::default();
         c.fan.curve = Some(GlobalCurveConfig {
             curve: CurveConfig {
@@ -759,9 +855,10 @@ mod tests {
         });
         c.validate();
         let pts = &c.fan.curve.as_ref().unwrap().curve.points;
-        // 6 with 92 -> 5+2=7, 92 removed
-        assert_eq!(pts.len(), 7);
-        assert!(!pts.contains(&[92, 100]));
+        // 6 editable + 2 locked; hand-authored points are preserved instead
+        // of being silently downgraded to 5.
+        assert_eq!(pts.len(), 8);
+        assert!(pts.contains(&[92, 100]));
         assert!(pts.contains(&[85, 100]));
     }
 

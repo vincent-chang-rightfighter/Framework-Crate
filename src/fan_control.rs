@@ -99,41 +99,48 @@ impl CurveStepper {
 }
 
 pub fn calculate_duty_from_curve(temp: i32, full_points: &[[u32; 2]]) -> u32 {
-    if temp >= crate::types::CURVE_TEMP_LOCK_START as i32 {
-        return 100;
-    }
-    if full_points.len() < 2 {
+    let duty = if temp >= crate::types::CURVE_TEMP_LOCK_START as i32 {
+        100
+    } else if full_points.len() < 2 {
         // Defensive: full_points always has >=2, but raw slices may not.
-        return 100;
-    }
-    debug_assert!(
-        full_points.len() >= 2,
-        "full_points must have at least 2 elements (curve_full_points ensures this)"
-    );
-    let temp = temp as f64;
-    for w in full_points.windows(2) {
-        // windows(2) always yields 2-element slices; index directly so a
-        // logic error degrades to a skipped segment instead of panicking
-        // in the fan control path.
-        if w.len() != 2 {
-            continue;
-        }
-        let (p1, p2) = (w[0], w[1]);
-        let (x1, y1) = (p1[0] as f64, p1[1] as f64);
-        let (x2, y2) = (p2[0] as f64, p2[1] as f64);
-        if temp <= x1 {
-            return y1 as u32;
-        }
-        if temp <= x2 {
-            if x2 == x1 {
-                return y2 as u32;
+        100
+    } else {
+        debug_assert!(
+            full_points.len() >= 2,
+            "full_points must have at least 2 elements (curve_full_points ensures this)"
+        );
+        let temp_f = temp as f64;
+        let mut duty = None;
+        for w in full_points.windows(2) {
+            // windows(2) always yields 2-element slices; index directly so a
+            // logic error degrades to a skipped segment instead of panicking
+            // in the fan control path.
+            if w.len() != 2 {
+                continue;
             }
-            let ratio = (temp - x1) / (x2 - x1);
-            return (y1 + ratio * (y2 - y1)).round() as u32;
+            let (p1, p2) = (w[0], w[1]);
+            let (x1, y1) = (p1[0] as f64, p1[1] as f64);
+            let (x2, y2) = (p2[0] as f64, p2[1] as f64);
+            if temp_f <= x1 {
+                duty = Some(y1 as u32);
+                break;
+            }
+            if temp_f <= x2 {
+                duty = Some(if x2 == x1 {
+                    y2 as u32
+                } else {
+                    let ratio = (temp_f - x1) / (x2 - x1);
+                    (y1 + ratio * (y2 - y1)).round() as u32
+                });
+                break;
+            }
         }
-    }
-    // No curve: max fan to prevent overheat.
-    100
+        // No curve: max fan to prevent overheat.
+        duty.unwrap_or(100)
+    };
+    // Defense-in-depth for the high-temp floor: even with monotonic points,
+    // a segment starting just below 80C can interpolate below 60% at 80C.
+    if temp >= 80 { duty.max(60) } else { duty }
 }
 
 pub fn apply_rate_limit(current: u32, target: u32, max_change: u32) -> u32 {
@@ -184,6 +191,28 @@ mod tests {
         assert_eq!(calculate_duty_from_curve(50, &points), 50);
         assert_eq!(calculate_duty_from_curve(110, &points), 100);
         assert_eq!(calculate_duty_from_curve(100, &points), 100);
+    }
+
+    #[test]
+    fn calculate_duty_interpolation_keeps_the_80c_floor() {
+        // Both points are legal (79C has no floor, 85C is raised to 60%),
+        // but the segment between them would interpolate to 10% at 80C.
+        let points = types::curve_full_points(&[[79, 0], [85, 60]]);
+        assert_eq!(calculate_duty_from_curve(80, &points), 60);
+        assert_eq!(calculate_duty_from_curve(81, &points), 60);
+    }
+
+    #[test]
+    fn calculate_duty_monotonic_even_with_a_decreasing_point() {
+        // curve_full_points raises later points so rising temperature can
+        // never reduce duty.
+        let points = types::curve_full_points(&[[30, 100], [60, 0], [80, 0]]);
+        let mut previous = 0;
+        for temp in 0..=110 {
+            let duty = calculate_duty_from_curve(temp, &points);
+            assert!(duty >= previous, "duty dropped at {temp}C");
+            previous = duty;
+        }
     }
 
     #[test]
