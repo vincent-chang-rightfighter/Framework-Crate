@@ -85,6 +85,10 @@ pub fn powershell_exe() -> std::path::PathBuf {
     system32_exe(r"WindowsPowerShell\v1.0\powershell.exe")
 }
 
+/// Hard cap for config/BIOS snapshots; both are small TOML documents. The
+/// elevated app must not be made to allocate an arbitrary user-sized file.
+const MAX_VALIDATED_FILE_BYTES: u64 = 1024 * 1024;
+
 /// Reads a regular file through one validated handle. Rejects reparse points,
 /// directories and files with multiple hard links before reading any data.
 pub(crate) fn read_validated_file_bytes(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
@@ -119,7 +123,7 @@ pub(crate) fn read_validated_file_bytes(path: &std::path::Path) -> std::io::Resu
     if handle == INVALID_HANDLE_VALUE {
         return Err(std::io::Error::last_os_error());
     }
-    let mut file = unsafe { std::fs::File::from_raw_handle(handle) };
+    let file = unsafe { std::fs::File::from_raw_handle(handle) };
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
         return Err(std::io::Error::last_os_error());
@@ -142,8 +146,22 @@ pub(crate) fn read_validated_file_bytes(path: &std::path::Path) -> std::io::Resu
             "refusing to read a file with multiple hard links",
         ));
     }
-    let mut content = Vec::new();
-    file.read_to_end(&mut content)?;
+    let size = ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64;
+    if size > MAX_VALIDATED_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "refusing to read an oversized file",
+        ));
+    }
+    let mut content = Vec::with_capacity(size.min(64 * 1024) as usize);
+    file.take(MAX_VALIDATED_FILE_BYTES + 1)
+        .read_to_end(&mut content)?;
+    if content.len() as u64 > MAX_VALIDATED_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file grew beyond the size limit while reading",
+        ));
+    }
     Ok(content)
 }
 
@@ -243,6 +261,17 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "value = 1").unwrap();
         assert_eq!(read_validated_file(&path).unwrap(), "value = 1");
+    }
+
+    #[test]
+    fn read_validated_file_rejects_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.toml");
+        std::fs::write(&path, vec![b'x'; MAX_VALIDATED_FILE_BYTES as usize + 1]).unwrap();
+        assert_eq!(
+            read_validated_file(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 
     #[test]

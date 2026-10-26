@@ -486,12 +486,15 @@ fn revoke_everyone_write(path: &std::path::Path) -> Result<bool, &'static str> {
 /// Backs up corrupt config bytes before next save overwrites them.
 fn backup_corrupt_config(path: &std::path::Path, content: &[u8]) {
     use std::io::Write;
-    let backup = path.with_extension(format!(
-        "toml.corrupt-{}-{}-{}",
-        crate::util::current_time_ms(),
-        std::process::id(),
-        TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
-    ));
+    let backup = path.with_extension("toml.corrupt");
+    if backup.exists() {
+        tracing::warn!(
+            "{} is corrupt; keeping existing backup {}",
+            path.display(),
+            backup.display()
+        );
+        return;
+    }
     let result = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
