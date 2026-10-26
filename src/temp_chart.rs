@@ -28,7 +28,6 @@ pub struct ThermalHistory {
     draft: std::collections::VecDeque<TempSample>,
     published: Arc<std::collections::VecDeque<TempSample>>,
     last_publish_ms: i64,
-    window_ms: i64,
     /// Track whether draft changed since last publish to avoid unnecessary clone.
     draft_dirty: bool,
 }
@@ -48,14 +47,13 @@ impl ThermalHistory {
             draft,
             published: Arc::new(std::collections::VecDeque::new()),
             last_publish_ms: 0,
-            window_ms: HISTORY_SECONDS * 1_000,
             draft_dirty: false,
         }
     }
 
-    /// Update retention window and prune old samples.
-    pub fn set_window(&mut self, window_seconds: i64) {
-        self.window_ms = (window_seconds * 1_000).clamp(5_000, HISTORY_MAX_MS);
+    /// Prune old samples and force the next snapshot to republish after the
+    /// chart window changes. The selected window itself lives in `App`.
+    pub fn set_window(&mut self) {
         // Retain up to max window so switching from 30s to 60s shows history.
         let now = crate::util::monotonic_ms() as i64;
         let cutoff = now - HISTORY_MAX_MS;
@@ -476,26 +474,12 @@ mod tests {
         h.push_sample(sample(now - 200_000), now - 200_000);
         h.push_sample(sample(now - 100_000), now - 100_000);
         h.push_sample(sample(now), now);
-        // Switch window from 30s to 60s should not prune 200s-old entry (within 300s)
-        h.set_window(60);
+        // A window change should not prune a 200s-old entry (within 300s retention).
+        h.set_window();
         assert_eq!(h.draft.len(), 3);
         // Push with far future prunes beyond 300s
         h.push_sample(sample(now + 150_000), now + 150_000);
         // Oldest (now-200k) is now 350k old relative to new now, should be pruned
         assert_eq!(h.draft.len(), 3);
-    }
-
-    #[test]
-    fn set_window_clamps_and_prunes() {
-        let mut h = ThermalHistory::new();
-        let now = 500_000i64;
-        h.push_sample(sample(now), now);
-        h.set_window(15);
-        assert_eq!(h.window_ms, 15_000);
-        h.set_window(60);
-        assert_eq!(h.window_ms, 60_000);
-        // Very large window clamps to 300s
-        h.set_window(1000);
-        assert_eq!(h.window_ms, HISTORY_MAX_MS);
     }
 }

@@ -48,7 +48,7 @@ impl App {
                 if crate::temp_chart::HISTORY_WINDOW_OPTIONS.contains(secs) {
                     self.chart_window_seconds = *secs;
                     with_write_lock(&self.state.thermal.history, |hist| {
-                        Arc::make_mut(hist).set_window(*secs);
+                        Arc::make_mut(hist).set_window();
                     });
                     self.mutate_config(|cfg| {
                         cfg.telemetry.chart_window_seconds = *secs;

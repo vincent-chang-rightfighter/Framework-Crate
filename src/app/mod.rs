@@ -355,7 +355,7 @@ impl App {
         };
 
         with_write_lock(&state.thermal.history, |h| {
-            Arc::make_mut(h).set_window(loaded_config.telemetry.chart_window_seconds);
+            Arc::make_mut(h).set_window();
         });
 
         let cpu = system_info::cpu_name();
