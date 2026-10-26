@@ -1478,26 +1478,41 @@ fn validate_task_command_path(exe: &str) -> Result<(), String> {
     if exe.ends_with('\\') {
         return Err("exe path must not end with backslash".to_string());
     }
-    // HighestAvailable runs elevated at logon: an exe in a user-writable
-    // dir (Downloads/Desktop/Temp) can be replaced by anyone to gain
-    // elevation. Warn loudly so portable runs are a conscious choice.
-    let lower = exe.to_lowercase();
-    for risky in [
-        "downloads",
-        "desktop",
-        "\\temp\\",
-        "\\tmp\\",
-        "appdata\\local\\temp",
+    Ok(())
+}
+
+/// Whether `path` is inside `root` (case-insensitive, separator-aware).
+fn path_is_under(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let path = path.to_string_lossy().to_lowercase();
+    let mut root = root.to_string_lossy().to_lowercase();
+    while root.ends_with(['\\', '/']) {
+        root.pop();
+    }
+    root.push('\\');
+    path.starts_with(&root)
+}
+
+/// The startup task runs with `HighestAvailable`, so the executable must live
+/// in an administrator-only directory. A portable copy in a user-writable
+/// folder would let a standard user replace it and gain elevation at logon.
+fn startup_exe_is_admin_only(exe: &std::path::Path) -> bool {
+    let Ok(exe) = std::fs::canonicalize(exe) else {
+        return false;
+    };
+    let mut roots = Vec::new();
+    for key in [
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "SystemRoot",
     ] {
-        if lower.contains(risky) {
-            tracing::warn!(
-                "startup exe is in a user-writable dir ({}); move to Program Files for HighestAvailable safety",
-                exe
-            );
-            break;
+        if let Some(root) = std::env::var_os(key)
+            && let Ok(root) = std::fs::canonicalize(root)
+        {
+            roots.push(root);
         }
     }
-    Ok(())
+    roots.iter().any(|root| path_is_under(&exe, root))
 }
 
 /// Builds the startup task document for `exe`.
@@ -1522,6 +1537,13 @@ pub fn set_startup_launch(enabled: bool) -> Result<(), String> {
     let output = if enabled {
         cleanup_stale_task_xml();
         let exe = std::env::current_exe().map_err(|e| format!("cannot resolve exe path: {e}"))?;
+        if !startup_exe_is_admin_only(&exe) {
+            return Err(
+                "Launch at Startup requires the app to be installed in Program Files or Windows; \
+                 refusing a user-writable executable path"
+                    .to_string(),
+            );
+        }
         let exe_str = exe.to_str().ok_or("exe path is not valid UTF-8")?;
         // Bounded by schtasks_output timeout so a hung Task Scheduler cannot freeze the UI.
         let xml = build_startup_task(exe_str, &current_user_id()?)?;
@@ -1950,6 +1972,26 @@ mod tests {
     }
 
     #[test]
+    fn startup_path_requires_an_admin_only_root() {
+        assert!(super::path_is_under(
+            std::path::Path::new(r"C:\Program Files\Framework Crate\framework-crate.exe"),
+            std::path::Path::new(r"C:\Program Files")
+        ));
+        assert!(super::path_is_under(
+            std::path::Path::new(r"c:\program files\Framework Crate\framework-crate.exe"),
+            std::path::Path::new(r"C:\Program Files")
+        ));
+        assert!(!super::path_is_under(
+            std::path::Path::new(r"C:\Program FilesEvil\framework-crate.exe"),
+            std::path::Path::new(r"C:\Program Files")
+        ));
+        assert!(!super::path_is_under(
+            std::path::Path::new(r"C:\Users\vince\Downloads\framework-crate.exe"),
+            std::path::Path::new(r"C:\Program Files")
+        ));
+    }
+
+    #[test]
     fn startup_task_rejects_dangerous_paths_offline() {
         // Runs without elevation, unlike the schtasks round-trip test below.
         let base = r"C:\app\framework-crate.exe";
@@ -2153,6 +2195,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires elevation and an executable under Program Files; run an installed build"]
     fn startup_launch_scheduled_task_round_trip() {
         // Round-trip: enable creates the ONLOGON task, disable deletes it.
         // Registering a /RL HIGHEST task requires elevation, so skip
