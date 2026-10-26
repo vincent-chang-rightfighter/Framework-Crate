@@ -61,3 +61,4 @@ strip = true
 # Unwind (not abort) so the background supervisor and quit/final fan
 # handover can run after a panic instead of killing the process with
 # fans stuck on a manual duty.
+panic = "unwind"
