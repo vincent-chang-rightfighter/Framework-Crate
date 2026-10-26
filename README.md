@@ -28,8 +28,8 @@ Download the `.exe`, then run it as administrator. PawnIO is optional and only n
 - **Fan Control** — Auto (firmware), manual (0–100% duty, optional per-fan), and curve mode with draggable points on a canvas (default 5 points, hysteresis, and rate limiting; live sensor markers shown on the curve)
 - **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity
 - **Live Telemetry** — Real-time temperature chart (selectable 15/30/60s window, default 30s), per-sensor display with colored indicators, and fan RPM in the header
-- **Misc Panel** — Keyboard backlight slider, fingerprint LED level, expansion card, and USB-C / HDMI / DP port classification
-- **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download); original factory limits are saved on first run for `Reset`. Writes are capped per model (Laptop 12 → 40W, 13 → 70W, 16 → 100W, Desktop → 120W), require ≥5W when enabled, and require PL1 ≤ PL2. AMD and other vendors are not supported.
+- **Misc Panel** — Keyboard backlight slider, fingerprint LED level, and USB-C / HDMI / DP port classification from PD state (expansion-card firmware enumeration is not implemented yet)
+- **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download); original factory limits are saved on the first run while on AC for `Reset`. Writes are capped per model (Laptop 12 → 40W, 13 → 70W, 16 → 100W, Desktop → 120W), require ≥5W when enabled, and require PL1 ≤ PL2. AMD and other vendors are not supported.
 - **About Page** — Hardware info (CPU, RAM, display, BIOS), software settings (poll rate, refresh interval, launch at startup), GitHub link, one-click copy buttons for the manual-download URLs, and third-party license notices
 - **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit), icon restored automatically if Explorer restarts
 - **Launch at Startup** — Registers a per-user logon task so the tray app comes back after a reboot. The task document is generated in-process and handed to `schtasks /Create /XML`; the settings that matter (unlimited execution limit, battery conditions cleared, restart on failure) are asserted by tests without needing elevation
@@ -140,7 +140,7 @@ framework_lib (CrosEc) → ec_serial (single FIFO writer) → background_task �
 - **Hardware access**: The `framework_lib` crate calls the EC directly via the kernel driver (no subprocess)
 - **EC serialization**: every EC call is dispatched through one FIFO worker (`ec_serial`), so at most one driver call is ever in flight and hardware execution order always matches submission order; callers time out individually without wedging the pool
 - **Config**: `dirs::config_dir() / framework-crate/config.toml`
-- **Background polling**: tokio task on LP-E core, 200ms–2s interval (idle slowdown)
+- **Background polling**: tokio task, 200ms–2s interval (idle slowdown)
 - **UI refresh**: self-rescheduling tick (50–1000ms), idle 1s, hidden 2s
 - **Lock strategy**: `Arc<RwLock<Arc<T>>>` for shared state, narrow lock scope (<1µs)
 - **State organization**: `AppState` split into `FanState`, `ThermalState`, `PeripheralState`, `BatteryState`, `SystemState`, `LifecycleState`, plus `CpuPowerState`
@@ -152,7 +152,7 @@ framework_lib (CrosEc) → ec_serial (single FIFO writer) → background_task �
 - `SensorCache.sorted/colors` uses `Arc<Vec>` — zero-copy per UI tick
 - Config locks are held for less than 1µs by reading only the needed fields and dropping immediately
 - `curve_full_points` is debounced (100ms after the last drag edit)
-- PD port history is pushed only when data changes
+- PD port history keeps the last few scans (needed to distinguish USB-A cards from transient states)
 - The fan curve keeps running during idle periods to maintain temperature response
 - The `mutate_config` helper reduces boilerplate for config mutations
 - Canvas editor uses cached rendering with content-based invalidation (points, sensor marks, hover/drag state)
@@ -181,7 +181,7 @@ $p.Kill()
 
 Config file location: `%APPDATA%/framework-crate/config.toml`
 
-On first run with PawnIO available, the original factory PL1/PL2 (MSR + MMIO watts, enabled, clamped, time window, and RAPL units) are saved to `%APPDATA%/framework-crate/bios_defaults.toml`. `Reset` in the UI restores this persisted snapshot (the effective `min(MSR, MMIO)`). Delete that file to re-capture the current BIOS values on next launch.
+On the first run while on AC with PawnIO available, the original factory PL1/PL2 (MSR + MMIO watts, enabled, clamped, time window, and RAPL units) are saved to `%APPDATA%/framework-crate/bios_defaults.toml`. `Reset` in the UI restores this persisted snapshot (the effective `min(MSR, MMIO)`). Delete that file to re-capture the current BIOS values on the next AC-powered launch.
 
 ```toml
 [fan]
@@ -278,7 +278,7 @@ The section reads and optionally writes PL1/PL2 via official PawnIO Modules. Tho
 
 A missing file blocks CPU Power; a hash mismatch also blocks use — update the app for the new release, or set `FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1` only after manual verification. Failed download shows manual instructions: download latest `release_*.zip` from the releases page and place `IntelMSR.bin` + `IntelMCHBAR.bin` into `%APPDATA%/framework-crate/modules/`. Use **Open Modules Folder** and **Redetect** in the UI to verify — no restart needed.
 
-The first successful RAPL read also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` and resume-from-sleep both restore `min(MSR, MMIO)` from that snapshot.
+The first successful RAPL read while on AC also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` restores `min(MSR, MMIO)` from that snapshot. After sleep/resume the app re-reads the live limits and resumes sync with the user's desired values; it does not overwrite them with the BIOS snapshot.
 
 **Requirements:**
 - PawnIO installed
