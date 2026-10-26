@@ -65,21 +65,15 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                     active_manual_duty_low(false, ctx.manual_duty, &per_fan, fan_count)
                 };
                 if low {
-                    tracing::warn!(
-                        "Manual mode: {}C (non-battery max) with sub-60% duty, handing to firmware",
-                        max_temp
-                    );
-                    // No shutdown re-check needed: this arm already returned
-                    // on shutdown above, and exec submits synchronously.
-                    let ec_clone = Arc::clone(ctx.ec);
-                    let _ = crate::ec_serial::exec(
-                        "manual-high-temp-handover",
-                        crate::util::EC_IO_TIMEOUT,
-                        ec_clone,
-                        move |ec| ec.autofanctrl(),
-                    )
-                    .await;
-                    return Flow::Next;
+                    return ctx
+                        .handover_to_firmware(
+                            "manual-high-temp-handover",
+                            &format!(
+                                "Manual mode: {}C (non-battery max) with sub-60% duty, handed to firmware",
+                                max_temp
+                            ),
+                        )
+                        .await;
                 }
             }
         }
@@ -89,42 +83,15 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     let last_ok = ctx.state.thermal.last_success_ms.load(Ordering::Acquire);
     if last_ok == 0 || ctx.now_ms.saturating_sub(last_ok) > THERMAL_STALE_MS {
         // Read failures are counted by the background loop that performs
-        // the thermal read; counting here too would double-count one bad
-        // poll. This arm only hands over.
-        if shutdown_requested(ctx.state) {
-            return Flow::Stop;
-        }
-        let ec_clone = Arc::clone(ctx.ec);
-        match crate::ec_serial::exec(
-            "manual-stale-handover",
-            crate::util::EC_IO_TIMEOUT,
-            ec_clone,
-            move |ec| ec.autofanctrl(),
-        )
-        .await
-        {
-            Ok(Ok(())) => {
-                tracing::warn!(
-                    "Manual mode: stale thermal ({}ms), handed fan control to firmware",
-                    ctx.now_ms.saturating_sub(last_ok)
-                );
-            }
-            Ok(Err(e)) => {
-                // Failed handover write: write budget, not read budget.
-                warn!("Manual stale fail-safe autofanctrl failed: {}", e);
-                ctx.consecutive_ec_write_failures += 1;
-                if ctx.consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
-                    reset_ec_after_failures(ctx.state, ctx.consecutive_ec_write_failures);
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    return Flow::Next;
-                }
-            }
-            Err(join_err) => {
-                warn!("EC spawn panicked (manual stale fail-safe): {}", join_err);
-                reset_ec_on_panic(ctx.state);
-            }
-        }
-        return Flow::Next;
+        // the thermal read; this arm only hands over. The shared helper
+        // throttles repeated handovers and resets the write-failure run.
+        let reason = format!(
+            "Manual mode: stale thermal ({}ms), handed fan control to firmware",
+            ctx.now_ms.saturating_sub(last_ok)
+        );
+        return ctx
+            .handover_to_firmware("manual-stale-handover", &reason)
+            .await;
     }
     let unified = ctx.state.fan.unified_duty.load(Ordering::Acquire);
     if unified {
@@ -379,7 +346,7 @@ mod tests {
             curve_sensors: Vec::new(),
             consecutive_ec_write_failures: 0,
             last_duty_write_ms: 60_000,
-            last_curve_failover_ms: 0,
+            last_handover_ms: 0,
             last_manual_duty: Some(100),
             manual_ramp_current: Some(100),
             manual_per_fan_ramp: &mut ramp,

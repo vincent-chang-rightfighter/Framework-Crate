@@ -122,7 +122,7 @@ mod tests {
             curve_sensors: Vec::new(),
             consecutive_ec_write_failures: 0,
             last_duty_write_ms: 0,
-            last_curve_failover_ms: 0,
+            last_handover_ms: 0,
             last_manual_duty: Some(42),
             manual_ramp_current: Some(42),
             manual_per_fan_ramp: &mut ramp,

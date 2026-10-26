@@ -76,7 +76,7 @@ pub(super) struct FanCtx<'a> {
     // bad poll. Write failures use consecutive_ec_write_failures below.
     pub consecutive_ec_write_failures: u32,
     pub last_duty_write_ms: u64,
-    pub last_curve_failover_ms: u64,
+    pub last_handover_ms: u64,
     pub last_manual_duty: Option<u32>,
     pub manual_ramp_current: Option<u32>,
     pub manual_per_fan_ramp: &'a mut Option<Vec<u32>>,
@@ -84,6 +84,48 @@ pub(super) struct FanCtx<'a> {
     pub last_fan_mode: Option<crate::types::FanControlMode>,
     pub last_unified_duty: Option<bool>,
     pub just_resumed: bool,
+}
+
+impl FanCtx<'_> {
+    /// Hands fan control back to firmware with shared throttling and
+    /// write-failure accounting. Every failover path (stale thermal, missing
+    /// config, no usable temperature, manual high-temp guard) goes through
+    /// this so a persistent condition cannot spam `autofanctrl` every poll,
+    /// and a successful handover clears the consecutive-write-failure run.
+    pub(super) async fn handover_to_firmware(&mut self, op: &'static str, reason: &str) -> Flow {
+        if shutdown_requested(self.state) {
+            return Flow::Stop;
+        }
+        if self.now_ms.saturating_sub(self.last_handover_ms) < CURVE_TEMP_FAILOVER_MS {
+            return Flow::Next;
+        }
+        // Stamp the attempt before the write so failures are throttled too.
+        self.last_handover_ms = self.now_ms;
+        let ec_clone = Arc::clone(self.ec);
+        match crate::ec_serial::exec(op, crate::util::EC_IO_TIMEOUT, ec_clone, move |ec| {
+            ec.autofanctrl()
+        })
+        .await
+        {
+            Ok(Ok(())) => {
+                self.consecutive_ec_write_failures = 0;
+                warn!("{}", reason);
+            }
+            Ok(Err(e)) => {
+                warn!("{} failed: {}", op, e);
+                self.consecutive_ec_write_failures += 1;
+                if self.consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
+                    reset_ec_after_failures(self.state, self.consecutive_ec_write_failures);
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                }
+            }
+            Err(join_err) => {
+                warn!("EC spawn panicked ({}): {}", op, join_err);
+                reset_ec_on_panic(self.state);
+            }
+        }
+        Flow::Next
+    }
 }
 
 /// Resets EC client after spawn panic so next iteration reinitializes.
@@ -430,6 +472,12 @@ pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<dyn c
         record_thermal_sample(state, t);
     }
     if let Some(bat) = power {
+        // Publish AC state here as well as in the poll loop: the startup
+        // BIOS-defaults capture runs right after this refresh and must not
+        // depend on a later CPU-power poll (which is skipped while hidden).
+        if let Some(ac_present) = bat.ac_present {
+            crate::cpu_power::publish_ac_snapshot(ac_present);
+        }
         with_write_lock(&battery_ref, |guard| {
             *guard = Arc::new(Some(crate::types::BatteryInfo { power_info: bat }));
         });
@@ -519,7 +567,7 @@ pub fn spawn(state: AppState) {
                 let mut last_pd_success_ms: u64 = 0;
                 let mut last_expansion_success_ms: u64 = 0;
                 // Last curve fail-safe handover time.
-                let mut last_curve_failover_ms: u64 = 0;
+                let mut last_handover_ms: u64 = 0;
                 // True on iteration after resume to re-assert manual control.
                 let mut just_resumed = false;
                 let mut manual_ramp_current: Option<u32> = if saved_duty > 0 {
@@ -604,6 +652,7 @@ pub fn spawn(state: AppState) {
                         // immediately on the resume iteration; otherwise Curve duty
                         // could stay un-asserted for up to 30s after a short sleep.
                         last_duty_write_ms = 0;
+                        last_handover_ms = 0;
                         // Retain thermal history so the chart does not flash blank;
                         // stale samples are pruned by the normal window retention.
                         tracing::warn!(
@@ -622,6 +671,7 @@ pub fn spawn(state: AppState) {
                         manual_per_fan_ramp = None;
                         last_fan_mode = None;
                         last_duty_write_ms = 0;
+                        last_handover_ms = 0;
                         bg_state2.fan.last_applied_duty.store(0, Ordering::Release);
                         tracing::warn!(
                             "[EC RESET] fan controller state invalidated, will re-assert mode"
@@ -974,7 +1024,8 @@ pub fn spawn(state: AppState) {
                     // Versions rarely change; only fetch a few times at startup.
                     if versions_scan_attempts < 3
                         && read_lock(&bg_state2.system.versions).is_none()
-                        && now_ms.saturating_sub(last_versions_scan) >= VERSIONS_REFRESH_MS
+                        && (versions_scan_attempts == 0
+                            || now_ms.saturating_sub(last_versions_scan) >= VERSIONS_REFRESH_MS)
                     {
                         last_versions_scan = now_ms;
                         let ec_clone = Arc::clone(&ec);
@@ -1117,7 +1168,7 @@ pub fn spawn(state: AppState) {
                         curve_sensors,
                         consecutive_ec_write_failures,
                         last_duty_write_ms,
-                        last_curve_failover_ms,
+                        last_handover_ms,
                         last_manual_duty,
                         manual_ramp_current,
                         manual_per_fan_ramp: &mut manual_per_fan_ramp,
@@ -1134,7 +1185,7 @@ pub fn spawn(state: AppState) {
                     // Write back the owned copies the arms may have mutated.
                     consecutive_ec_write_failures = ctx.consecutive_ec_write_failures;
                     last_duty_write_ms = ctx.last_duty_write_ms;
-                    last_curve_failover_ms = ctx.last_curve_failover_ms;
+                    last_handover_ms = ctx.last_handover_ms;
                     last_manual_duty = ctx.last_manual_duty;
                     manual_ramp_current = ctx.manual_ramp_current;
                     last_fan_mode = ctx.last_fan_mode;

@@ -5,8 +5,8 @@ use std::sync::atomic::Ordering;
 use tracing::warn;
 
 use super::{
-    CURVE_TEMP_FAILOVER_MS, FAN_REASSERT_INTERVAL_MS, FanCtx, Flow, MAX_EC_WRITE_FAILURES,
-    THERMAL_STALE_MS, reset_ec_after_failures, reset_ec_on_panic, shutdown_requested,
+    FAN_REASSERT_INTERVAL_MS, FanCtx, Flow, MAX_EC_WRITE_FAILURES, THERMAL_STALE_MS,
+    reset_ec_after_failures, reset_ec_on_panic, shutdown_requested,
 };
 use crate::util::read_lock;
 
@@ -18,112 +18,44 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     let is_stale = last_ok == 0 || ctx.now_ms.saturating_sub(last_ok) > THERMAL_STALE_MS;
     if is_stale {
         // Read failures are counted by the background loop that performs
-        // the thermal read; counting here too would double-count one bad
-        // poll and reset the EC twice as fast. This arm only hands over.
-        // Immediate handover when no fresh sample.
-        if shutdown_requested(ctx.state) {
-            return Flow::Stop;
-        }
-        let ec_clone = Arc::clone(ctx.ec);
-        match crate::ec_serial::exec(
-            "curve-stale-handover",
-            crate::util::EC_IO_TIMEOUT,
-            ec_clone,
-            move |ec| ec.autofanctrl(),
-        )
-        .await
-        {
-            Ok(Ok(())) => {
-                ctx.last_curve_failover_ms = ctx.now_ms;
-                tracing::warn!(
-                    "Curve mode: stale thermal ({}ms), handed fan control to firmware",
-                    ctx.now_ms.saturating_sub(last_ok)
-                );
-            }
-            Ok(Err(e)) => {
-                // A failed handover write counts toward the *write*
-                // budget, not the read budget the background loop owns.
-                warn!("Curve stale fail-safe autofanctrl failed: {}", e);
-                ctx.consecutive_ec_write_failures += 1;
-                if ctx.consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
-                    reset_ec_after_failures(ctx.state, ctx.consecutive_ec_write_failures);
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    return Flow::Next;
-                }
-            }
-            Err(join_err) => {
-                warn!("EC spawn panicked (curve stale fail-safe): {}", join_err);
-                reset_ec_on_panic(ctx.state);
-            }
-        }
-        return Flow::Next;
+        // the thermal read; this arm only hands over. The shared helper
+        // throttles repeated handovers and resets the write-failure run.
+        let reason = format!(
+            "Curve mode: stale thermal ({}ms), handed fan control to firmware",
+            ctx.now_ms.saturating_sub(last_ok)
+        );
+        return ctx
+            .handover_to_firmware("curve-stale-handover", &reason)
+            .await;
     }
     // Snapshot the sample and drop the lock: holding it across the EC
     // awaits below blocks the thermal writer. ThermalData clones cheap
     // (temps is already an Arc).
     let thermal = read_lock(&ctx.state.thermal.data).as_ref().clone();
     let Some(ref thermal) = thermal else {
-        // No sample yet but not stale-timed out above? Throttled handover
-        // like the empty-temps path below so a missing sample can't spam
-        // autofanctrl every poll (min 200ms).
-        if ctx.now_ms.saturating_sub(ctx.last_curve_failover_ms) < CURVE_TEMP_FAILOVER_MS {
-            return Flow::Next;
-        }
-        if shutdown_requested(ctx.state) {
-            return Flow::Stop;
-        }
-        let ec_clone = Arc::clone(ctx.ec);
-        if crate::ec_serial::exec(
-            "curve-missing-sample-handover",
-            crate::util::EC_IO_TIMEOUT,
-            ec_clone,
-            move |ec| ec.autofanctrl(),
-        )
-        .await
-        .is_ok()
-        {
-            ctx.last_curve_failover_ms = ctx.now_ms;
-        } else {
-            // Handover write failed: write budget, not read budget.
-            // (A successful handover also leaves the read counter alone:
-            // the background loop owns read-failure accounting.)
-            ctx.consecutive_ec_write_failures += 1;
-            if ctx.consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
-                reset_ec_after_failures(ctx.state, ctx.consecutive_ec_write_failures);
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                return Flow::Next;
-            }
-        }
-        return Flow::Next;
+        return ctx
+            .handover_to_firmware(
+                "curve-missing-sample-handover",
+                "Curve mode: no thermal sample, handed fan control to firmware",
+            )
+            .await;
     };
     // avoid unwrap panic if curve config is corrupted/missing
     let Some(hyst) = ctx.curve_hysteresis else {
-        warn!("Curve mode with missing hysteresis, handing back to firmware");
-        if !shutdown_requested(ctx.state) {
-            let ec_clone = Arc::clone(ctx.ec);
-            let _ = crate::ec_serial::exec(
+        return ctx
+            .handover_to_firmware(
                 "curve-missing-hysteresis-handover",
-                crate::util::EC_IO_TIMEOUT,
-                ec_clone,
-                move |ec| ec.autofanctrl(),
+                "Curve mode with missing hysteresis, handed back to firmware",
             )
             .await;
-        }
-        return Flow::Next;
     };
     let Some(rate) = ctx.curve_rate_limit else {
-        warn!("Curve mode with missing rate_limit, handing back to firmware");
-        if !shutdown_requested(ctx.state) {
-            let ec_clone = Arc::clone(ctx.ec);
-            let _ = crate::ec_serial::exec(
+        return ctx
+            .handover_to_firmware(
                 "curve-missing-rate-handover",
-                crate::util::EC_IO_TIMEOUT,
-                ec_clone,
-                move |ec| ec.autofanctrl(),
+                "Curve mode with missing rate_limit, handed back to firmware",
             )
             .await;
-        }
-        return Flow::Next;
     };
     // Fail-safe: no trustworthy temperature means the curve cannot safely drive
     // the fans; hand back to firmware immediately.
@@ -134,46 +66,12 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         } else {
             "no non-battery temperature available"
         };
-        // The background loop already counted an empty read as a
-        // failure; counting here too would double-count one bad poll.
-        // Throttle autofanctrl to once per second to avoid spamming EC
-        if ctx.now_ms.saturating_sub(ctx.last_curve_failover_ms) >= CURVE_TEMP_FAILOVER_MS {
-            if shutdown_requested(ctx.state) {
-                return Flow::Stop;
-            }
-            let ec_clone = Arc::clone(ctx.ec);
-            match crate::ec_serial::exec(
+        return ctx
+            .handover_to_firmware(
                 "curve-invalid-temp-handover",
-                crate::util::EC_IO_TIMEOUT,
-                ec_clone,
-                move |ec| ec.autofanctrl(),
+                &format!("Curve mode: {}, handed fan control to firmware", reason),
             )
-            .await
-            {
-                Ok(Ok(())) => {
-                    ctx.last_curve_failover_ms = ctx.now_ms;
-                    tracing::warn!("Curve mode: {}, handed fan control to firmware", reason);
-                }
-                Ok(Err(e)) => {
-                    warn!("Curve fail-safe autofanctrl failed: {}", e);
-                    // Failed handover write: write budget, not read budget.
-                    ctx.consecutive_ec_write_failures += 1;
-                    if ctx.consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
-                        reset_ec_after_failures(ctx.state, ctx.consecutive_ec_write_failures);
-                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                        return Flow::Next;
-                    }
-                }
-                Err(join_err) => {
-                    warn!(
-                        "EC spawn panicked (curve fail-safe autofanctrl): {}",
-                        join_err
-                    );
-                    reset_ec_on_panic(ctx.state);
-                }
-            }
-        }
-        return Flow::Next;
+            .await;
     };
     // Snapshot the points and drop the lock before any EC await below.
     let full_pts: Vec<[u32; 2]> = read_lock(&ctx.state.fan.curve_full_points).as_ref().clone();
@@ -393,9 +291,10 @@ mod tests {
             curve_rate_limit: Some(10),
             curve_rate_limit_down: None,
             curve_sensors: Vec::new(),
-            consecutive_ec_write_failures: 0,
+            // A success must clear a prior (possibly scattered) failure run.
+            consecutive_ec_write_failures: 4,
             last_duty_write_ms: 0,
-            last_curve_failover_ms: 0,
+            last_handover_ms: 0,
             last_manual_duty: None,
             manual_ramp_current: None,
             manual_per_fan_ramp: &mut ramp,
@@ -405,6 +304,68 @@ mod tests {
             just_resumed: false,
         };
         assert!(matches!(run(&mut ctx).await, Flow::Next));
+        assert_eq!(ctx.consecutive_ec_write_failures, 0);
         assert_eq!(*mock.ops.lock().unwrap(), vec!["autofanctrl".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn failover_is_throttled_within_one_second() {
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        state
+            .fan
+            .mode
+            .store(FanControlMode::Curve.to_u8() as u64, Ordering::Release);
+        state
+            .thermal
+            .last_success_ms
+            .store(60_000, Ordering::Release);
+        let mut temps = BTreeMap::new();
+        temps.insert("Battery".to_string(), 30);
+        with_write_lock(&state.thermal.data, |guard| {
+            *guard = Arc::new(Some(ThermalData {
+                temps: Arc::new(temps),
+                fans: smallvec::SmallVec::new(),
+            }));
+        });
+        let mock = Arc::new(MockEc::new());
+        let ec: Arc<dyn EcHw> = mock.clone();
+        let mut ramp = None;
+        let mut stepper = CurveStepper::new();
+        let mut ctx = FanCtx {
+            state: &state,
+            ec: &ec,
+            mode: FanControlMode::Curve,
+            now_ms: 60_000,
+            manual_duty: None,
+            curve_hysteresis: Some(2),
+            curve_rate_limit: Some(10),
+            curve_rate_limit_down: None,
+            curve_sensors: Vec::new(),
+            consecutive_ec_write_failures: 0,
+            last_duty_write_ms: 0,
+            // 500ms ago: inside the one-second handover throttle window.
+            last_handover_ms: 59_500,
+            last_manual_duty: None,
+            manual_ramp_current: None,
+            manual_per_fan_ramp: &mut ramp,
+            curve_stepper: &mut stepper,
+            last_fan_mode: Some(FanControlMode::Curve),
+            last_unified_duty: None,
+            just_resumed: false,
+        };
+        assert!(matches!(run(&mut ctx).await, Flow::Next));
+        assert!(
+            mock.ops.lock().unwrap().is_empty(),
+            "handover must be throttled within one second"
+        );
     }
 }
