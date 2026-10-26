@@ -11,8 +11,8 @@ pub use ffi::{
     update_pawnio_modules,
 };
 pub use limits::{
-    BiosRestore, CpuPowerInfo, CpuPowerUnavailable, LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS,
-    LIMIT_MIN_ENABLED_WATTS, PowerLimitParams, platform_max_watts, validate_limit_params,
+    CpuPowerInfo, CpuPowerUnavailable, LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS, LIMIT_MIN_ENABLED_WATTS,
+    PowerLimitParams, pl_limits_differ_from_bios, platform_max_watts, validate_limit_params,
     write_bios_defaults, write_msr_pl1_pl2_public,
 };
 pub use modules::{
@@ -61,6 +61,10 @@ pub struct CpuPowerState {
 
 /// Auto-restarts give up after this many consecutive failures.
 const MAX_SYNC_RESTART_FAILURES: u32 = 5;
+
+/// Log the battery/unknown-AC capture deferral once instead of every CPU
+/// refresh; the helper is called every few seconds while the condition lasts.
+static BIOS_CAPTURE_DEFER_LOGGED: AtomicBool = AtomicBool::new(false);
 
 impl Default for CpuPowerState {
     fn default() -> Self {
@@ -142,16 +146,26 @@ impl CpuPowerState {
             return;
         }
         let Some(captured_on_ac) = read_ac_present() else {
-            tracing::warn!("AC state unknown; deferring BIOS defaults capture");
+            if !BIOS_CAPTURE_DEFER_LOGGED.swap(true, Ordering::Relaxed) {
+                tracing::warn!("AC state unknown; deferring BIOS defaults capture");
+            } else {
+                tracing::debug!("AC state still unknown; BIOS defaults capture deferred");
+            }
             return;
         };
         if !captured_on_ac {
             // Firmware may apply lower PL1/PL2 limits on battery. Persisting
             // those as the factory snapshot would make Reset restore the
             // battery-mode limits instead of the true BIOS defaults.
-            tracing::info!("On battery; deferring BIOS defaults capture until AC is present");
+            if !BIOS_CAPTURE_DEFER_LOGGED.swap(true, Ordering::Relaxed) {
+                tracing::info!("On battery; deferring BIOS defaults capture until AC is present");
+            } else {
+                tracing::debug!("Still on battery; BIOS defaults capture deferred");
+            }
             return;
         }
+        // On AC: allow a later battery/unknown streak to log once again.
+        BIOS_CAPTURE_DEFER_LOGGED.store(false, Ordering::Relaxed);
         // Validate live values before persisting: a tainted overclocked
         // snapshot must not become the permanent "factory" Reset target.
         {
@@ -172,7 +186,6 @@ impl CpuPowerState {
                 pl2_mmio_enabled: info.pl2_mmio_enabled,
                 pl2_mmio_clamped: info.pl2_mmio_clamped,
                 pl2_mmio_time_s: info.pl2_mmio_time_s,
-                mmio_captured: info.mmio_available,
                 power_unit: info.power_unit,
                 time_unit: info.time_unit,
                 captured_on_ac,
@@ -199,7 +212,6 @@ impl CpuPowerState {
             pl2_mmio_enabled: info.pl2_mmio_enabled,
             pl2_mmio_clamped: info.pl2_mmio_clamped,
             pl2_mmio_time_s: info.pl2_mmio_time_s,
-            mmio_captured: info.mmio_available,
             power_unit: info.power_unit,
             time_unit: info.time_unit,
             captured_on_ac,

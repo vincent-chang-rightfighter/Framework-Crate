@@ -51,6 +51,7 @@ impl App {
             self.init_complete = true;
             self.rebuild_header_info();
             self.rebuild_sensor_cache();
+            self.infer_pl_custom_applied();
             self.cached_snapshot = Some(crate::views::ViewSnapshot::from_app(self));
             self.state
                 .lifecycle

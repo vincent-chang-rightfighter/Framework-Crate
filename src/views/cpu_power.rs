@@ -164,6 +164,13 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
         ]
         .spacing(4),
     );
+    content = content.push(
+        text("MSR-controlled (MMIO mirror is read-only)")
+            .size(FONT_SMALL)
+            .style(move |_theme| iced::widget::text::Style {
+                color: Some(pal.gray),
+            }),
+    );
 
     if snap.show_cpu_power_settings {
         let mut settings_content = column![].spacing(4).padding(4);
@@ -283,6 +290,22 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             ]
             .spacing(4),
         );
+        settings_content = settings_content.push(
+            text("Official IntelMCHBAR is read-only: Apply/Sync write MSR 0x610 only. The MMIO mirror is displayed, not written.")
+                .size(FONT_SMALL)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.gray),
+                }),
+        );
+        if !info.mmio_available {
+            settings_content = settings_content.push(
+                text("MMIO read unavailable; MMIO values may show zero.")
+                    .size(FONT_SMALL)
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.gray),
+                    }),
+            );
+        }
 
         // Editable PL1/PL2 writes to MSR 0x610. Only the PL1 time window is
         // editable; the PL2 window follows the live register value instead of

@@ -404,22 +404,8 @@ impl App {
             }
             Message::CpuPowerResetDone(result) => {
                 match result {
-                    Ok(crate::cpu_power::BiosRestore::Full) => {
+                    Ok(()) => {
                         self.cpu_power_error = None;
-                        self.pl_custom_applied.store(false, Ordering::Release);
-                        self.state
-                            .lifecycle
-                            .pl_reset_pending
-                            .store(false, Ordering::Release);
-                        self.state
-                            .lifecycle
-                            .pl_reset_retry_at_ms
-                            .store(0, Ordering::Release);
-                    }
-                    Ok(crate::cpu_power::BiosRestore::Partial(e)) => {
-                        warn!("CPU power reset partial: {}", e);
-                        self.cpu_power_error =
-                            Some(format!("MSR reset done; MMIO mirror may differ: {}", e));
                         self.pl_custom_applied.store(false, Ordering::Release);
                         self.state
                             .lifecycle
@@ -445,6 +431,7 @@ impl App {
             Message::CpuPowerDataRefreshed => {
                 let info = self.state.cpu_power.snapshot();
                 self.apply_edit_fields_from_snapshot(&info);
+                self.infer_pl_custom_applied();
                 self.mark_dirty();
                 Some(Task::none())
             }
@@ -463,6 +450,28 @@ impl App {
 impl App {
     pub(crate) fn cpu_power_supported(&self) -> bool {
         self.state.system.intel_cpu.load(Ordering::Acquire)
+    }
+
+    /// Recover the memory-only custom-limit flag by comparing the live
+    /// registers with the persisted BIOS snapshot. Called at startup and on
+    /// EC recovery so an app restart does not disarm the AC->battery reset.
+    pub(crate) fn infer_pl_custom_applied(&self) {
+        if !self.cpu_power_supported() {
+            return;
+        }
+        // Only compare on AC. Firmware may apply different limits on battery,
+        // and treating that as a user custom write would make the AC->battery
+        // reset overwrite the firmware's battery-mode limits with AC values.
+        if crate::cpu_power::read_ac_present() != Some(true) {
+            return;
+        }
+        let info = self.state.cpu_power.snapshot();
+        let custom = self
+            .state
+            .cpu_power
+            .bios_defaults()
+            .is_some_and(|bios| crate::cpu_power::pl_limits_differ_from_bios(&info, &bios));
+        self.pl_custom_applied.store(custom, Ordering::Release);
     }
 
     /// Marks a PawnIO install/download/update as in flight. Returns false when

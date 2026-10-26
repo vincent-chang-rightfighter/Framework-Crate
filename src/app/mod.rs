@@ -169,7 +169,7 @@ pub enum Message {
     CpuPowerSyncStarted(Result<(), String>),
     CpuPowerSyncStop,
     CpuPowerSyncReset,
-    CpuPowerResetDone(Result<crate::cpu_power::BiosRestore, String>),
+    CpuPowerResetDone(Result<(), String>),
 }
 
 pub struct App {

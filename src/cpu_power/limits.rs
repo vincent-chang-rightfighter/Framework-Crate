@@ -5,7 +5,7 @@ use tracing::debug;
 
 use super::bios::BiosDefaults;
 use super::ffi::{IoctlFailure, PawnioHandle, exec_ioctl, open_handle};
-use super::modules::{load_intel_mchbar_blob, load_intel_msr_blob};
+use super::modules::load_intel_msr_blob;
 
 /// A register that CPU power limits are read from or written to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +180,34 @@ fn effective_limit(msr: f64, msr_en: bool, mmio: f64, mmio_en: bool) -> f64 {
         (false, true) => mmio,
         (false, false) => 0.0,
     }
+}
+
+/// Whether a live readback differs from the persisted BIOS snapshot.
+///
+/// Used at startup to recover `pl_custom_applied` after an app restart: the
+/// flag lives only in memory, but a custom MSR value can survive until the
+/// next reboot. Tolerance follows the register quantization, not the user
+/// request, so normal readback rounding is not mistaken for a custom write.
+pub fn pl_limits_differ_from_bios(info: &CpuPowerInfo, bios: &BiosDefaults) -> bool {
+    if !info.available {
+        return false;
+    }
+    fn nearly(a: f64, b: f64, tolerance: f64) -> bool {
+        (a - b).abs() <= tolerance
+    }
+    let tol_w = info.power_unit.max(0.25);
+    let tol_t = info.time_unit.max(0.001) * 4.0;
+    // The official IntelMCHBAR module is read-only, so the app never writes
+    // the MMIO mirror. A mirror difference is firmware/EC behavior, not a
+    // user custom write; only the MSR half is compared.
+    !nearly(info.pl1_msr, bios.pl1_watts, tol_w)
+        || info.pl1_msr_enabled != bios.pl1_enabled
+        || info.pl1_msr_clamped != bios.pl1_clamped
+        || !nearly(info.pl1_time_s, bios.pl1_time_s, tol_t)
+        || !nearly(info.pl2_msr, bios.pl2_watts, tol_w)
+        || info.pl2_msr_enabled != bios.pl2_enabled
+        || info.pl2_msr_clamped != bios.pl2_clamped
+        || !nearly(info.pl2_time_s, bios.pl2_time_s, tol_t)
 }
 
 /// Decodes power limit from raw 32-bit half.
@@ -643,24 +671,6 @@ pub(super) fn write_msr_pl1_pl2(
     )
 }
 
-/// Writes PACKAGE_POWER_LIMIT_MMIO (MCHBAR+0x59A0) via IntelMCHBAR.
-pub(super) fn write_mmio_pl1_pl2(
-    mchbar_handle: &PawnioHandle,
-    params: &PowerLimitParams,
-) -> Result<(), String> {
-    write_power_limits(
-        &LimitTarget {
-            handle: mchbar_handle,
-            address: 0x59A0,
-            write_ioctl: "ioctl_write_qword",
-            read_ioctl: "ioctl_read_qword",
-            label: "MMIO",
-            write_failed: "ioctl_write_qword failed — IntelMCHBAR module may not support MMIO write",
-        },
-        params,
-    )
-}
-
 /// Writes MSR 0x610 (opens IntelMSR handle internally).
 pub fn write_msr_pl1_pl2_public(params: PowerLimitParams) -> Result<(), String> {
     let msr_blob = load_intel_msr_blob()?;
@@ -668,36 +678,12 @@ pub fn write_msr_pl1_pl2_public(params: PowerLimitParams) -> Result<(), String> 
     write_msr_pl1_pl2(&msr_handle, &params)
 }
 
-fn write_mmio_pl1_pl2_public(params: PowerLimitParams) -> Result<(), String> {
-    let mchbar_blob = load_intel_mchbar_blob()?;
-    let mchbar_handle = open_handle(&mchbar_blob)?;
-    write_mmio_pl1_pl2(&mchbar_handle, &params)
-}
-
-/// Outcome of restoring factory limits.
+/// Restores the MSR halves of the persisted BIOS snapshot.
 ///
-/// MMIO may be absent on older snapshots and some MCHBAR blobs lack qword
-/// write support, so a failed MMIO restore must not fail the whole reset —
-/// but it also must not be reported as full success.
-#[derive(Debug, Clone, PartialEq)]
-pub enum BiosRestore {
-    /// MSR restored, and MMIO restored or absent from the snapshot.
-    Full,
-    /// MSR restored; the MMIO mirror may still hold the custom limit.
-    Partial(String),
-}
-
-/// Whether the snapshot actually contains MMIO mirror values.
-///
-/// New snapshots carry an explicit flag so a genuine 0 W/disabled mirror is
-/// restored instead of skipped. Old snapshots omit the flag; non-zero watts
-/// keep their historical meaning.
-fn snapshot_has_mmio(bios: &BiosDefaults) -> bool {
-    bios.mmio_captured || bios.pl1_mmio_watts > 0.0 || bios.pl2_mmio_watts > 0.0
-}
-
-/// Writes both MSR and MMIO from `BiosDefaults` to restore factory state.
-pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<BiosRestore, String> {
+/// The official IntelMCHBAR module exposes only read ioctls, so the MMIO
+/// mirror (MCHBAR+0x59A0) cannot be written without a custom module. Reset
+/// therefore restores MSR only; the UI states this explicitly.
+pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<(), String> {
     let (power_unit, time_unit) = super::read::read_rapl_units()?;
     write_msr_pl1_pl2_public(PowerLimitParams {
         pl1_watts: bios.pl1_watts,
@@ -711,26 +697,7 @@ pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<BiosRestore, String> {
         max_time_s: None,
         power_unit,
         time_unit,
-    })?;
-    // MMIO may be absent on older files; best-effort only, but reported.
-    if snapshot_has_mmio(bios)
-        && let Err(e) = write_mmio_pl1_pl2_public(PowerLimitParams {
-            pl1_watts: bios.pl1_mmio_watts,
-            pl1_enabled: bios.pl1_mmio_enabled,
-            pl1_clamped: bios.pl1_mmio_clamped,
-            pl1_time_s: bios.pl1_mmio_time_s,
-            pl2_watts: bios.pl2_mmio_watts,
-            pl2_enabled: bios.pl2_mmio_enabled,
-            pl2_clamped: bios.pl2_mmio_clamped,
-            pl2_time_s: bios.pl2_mmio_time_s,
-            max_time_s: None,
-            power_unit,
-            time_unit,
-        })
-    {
-        return Ok(BiosRestore::Partial(e));
-    }
-    Ok(BiosRestore::Full)
+    })
 }
 
 #[cfg(test)]
@@ -1261,9 +1228,8 @@ mod tests {
         assert!(params.power_unit <= 0.0, "unit must not be faked");
     }
 
-    #[test]
-    fn snapshot_mmio_presence_uses_the_flag_or_legacy_watts() {
-        let base = BiosDefaults {
+    fn matching_bios() -> BiosDefaults {
+        BiosDefaults {
             pl1_watts: 30.0,
             pl1_enabled: true,
             pl1_clamped: false,
@@ -1272,31 +1238,76 @@ mod tests {
             pl2_enabled: true,
             pl2_clamped: false,
             pl2_time_s: 28.0,
-            pl1_mmio_watts: 0.0,
-            pl1_mmio_enabled: false,
+            pl1_mmio_watts: 30.0,
+            pl1_mmio_enabled: true,
             pl1_mmio_clamped: false,
-            pl1_mmio_time_s: 0.0,
-            pl2_mmio_watts: 0.0,
-            pl2_mmio_enabled: false,
+            pl1_mmio_time_s: 28.0,
+            pl2_mmio_watts: 35.0,
+            pl2_mmio_enabled: true,
             pl2_mmio_clamped: false,
-            pl2_mmio_time_s: 0.0,
-            mmio_captured: false,
+            pl2_mmio_time_s: 28.0,
             power_unit: 0.125,
             time_unit: 0.0009765625,
             captured_on_ac: true,
-        };
-        // Explicitly captured 0 W/disabled mirror must still be restored.
-        assert!(snapshot_has_mmio(&BiosDefaults {
-            mmio_captured: true,
-            ..base
-        }));
-        // Legacy snapshot with non-zero MMIO keeps its historical behavior.
-        assert!(snapshot_has_mmio(&BiosDefaults {
-            pl1_mmio_watts: 15.0,
-            ..base
-        }));
-        // Old snapshot with no MMIO data must not provoke a Partial reset.
-        assert!(!snapshot_has_mmio(&base));
+        }
+    }
+
+    fn matching_info(bios: &BiosDefaults) -> CpuPowerInfo {
+        CpuPowerInfo {
+            available: true,
+            power_unit: bios.power_unit,
+            time_unit: bios.time_unit,
+            pl1_msr: bios.pl1_watts,
+            pl1_msr_enabled: bios.pl1_enabled,
+            pl1_msr_clamped: bios.pl1_clamped,
+            pl1_time_s: bios.pl1_time_s,
+            pl2_msr: bios.pl2_watts,
+            pl2_msr_enabled: bios.pl2_enabled,
+            pl2_msr_clamped: bios.pl2_clamped,
+            pl2_time_s: bios.pl2_time_s,
+            pl1_mmio: bios.pl1_mmio_watts,
+            pl1_mmio_enabled: bios.pl1_mmio_enabled,
+            pl1_mmio_clamped: bios.pl1_mmio_clamped,
+            pl1_mmio_time_s: bios.pl1_mmio_time_s,
+            pl2_mmio: bios.pl2_mmio_watts,
+            pl2_mmio_enabled: bios.pl2_mmio_enabled,
+            pl2_mmio_clamped: bios.pl2_mmio_clamped,
+            pl2_mmio_time_s: bios.pl2_mmio_time_s,
+            mmio_available: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn live_limits_equal_bios_snapshot() {
+        let bios = matching_bios();
+        assert!(!pl_limits_differ_from_bios(&matching_info(&bios), &bios));
+    }
+
+    #[test]
+    fn live_msr_change_is_detected_as_custom() {
+        let bios = matching_bios();
+        let mut info = matching_info(&bios);
+        info.pl1_msr += 5.0;
+        assert!(pl_limits_differ_from_bios(&info, &bios));
+        let mut info = matching_info(&bios);
+        info.pl1_time_s += 1.0;
+        assert!(pl_limits_differ_from_bios(&info, &bios));
+        let mut info = matching_info(&bios);
+        info.pl2_msr_enabled = false;
+        assert!(pl_limits_differ_from_bios(&info, &bios));
+    }
+
+    #[test]
+    fn unavailable_info_is_not_treated_as_custom() {
+        let bios = matching_bios();
+        assert!(!pl_limits_differ_from_bios(
+            &CpuPowerInfo {
+                available: false,
+                ..matching_info(&bios)
+            },
+            &bios
+        ));
     }
 
     #[test]

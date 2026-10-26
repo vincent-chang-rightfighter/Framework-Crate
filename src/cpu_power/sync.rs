@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, warn};
 
 use super::ffi::open_handle;
-use super::limits::{PowerLimitParams, write_mmio_pl1_pl2, write_msr_pl1_pl2};
-use super::modules::{load_intel_mchbar_blob, load_intel_msr_blob};
+use super::limits::{PowerLimitParams, write_msr_pl1_pl2};
+use super::modules::load_intel_msr_blob;
 
-/// Sync thread that continuously writes MSR 0x610 and MMIO to counter
+/// Sync thread that continuously re-asserts MSR 0x610 to counter
 /// firmware/EC overwrites. Runs until `external_alive` is dropped.
 pub(super) struct SyncThread {
     pub(super) running: Arc<AtomicBool>,
@@ -151,17 +151,14 @@ impl FailureCounter {
     }
 }
 
-/// Consecutive-failure limits for the sync loop breakers.
+/// Consecutive-failure limit for the sync loop breaker.
 const MSR_BREAKER_LIMIT: u32 = 30;
-const MMIO_DISABLE_LIMIT: u32 = 30;
 
-/// Whether a persistently failing MMIO leg should be disabled so the loop
-/// stops burning an ioctl on it every pass. MSR keeps asserting.
-fn should_disable_mmio(consecutive_failures: u32) -> bool {
-    consecutive_failures >= MMIO_DISABLE_LIMIT
-}
-
-/// Sync thread main loop; writes MSR and MMIO every 250ms.
+/// Sync thread main loop; re-asserts MSR 0x610 every 250ms.
+///
+/// The official IntelMCHBAR module is read-only, so this thread intentionally
+/// does not attempt MMIO writes; the mirror is still read for status/effective
+/// limit display.
 fn sync_thread_main(
     running: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
@@ -188,31 +185,15 @@ fn sync_thread_main(
         }
     };
 
-    // Load IntelMCHBAR for MMIO write (may fail).
-    let mut mchbar_handle = match load_intel_mchbar_blob().and_then(|b| open_handle(&b)) {
-        Ok(h) => Some(h),
-        Err(e) => {
-            warn!(
-                "Sync thread: MMIO write unavailable ({}), will write MSR only",
-                e
-            );
-            None
-        }
-    };
     alive.store(true, Ordering::Release);
     external_alive.store(true, Ordering::Release);
 
     debug!(
-        "Sync thread started: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) mmio={}",
-        params.pl1_watts,
-        params.pl1_time_s,
-        params.pl2_watts,
-        params.pl2_time_s,
-        mchbar_handle.is_some()
+        "Sync thread started: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) (MSR only)",
+        params.pl1_watts, params.pl1_time_s, params.pl2_watts, params.pl2_time_s
     );
 
     let mut msr_failures = FailureCounter::new("MSR");
-    let mut mmio_failures = FailureCounter::new("MMIO");
     while running.load(Ordering::Relaxed) {
         // Unconditionally re-assert limits every 250ms. The whole point of
         // this thread is to win against firmware/EC overwrites.
@@ -220,16 +201,8 @@ fn sync_thread_main(
             Ok(()) => msr_failures.succeeded(),
             Err(e) => msr_failures.failed(&e),
         }
-        if let Some(ref mchbar) = mchbar_handle {
-            match write_mmio_pl1_pl2(mchbar, &params) {
-                Ok(()) => mmio_failures.succeeded(),
-                Err(e) => mmio_failures.failed(&e),
-            }
-        }
-        // Circuit breaker: BIOS-locked register will never succeed; stop after 30 consecutive failures.
-        // Only MSR gates this. MSR is the primary path; if it is still working
-        // then a failing MMIO path is not costing the user their limit, and the
-        // MMIO blob may legitimately lack qword write support on some models.
+        // Circuit breaker: a BIOS-locked register will never succeed; stop
+        // after 30 consecutive failures.
         let write_failures = msr_failures.consecutive();
         if write_failures >= MSR_BREAKER_LIMIT {
             warn!("Sync thread giving up after 30 consecutive MSR failures (likely BIOS-locked)");
@@ -237,12 +210,6 @@ fn sync_thread_main(
             // flag auto-restart watches instead of dying silently.
             broken.store(true, Ordering::Release);
             break;
-        }
-        // Independent MMIO breaker: a dead MMIO path must not spin its ioctl
-        // every 250ms forever. Disable the leg, keep MSR asserting.
-        if mchbar_handle.is_some() && should_disable_mmio(mmio_failures.consecutive()) {
-            warn!("Sync thread disabling MMIO path after 30 consecutive failures; MSR continues");
-            mchbar_handle = None;
         }
         // Back off on persistent failures; cap at 30s.
         // BIOS-locked register will otherwise spin forever; 30s reduces thermal contention.
@@ -274,13 +241,6 @@ fn sync_thread_main(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn mmio_leg_disables_after_limit() {
-        assert!(!should_disable_mmio(0));
-        assert!(!should_disable_mmio(MMIO_DISABLE_LIMIT - 1));
-        assert!(should_disable_mmio(MMIO_DISABLE_LIMIT));
-    }
 
     #[test]
     fn failure_log_level_logs_each_error_for_the_first_five() {
