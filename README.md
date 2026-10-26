@@ -29,7 +29,7 @@ Download the `.exe`, then run it as administrator. PawnIO is optional and only n
 - **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity
 - **Live Telemetry** — Real-time temperature chart (selectable 15/30/60s window, default 30s), per-sensor display with colored indicators, and fan RPM in the header
 - **Misc Panel** — Keyboard backlight slider, fingerprint LED level, and USB-C / HDMI / DP port classification from PD state (expansion-card firmware enumeration is not implemented yet)
-- **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download); original factory limits are saved on the first run while on AC for `Reset`. Writes are capped per model (Laptop 12 → 40W, 13 → 70W, 16 → 100W, Desktop → 120W), require ≥5W when enabled, and require PL1 ≤ PL2. AMD and other vendors are not supported.
+- **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download); original factory limits are saved on the first run while on AC for `Reset`. Writes go to MSR 0x610 only: the official IntelMCHBAR module is read-only, so the MMIO mirror is displayed but never written. Writes are capped per model (Laptop 12 → 40W, 13 → 70W, 16 → 100W, Desktop → 120W), require ≥5W when enabled, and require PL1 ≤ PL2. AMD and other vendors are not supported.
 - **About Page** — Hardware info (CPU, RAM, display, BIOS), software settings (poll rate, refresh interval, launch at startup), GitHub link, one-click copy buttons for the manual-download URLs, and third-party license notices
 - **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit), icon restored automatically if Explorer restarts
 - **Launch at Startup** — Registers a per-user logon task so the tray app comes back after a reboot. The task document is generated in-process and handed to `schtasks /Create /XML`; the settings that matter (unlimited execution limit, battery conditions cleared, restart on failure) are asserted by tests without needing elevation
@@ -181,7 +181,7 @@ $p.Kill()
 
 Config file location: `%APPDATA%/framework-crate/config.toml`
 
-On the first run while on AC with PawnIO available, the original factory PL1/PL2 (MSR + MMIO watts, enabled, clamped, time window, and RAPL units) are saved to `%APPDATA%/framework-crate/bios_defaults.toml`. `Reset` in the UI restores this persisted snapshot (the effective `min(MSR, MMIO)`). Delete that file to re-capture the current BIOS values on the next AC-powered launch.
+On the first run while on AC with PawnIO available, the original factory PL1/PL2 (MSR + MMIO watts, enabled, clamped, time window, and RAPL units) are saved to `%APPDATA%/framework-crate/bios_defaults.toml`. `Reset` in the UI restores the persisted MSR values; the MMIO mirror is read-only with the official IntelMCHBAR module and is not overwritten. Delete that file to re-capture the current BIOS values on the next AC-powered launch.
 
 ```toml
 [fan]
@@ -251,6 +251,7 @@ The file rotates once it grows past a size threshold, keeping `app.log.1` throug
 ## Known Limitations
 
 - **AMD CPU Power**: CPU Power (PL1/PL2 via PawnIO) is Intel-only. On AMD and other CPUs the card stays visible and shows **Not Supported**; no RAPL / PawnIO access is attempted.
+- **MMIO is read-only**: The official `IntelMCHBAR.bin` provides only `ioctl_read_qword`, so the app writes MSR 0x610 only. The MMIO mirror is displayed and used for the effective `min(MSR, MMIO)` estimate, but it is never written. If firmware/EC keeps the mirror at a lower limit, MSR-only writes may not change the enforced limit.
 - **Fan Curve Coordinates (resolved in v0.3.0)**: Earlier versions edited curve points with sliders and could leave the canvas axes / line segments misaligned until the next full redraw. v0.3.0 replaced the sliders with direct drag editing on the canvas — points keep their identity when dragged across each other, and the cached rendering invalidates on content changes, so the drawing always matches the numeric points used for fan duty.
 - **USB Expansion Card Classification (resolved in v0.3.0)**: Port type (USB-C / USB-A / HDMI / DP) is inferred from EC PD state. Since v0.3.0, ports that ever reported a Sink role are permanently classified as USB-C, so USB-C vs USB-A is no longer flipped when a device is plugged into an expansion-card port. HDMI/DP cards that omit DP-alt may still be mislabeled — use Expansion Card Debug Mode on the About page to inspect raw role / watts.
 - **Sleep / Hibernate Fan Control (resolved in v0.3.0, hardened in v0.9.0)**: Previously, fan-speed control could stop responding correctly after the system resumed from sleep or hibernation. v0.3.0 detects `WM_POWERBROADCAST` resume events (resetting the EC client, `CurveStepper` state, and thermal history) and additionally re-asserts the fan duty every 30 s, so the fans spin back up even if the resume event is missed. Consecutive EC read / write failures also trigger automatic client reinitialization. Since v0.9.0, all EC traffic goes through a single FIFO writer (no overtaking after resume) plus a wall-clock jump fallback when the resume event itself is missed.
@@ -278,7 +279,9 @@ The section reads and optionally writes PL1/PL2 via official PawnIO Modules. Tho
 
 A missing file blocks CPU Power; a hash mismatch also blocks use — update the app for the new release, or set `FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1` only after manual verification. Failed download shows manual instructions: download latest `release_*.zip` from the releases page and place `IntelMSR.bin` + `IntelMCHBAR.bin` into `%APPDATA%/framework-crate/modules/`. Use **Open Modules Folder** and **Redetect** in the UI to verify — no restart needed.
 
-The first successful RAPL read while on AC also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` restores `min(MSR, MMIO)` from that snapshot. After sleep/resume the app re-reads the live limits and resumes sync with the user's desired values; it does not overwrite them with the BIOS snapshot.
+The first successful RAPL read while on AC also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` restores the MSR values from that snapshot; the MMIO mirror is read-only and is left untouched. After sleep/resume the app re-reads the live limits and resumes sync with the user's desired values; it does not overwrite them with the BIOS snapshot.
+
+The official `IntelMCHBAR.bin` exports only read ioctls (`ioctl_read_qword`). `Apply` and `Sync` therefore write MSR 0x610 only; the MMIO mirror is read for display and for the effective `min(MSR, MMIO)` estimate. There is no MMIO write attempt (and no repeated `ioctl_write_qword` failure). If the MMIO mirror holds a lower limit than MSR, an MSR-only write may not change the effective limit; a custom MCHBAR write module would be required for that, which this project intentionally does not ship.
 
 **Requirements:**
 - PawnIO installed
