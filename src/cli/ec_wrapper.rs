@@ -632,17 +632,33 @@ impl EcHw for EcClient {
         };
         self.ec
             .set_charge_limit(min_pct, max_pct)
-            .map_err(|e| format!("Failed to set charge limit: {:?}", e))
+            .map_err(|e| format!("Failed to set charge limit: {:?}", e))?;
+        // framework_lib reports success for the EC command, but the EC can
+        // still ignore or clamp the value. Read it back like the keyboard
+        // backlight path, allowing a short update window and ±1 rounding.
+        let mut last_readback = None;
+        for _ in 0..5 {
+            match self.ec.get_charge_limit() {
+                Ok((read_min, read_max)) => {
+                    if read_max.abs_diff(max_pct) <= 1 {
+                        return Ok(());
+                    }
+                    last_readback = Some((read_min, read_max));
+                }
+                Err(e) => {
+                    // Older firmware may not implement the read command.
+                    // The write itself succeeded, so do not fail the caller.
+                    tracing::debug!("Charge limit readback unavailable: {:?}", e);
+                    return Ok(());
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Err(format!(
+            "Charge limit write failed: wrote {}%, read back {:?}",
+            max_pct, last_readback
+        ))
     }
-
-    // C-cleanup: unused helper disabled; kept commented for future
-    // restoration (charge-limit readback verification). Windows-only.
-    // #[allow(dead_code)]
-    // pub fn get_charge_limit(&self) -> Result<(u8, u8), String> {
-    //     self.ec
-    //         .get_charge_limit()
-    //         .map_err(|e| format!("Failed to get charge limit: {:?}", e))
-    // }
 
     fn pd_ports(&self) -> SmallVec<[UsbCPort; 4]> {
         use framework_lib::chromium_ec::EcRequestRaw;
