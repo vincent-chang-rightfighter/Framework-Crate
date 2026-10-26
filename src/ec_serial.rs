@@ -23,6 +23,11 @@
 //!   treat that substring as backpressure, not failure.
 //! - Panics in hardware code surface as `Err`, never as a wedged worker:
 //!   the JoinError is mapped to a reply and the loop continues.
+//! - Driver calls run on a dedicated runtime, not the shared blocking pool.
+//!   A hung EC ioctl therefore cannot starve winget/PowerShell/config-save
+//!   work (or vice versa). The worker still waits for the stuck call to
+//!   finish: abandoning it would let a stale hardware write overtake a newer
+//!   one. A 10s warning makes the condition visible in the log.
 
 use std::any::Any;
 use std::fmt;
@@ -106,6 +111,26 @@ fn send_reply(reply: Reply, value: JobReply) {
 /// (background loop + the occasional UI write).
 const QUEUE_CAP: usize = 16;
 
+/// Dedicated runtime for EC driver calls. Keeping hardware I/O off the main
+/// blocking pool means a stuck ioctl cannot starve network/install/auth work,
+/// and those tasks cannot starve the fan controller.
+fn ec_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(2)
+            .thread_name("ec-io")
+            .enable_all()
+            .build()
+            .expect("failed to build EC I/O runtime")
+    })
+}
+
+/// How long one driver call may run before the worker logs a stuck warning.
+/// The worker keeps waiting; see the module-level design notes.
+const STUCK_WARN_AFTER: Duration = Duration::from_secs(10);
+
 /// Lazily-started worker handle. If the worker task ever dies (only via
 /// a bug or runtime teardown, never via driver errors), the slot is
 /// empty and the next `sender()` call rebuilds it instead of wedging
@@ -126,7 +151,7 @@ fn sender() -> mpsc::Sender<Job> {
         *slot = None;
     }
     let (tx, rx) = mpsc::channel(QUEUE_CAP);
-    tokio::spawn(worker_loop(rx, &WRITES_CLOSED));
+    drop(ec_runtime().handle().spawn(worker_loop(rx, &WRITES_CLOSED)));
     *slot = Some(tx.clone());
     tx
 }
@@ -140,22 +165,34 @@ async fn worker_loop(mut rx: mpsc::Receiver<Job>, writes_closed: &'static Atomic
     while let Some(job) = rx.recv().await {
         tracing::trace!("EC dispatch {}", job.op);
         let Job {
+            op,
             client,
             run,
             reply,
             force,
-            ..
         } = job;
         if !force && writes_closed.load(Ordering::Acquire) {
             send_reply(reply, JobReply::Failed("EC writes closed".to_string()));
             continue;
         }
-        // The blocking call runs on the pool, but this task does not take
-        // the next job until it finishes: at most one driver call is ever
-        // in flight, so hardware execution order always matches dispatch
-        // order and a late orphan cannot overtake a newer write.
-        let handle = tokio::task::spawn_blocking(move || run(client));
-        match handle.await {
+        // The blocking call runs on the dedicated EC runtime, but this task
+        // does not take the next job until it finishes: at most one driver
+        // call is ever in flight, so hardware execution order always matches
+        // dispatch order and a late orphan cannot overtake a newer write.
+        let mut handle = ec_runtime().handle().spawn_blocking(move || run(client));
+        // Warn once per stuck call without abandoning it (see module notes).
+        let joined = match tokio::time::timeout(STUCK_WARN_AFTER, &mut handle).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::error!(
+                    "EC driver call {} still running after {:?}; waiting to preserve single-writer ordering",
+                    op,
+                    STUCK_WARN_AFTER
+                );
+                handle.await
+            }
+        };
+        match joined {
             Ok(any) => send_reply(reply, JobReply::Value(any)),
             Err(e) => send_reply(reply, JobReply::Failed(format!("EC task panicked: {e}"))),
         }
