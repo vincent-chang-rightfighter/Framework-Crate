@@ -130,7 +130,11 @@ pub(super) fn bios_defaults_valid(d: &BiosDefaults) -> bool {
 }
 
 /// Backs up a corrupt or invalid snapshot aside and refuses to overwrite it.
-fn quarantine_corrupt(path: &std::path::Path, reason: String) -> PersistedBios {
+///
+/// Writes the bytes already read through the validating handle instead of
+/// reopening `path`: a swapped symlink/hardlink between the read and this
+/// backup would otherwise let an elevated process copy a protected file.
+fn quarantine_corrupt(path: &std::path::Path, content: &[u8], reason: String) -> PersistedBios {
     let backup = path.with_extension("toml.corrupt");
     if backup.exists() {
         tracing::debug!(
@@ -141,12 +145,12 @@ fn quarantine_corrupt(path: &std::path::Path, reason: String) -> PersistedBios {
         return PersistedBios::Unusable;
     }
     let copied = (|| {
-        let mut src = std::fs::File::open(path)?;
+        use std::io::Write;
         let mut dst = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&backup)?;
-        std::io::copy(&mut src, &mut dst)?;
+        dst.write_all(content)?;
         dst.sync_all()
     })();
     match copied {
@@ -191,12 +195,12 @@ pub(super) fn load_persisted_bios_defaults() -> PersistedBios {
                 PersistedBios::Loaded(parsed)
             } else {
                 // Parses but cannot be encoded safely: same treatment as corrupt.
-                quarantine_corrupt(&path, "values out of range".to_string())
+                quarantine_corrupt(&path, content.as_bytes(), "values out of range".to_string())
             }
         }
         Err(e) => {
             // Corrupt file: back up and refuse to overwrite.
-            quarantine_corrupt(&path, e.to_string())
+            quarantine_corrupt(&path, content.as_bytes(), e.to_string())
         }
     }
 }
@@ -473,6 +477,28 @@ mod tests {
 #[cfg(test)]
 mod stable_backup_tests {
     use super::*;
+
+    #[test]
+    fn corrupt_backup_preserves_the_validated_bytes() {
+        let _env_guard = crate::config::CONFIG_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR");
+        unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", dir.path()) };
+        let path = dir.path().join("bios_defaults.toml");
+        let content = "this is not = valid = toml [[[";
+        std::fs::write(&path, content).unwrap();
+        assert!(matches!(
+            load_persisted_bios_defaults(),
+            PersistedBios::Unusable
+        ));
+        let backup = path.with_extension("toml.corrupt");
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), content);
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", v) };
+        } else {
+            unsafe { std::env::remove_var("FRAMEWORK_CONTROL_CONFIG_DIR") };
+        }
+    }
 
     #[test]
     fn corrupt_backup_is_not_duplicated_on_reload() {
