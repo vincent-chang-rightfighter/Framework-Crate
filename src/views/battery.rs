@@ -4,6 +4,15 @@ use crate::style::*;
 use crate::views::ViewSnapshot;
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length};
+
+fn current_prefix(ac_present: Option<bool>, discharging: Option<bool>) -> &'static str {
+    if discharging == Some(true) || (discharging.is_none() && ac_present == Some(false)) {
+        "-"
+    } else {
+        ""
+    }
+}
+
 pub(crate) fn view_charge_limit_section(enabled: bool, value: u32) -> Element<'static, Message> {
     column![
         row![
@@ -93,11 +102,7 @@ pub(crate) fn view_battery_info(
         ]);
     }
     if let Some(v) = battery.present_rate_ma {
-        let prefix = if battery.discharging == Some(true) {
-            "-"
-        } else {
-            ""
-        };
+        let prefix = current_prefix(battery.ac_present, battery.discharging);
         rows = rows.push(row![
             text("Current:").size(FONT_BODY),
             space::horizontal(),
@@ -358,5 +363,19 @@ pub(crate) fn battery_detail_rows(
         )
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod current_sign_tests {
+    use super::current_prefix;
+
+    #[test]
+    fn negative_only_when_discharging_or_known_battery() {
+        assert_eq!(current_prefix(Some(true), Some(false)), "");
+        assert_eq!(current_prefix(Some(false), Some(true)), "-");
+        assert_eq!(current_prefix(Some(false), None), "-");
+        assert_eq!(current_prefix(None, None), "");
+        assert_eq!(current_prefix(Some(true), None), "");
     }
 }
