@@ -234,9 +234,19 @@ fn cleanup_and_exit(
     tray_icon_loaded: bool,
     tray_hwnd: *mut core::ffi::c_void,
     hicon: Option<isize>,
+    thread_id: u32,
 ) {
-    TRAY_THREAD_ID.store(0, Ordering::Release);
-    store_global_hwnd(0);
+    // A reinit can detach this pump after a timeout and spawn a new one.
+    // Only the pump that still owns the globals may clear them or unregister
+    // the window class, or a late-exiting old pump would break the new one's
+    // notification path.
+    let owns_global = load_global_hwnd() == tray_hwnd as isize;
+    if owns_global {
+        store_global_hwnd(0);
+    }
+    if TRAY_THREAD_ID.load(Ordering::Acquire) == thread_id {
+        TRAY_THREAD_ID.store(0, Ordering::Release);
+    }
     if tray_icon_loaded {
         system_info::shell_notify_delete(tray_hwnd as isize);
     }
@@ -249,9 +259,11 @@ fn cleanup_and_exit(
     if !tray_hwnd.is_null() {
         unsafe {
             DestroyWindow(tray_hwnd);
-            let class_name: Vec<u16> = "FrameworkControlTray\0".encode_utf16().collect();
-            let h_instance = GetModuleHandleW(std::ptr::null());
-            UnregisterClassW(class_name.as_ptr(), h_instance);
+            if owns_global {
+                let class_name: Vec<u16> = "FrameworkControlTray\0".encode_utf16().collect();
+                let h_instance = GetModuleHandleW(std::ptr::null());
+                UnregisterClassW(class_name.as_ptr(), h_instance);
+            }
         }
     }
 }
@@ -267,7 +279,8 @@ fn message_pump_loop(
     unsafe extern "system" {
         fn GetCurrentThreadId() -> u32;
     }
-    TRAY_THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
+    let thread_id = unsafe { GetCurrentThreadId() };
+    TRAY_THREAD_ID.store(thread_id, Ordering::Release);
 
     EVENT_TX.with(|tx| {
         *tx.borrow_mut() = Some(event_tx.clone());
@@ -279,7 +292,7 @@ fn message_pump_loop(
     let tray_hwnd = create_hidden_window();
     if tray_hwnd.is_null() {
         tracing::error!("Failed to create tray message window");
-        cleanup_and_exit(false, tray_hwnd, None);
+        cleanup_and_exit(false, tray_hwnd, None, thread_id);
         return;
     }
     TRAY_HWND.with(|hwnd| {
@@ -311,7 +324,7 @@ fn message_pump_loop(
                 "Tray message pump exiting during priming (result={})",
                 result
             );
-            cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
+            cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon, thread_id);
             return;
         }
         unsafe {
@@ -328,7 +341,7 @@ fn message_pump_loop(
 
         if result == 0 || result == -1 {
             tracing::info!("Tray message pump exiting (result={})", result);
-            cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
+            cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon, thread_id);
             return;
         }
 
@@ -338,7 +351,7 @@ fn message_pump_loop(
                 match command_rx.try_recv() {
                     Ok(TrayCommand::Shutdown) => {
                         tracing::info!("Tray shutdown");
-                        cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
+                        cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon, thread_id);
                         return;
                     }
                     Ok(TrayCommand::CreateIcon) => {
@@ -367,7 +380,7 @@ fn message_pump_loop(
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon);
+                        cleanup_and_exit(tray_icon_loaded, tray_hwnd, hicon, thread_id);
                         return;
                     }
                 }
