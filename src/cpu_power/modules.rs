@@ -596,6 +596,19 @@ fn run_extraction_with_cap(
 /// Validates archive members, extracts into a fresh staging dir, then
 /// promotes only the two expected verified bins into `dir`.
 fn extract_staged_zip(zip_tmp: &std::path::Path, dir: &std::path::Path) -> Result<(), String> {
+    let result = extract_staged_zip_inner(zip_tmp, dir);
+    if result.is_err() {
+        // The inner path cleans up after extraction failures; pre-check
+        // failures still need to remove the downloaded archive.
+        let _ = std::fs::remove_file(zip_tmp);
+    }
+    result
+}
+
+fn extract_staged_zip_inner(
+    zip_tmp: &std::path::Path,
+    dir: &std::path::Path,
+) -> Result<(), String> {
     // 1. Pre-list members and reject traversal before extracting anything.
     let list_out = std::process::Command::new(crate::util::system32_exe("tar.exe"))
         .args(["-tf", &zip_tmp.display().to_string()])
