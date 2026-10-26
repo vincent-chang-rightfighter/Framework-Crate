@@ -649,7 +649,14 @@ impl EcHw for EcClient {
         use framework_lib::chromium_ec::commands::EcRequestGetPdPortState;
 
         let mut ports = SmallVec::new();
-        for i in 0u8..4 {
+        // Laptop 16 has six expansion bays; querying an absent port only
+        // produces a debug log, so the wider count is safe and avoids
+        // silently hiding the last two ports.
+        let port_count = match detect_platform() {
+            PlatformFamily::Laptop16 => 6,
+            _ => 4,
+        };
+        for i in 0u8..port_count {
             let info = match (EcRequestGetPdPortState { port: i }).send_command(&self.ec) {
                 Ok(info) => info,
                 Err(e) => {
