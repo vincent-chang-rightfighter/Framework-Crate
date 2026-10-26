@@ -29,9 +29,14 @@ pub struct BiosDefaults {
     pub pl2_mmio_clamped: bool,
     #[serde(default)]
     pub pl2_mmio_time_s: f64,
+    /// Whether the MMIO mirror was read at capture. Old snapshots omit this;
+    /// they are treated as having MMIO data when the watts are non-zero.
+    #[serde(default)]
+    pub mmio_captured: bool,
     pub power_unit: f64,
     pub time_unit: f64,
-    /// Power source at capture; resume only restores when source matches.
+    /// Power source at capture. Captures now require AC, but the field is
+    /// retained for snapshot compatibility.
     #[serde(default = "default_true_fn")]
     pub captured_on_ac: bool,
 }
@@ -280,6 +285,7 @@ mod tests {
             pl2_mmio_enabled: true,
             pl2_mmio_clamped: true,
             pl2_mmio_time_s: 2.5,
+            mmio_captured: true,
             power_unit: 0.125,
             time_unit: 0.00098,
             captured_on_ac: true,
@@ -443,6 +449,7 @@ mod tests {
             pl2_mmio_enabled: false,
             pl2_mmio_clamped: false,
             pl2_mmio_time_s: 8.0,
+            mmio_captured: true,
             power_unit: 0.125,
             time_unit: 0.001,
             captured_on_ac: false,

@@ -86,6 +86,9 @@ pub struct CpuPowerInfo {
     pub pl2_mmio_enabled: bool,
     pub pl2_mmio_clamped: bool,
     pub pl2_mmio_time_s: f64,
+    /// True when the MMIO mirror was read successfully. Distinguishes a
+    /// genuine 0 W/disabled mirror from an unavailable IntelMCHBAR module.
+    pub mmio_available: bool,
     /// Firmware-supported range from MSR 0x614, in seconds. `None` keeps the
     /// read-back time-window check advisory.
     pub min_time_s: Option<f64>,
@@ -684,6 +687,15 @@ pub enum BiosRestore {
     Partial(String),
 }
 
+/// Whether the snapshot actually contains MMIO mirror values.
+///
+/// New snapshots carry an explicit flag so a genuine 0 W/disabled mirror is
+/// restored instead of skipped. Old snapshots omit the flag; non-zero watts
+/// keep their historical meaning.
+fn snapshot_has_mmio(bios: &BiosDefaults) -> bool {
+    bios.mmio_captured || bios.pl1_mmio_watts > 0.0 || bios.pl2_mmio_watts > 0.0
+}
+
 /// Writes both MSR and MMIO from `BiosDefaults` to restore factory state.
 pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<BiosRestore, String> {
     let (power_unit, time_unit) = super::read::read_rapl_units()?;
@@ -701,7 +713,7 @@ pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<BiosRestore, String> {
         time_unit,
     })?;
     // MMIO may be absent on older files; best-effort only, but reported.
-    if (bios.pl1_mmio_watts > 0.0 || bios.pl2_mmio_watts > 0.0)
+    if snapshot_has_mmio(bios)
         && let Err(e) = write_mmio_pl1_pl2_public(PowerLimitParams {
             pl1_watts: bios.pl1_mmio_watts,
             pl1_enabled: bios.pl1_mmio_enabled,
@@ -1247,6 +1259,44 @@ mod tests {
         assert_eq!(params.pl1_watts, 0.0);
         assert_eq!(params.power_unit, 0.0);
         assert!(params.power_unit <= 0.0, "unit must not be faked");
+    }
+
+    #[test]
+    fn snapshot_mmio_presence_uses_the_flag_or_legacy_watts() {
+        let base = BiosDefaults {
+            pl1_watts: 30.0,
+            pl1_enabled: true,
+            pl1_clamped: false,
+            pl1_time_s: 28.0,
+            pl2_watts: 35.0,
+            pl2_enabled: true,
+            pl2_clamped: false,
+            pl2_time_s: 28.0,
+            pl1_mmio_watts: 0.0,
+            pl1_mmio_enabled: false,
+            pl1_mmio_clamped: false,
+            pl1_mmio_time_s: 0.0,
+            pl2_mmio_watts: 0.0,
+            pl2_mmio_enabled: false,
+            pl2_mmio_clamped: false,
+            pl2_mmio_time_s: 0.0,
+            mmio_captured: false,
+            power_unit: 0.125,
+            time_unit: 0.0009765625,
+            captured_on_ac: true,
+        };
+        // Explicitly captured 0 W/disabled mirror must still be restored.
+        assert!(snapshot_has_mmio(&BiosDefaults {
+            mmio_captured: true,
+            ..base
+        }));
+        // Legacy snapshot with non-zero MMIO keeps its historical behavior.
+        assert!(snapshot_has_mmio(&BiosDefaults {
+            pl1_mmio_watts: 15.0,
+            ..base
+        }));
+        // Old snapshot with no MMIO data must not provoke a Partial reset.
+        assert!(!snapshot_has_mmio(&base));
     }
 
     #[test]

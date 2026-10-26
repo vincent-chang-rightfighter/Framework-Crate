@@ -41,7 +41,11 @@ pub struct CpuPowerState {
     sync_thread: Arc<parking_lot::Mutex<SyncThread>>,
     /// Outside mutex so liveness check never blocks on join.
     sync_alive: Arc<AtomicBool>,
+    /// Time of the last successful start; used for the liveness grace period.
     sync_start_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Time of the last start *attempt* (success or failure); throttles
+    /// auto-restart so a repeatedly failing handle init cannot retry every tick.
+    sync_attempt_ms: Arc<std::sync::atomic::AtomicU64>,
     bios: Arc<parking_lot::RwLock<Arc<Option<BiosDefaults>>>>,
     desired_sync: Arc<parking_lot::RwLock<Option<PowerLimitParams>>>,
     /// Set by the sync worker itself on permanent failure (MSR breaker).
@@ -67,6 +71,7 @@ impl Default for CpuPowerState {
             sync_thread: Arc::new(parking_lot::Mutex::new(SyncThread::new())),
             sync_alive: Arc::new(AtomicBool::new(false)),
             sync_start_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            sync_attempt_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             bios: Arc::new(parking_lot::RwLock::new(Arc::new(None))),
             desired_sync: Arc::new(parking_lot::RwLock::new(None)),
             sync_broken: Arc::new(AtomicBool::new(false)),
@@ -140,6 +145,13 @@ impl CpuPowerState {
             tracing::warn!("AC state unknown; deferring BIOS defaults capture");
             return;
         };
+        if !captured_on_ac {
+            // Firmware may apply lower PL1/PL2 limits on battery. Persisting
+            // those as the factory snapshot would make Reset restore the
+            // battery-mode limits instead of the true BIOS defaults.
+            tracing::info!("On battery; deferring BIOS defaults capture until AC is present");
+            return;
+        }
         // Validate live values before persisting: a tainted overclocked
         // snapshot must not become the permanent "factory" Reset target.
         {
@@ -160,6 +172,7 @@ impl CpuPowerState {
                 pl2_mmio_enabled: info.pl2_mmio_enabled,
                 pl2_mmio_clamped: info.pl2_mmio_clamped,
                 pl2_mmio_time_s: info.pl2_mmio_time_s,
+                mmio_captured: info.mmio_available,
                 power_unit: info.power_unit,
                 time_unit: info.time_unit,
                 captured_on_ac,
@@ -186,6 +199,7 @@ impl CpuPowerState {
             pl2_mmio_enabled: info.pl2_mmio_enabled,
             pl2_mmio_clamped: info.pl2_mmio_clamped,
             pl2_mmio_time_s: info.pl2_mmio_time_s,
+            mmio_captured: info.mmio_available,
             power_unit: info.power_unit,
             time_unit: info.time_unit,
             captured_on_ac,
@@ -224,7 +238,25 @@ impl CpuPowerState {
     /// taking the old handle and starting a new one and spawn two sync threads
     /// writing MSR/MMIO at once. The sync loop never takes this lock, so
     /// joining under it cannot deadlock.
-    pub fn start_sync(&self, mut params: PowerLimitParams) -> Result<(), &'static str> {
+    ///
+    /// Starts the sync thread for a user/desired start, clearing the
+    /// auto-restart latch and failure history.
+    pub fn start_sync(&self, params: PowerLimitParams) -> Result<(), &'static str> {
+        self.start_sync_with(params, true)
+    }
+
+    /// Shared start path. `manual` (or otherwise user-initiated) starts clear
+    /// the permanent-failure/restart latch; auto-restarts must not, or a
+    /// BIOS-locked register would be retried forever.
+    fn start_sync_with(
+        &self,
+        mut params: PowerLimitParams,
+        manual: bool,
+    ) -> Result<(), &'static str> {
+        // Record the attempt before validation so a persistently invalid
+        // desired param set is throttled just like a spawn failure.
+        self.sync_attempt_ms
+            .store(crate::util::monotonic_ms(), Ordering::Release);
         // Fail fast instead of spinning 30 breaker trips: validate before
         // spawning. pl2_time_s comes from hardware and may exceed the UI
         // cap; clamp it so a large BIOS value doesn't permanently fail sync.
@@ -236,17 +268,20 @@ impl CpuPowerState {
         }
         let mut thread = self.sync_thread.lock();
         thread.join_running();
-        // Clear the latch before spawning: a worker that fails immediately
-        // sets `sync_broken` during startup, and a later store here would
-        // erase that failure signal.
-        self.sync_broken.store(false, Ordering::Release);
-        self.sync_restart_disabled.store(false, Ordering::Release);
-        self.sync_restart_failures.store(0, Ordering::Release);
+        if manual {
+            // Clear the latch only for a deliberate start. An auto-restart
+            // that cleared it would defeat the "manual Sync required" guard.
+            self.sync_broken.store(false, Ordering::Release);
+            self.sync_restart_disabled.store(false, Ordering::Release);
+            self.sync_restart_failures.store(0, Ordering::Release);
+        }
         thread.start(
             params,
             Arc::clone(&self.sync_alive),
             Arc::clone(&self.sync_broken),
         )?;
+        // A successful spawn breaks the failure run.
+        self.sync_restart_failures.store(0, Ordering::Release);
         self.sync_enabled.store(true, Ordering::Release);
         self.sync_start_ms
             .store(crate::util::monotonic_ms(), Ordering::Release);
@@ -302,15 +337,15 @@ impl CpuPowerState {
             return false;
         }
         let now = crate::util::monotonic_ms();
-        let last = self.sync_start_ms.load(Ordering::Acquire);
-        if last != 0 && now.saturating_sub(last) < 5000 {
+        let last_attempt = self.sync_attempt_ms.load(Ordering::Acquire);
+        if last_attempt != 0 && now.saturating_sub(last_attempt) < 5000 {
             return false;
         }
         let params = match *self.desired_sync.read() {
             Some(p) => p,
             None => return false,
         };
-        match self.start_sync(params) {
+        match self.start_sync_with(params, false) {
             Ok(()) => {
                 tracing::info!("Restarted dead CPU power sync thread");
                 true
@@ -424,6 +459,43 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Acquire),
             "a no-op restart must leave the flag alone"
         );
+    }
+
+    #[test]
+    fn auto_restart_failure_counter_reaches_the_latch() {
+        use std::sync::atomic::Ordering;
+        let state = CpuPowerState::default();
+        state.sync_enabled.store(true, Ordering::Release);
+        // Force the validation failure path without touching hardware.
+        *state.desired_sync.write() = Some(PowerLimitParams {
+            pl1_watts: f64::NAN,
+            pl1_enabled: true,
+            pl1_clamped: false,
+            pl1_time_s: 28.0,
+            pl2_watts: 35.0,
+            pl2_enabled: true,
+            pl2_clamped: false,
+            pl2_time_s: 28.0,
+            max_time_s: None,
+            power_unit: 0.125,
+            time_unit: 0.0009765625,
+        });
+        for _ in 0..MAX_SYNC_RESTART_FAILURES {
+            // Skip the 5s retry throttle; each call is one distinct attempt.
+            state.sync_attempt_ms.store(0, Ordering::Release);
+            assert!(state.is_sync_dead(), "precondition: sync must look dead");
+            assert!(!state.try_restart_if_dead());
+        }
+        assert_eq!(
+            state.sync_restart_failures.load(Ordering::Acquire),
+            MAX_SYNC_RESTART_FAILURES
+        );
+        assert!(state.sync_restart_latched());
+        assert!(!state.sync_enabled.load(Ordering::Acquire));
+        // A latched auto-restart must stay latched until a manual start.
+        state.sync_attempt_ms.store(0, Ordering::Release);
+        assert!(!state.try_restart_if_dead());
+        assert!(state.sync_restart_latched());
     }
 
     #[test]

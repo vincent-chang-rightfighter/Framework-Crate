@@ -145,6 +145,7 @@ pub(super) fn read_cpu_power() -> CpuPowerInfo {
         let mut out = [0u64; 1];
         match exec_ioctl(handle, "ioctl_read_qword", &[mmio_offset], &mut out) {
             Ok(_) => {
+                info.mmio_available = true;
                 let raw = out[0];
                 let (pl1, pl1_en, pl1_cl, pl1_y, pl1_z) = decode_power_limit(raw, info.power_unit);
                 let (pl2, pl2_en, pl2_cl, pl2_y, pl2_z) =

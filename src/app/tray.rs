@@ -103,7 +103,19 @@ impl App {
                     return Some(run_ec_task_quit(
                         &self.state.system.ec_client,
                         Message::QuitShutdown,
-                        move |ec| apply_quit_charge_limit(&*ec, &limit),
+                        move |ec| {
+                            // Re-assert firmware control even in Disabled mode:
+                            // the user may have just switched from Manual/Curve
+                            // before the background loop ran, or an earlier
+                            // restore may have failed. Idempotent.
+                            if let Err(e) = ec.autofanctrl() {
+                                tracing::warn!(
+                                    "Failed to restore auto fan control on tray quit: {}",
+                                    e
+                                );
+                            }
+                            apply_quit_charge_limit(&*ec, &limit);
+                        },
                     ));
                 }
                 Some(Task::none())
@@ -139,30 +151,47 @@ impl App {
                         // Preserve desired sync params before hardware state is re-read.
                         let was_sync = self.state.cpu_power.sync_enabled.load(Ordering::Acquire);
                         let desired = self.state.cpu_power.desired_sync_params();
-                        // Stop sync before refresh to avoid racing with old thread.
-                        if was_sync {
-                            self.state.cpu_power.stop_sync();
-                        } else {
+                        if !was_sync {
                             self.pl_custom_applied.store(false, Ordering::Release);
                         }
                         let cpu_power = self.state.cpu_power.clone();
-                        let after = {
-                            let cpu_power = cpu_power.clone();
-                            move || {
-                                if let Some(params) = desired
-                                    && was_sync
-                                {
-                                    // Resume sync with user-desired params, not post-resume readback.
-                                    let _ = cpu_power.start_sync(params);
-                                    return;
+                        // Run the stop/refresh/restart sequence on a blocking
+                        // worker. stop_sync() joins the sync thread, and an
+                        // ioctl stuck in the driver must not freeze the UI.
+                        Some(Task::perform(
+                            async move {
+                                let _guard = crate::util::cpu_power_mutex().lock().await;
+                                let task_state = cpu_power.clone();
+                                let result = crate::util::spawn_blocking_with_timeout(
+                                    crate::util::PAWNIO_IO_TIMEOUT,
+                                    move || {
+                                        if was_sync {
+                                            task_state.stop_sync();
+                                        }
+                                        task_state.refresh();
+                                        if was_sync {
+                                            // Resume with the user's desired params,
+                                            // not the post-resume readback.
+                                            let params = desired.unwrap_or_else(|| {
+                                                task_state.snapshot().msr_limit_params()
+                                            });
+                                            if let Err(e) = task_state.start_sync(params) {
+                                                tracing::warn!(
+                                                    "Failed to resume CPU power sync after sleep: {}",
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    },
+                                )
+                                .await;
+                                if let Err(e) = result {
+                                    tracing::warn!("CPU power refresh after resume failed: {}", e);
                                 }
-                                if cpu_power.sync_enabled.load(Ordering::Acquire) {
-                                    let info = cpu_power.snapshot();
-                                    let _ = cpu_power.start_sync(info.msr_limit_params());
-                                }
-                            }
-                        };
-                        Some(refresh_cpu_power_task(cpu_power, after))
+                                Message::CpuPowerDataRefreshed
+                            },
+                            |msg| msg,
+                        ))
                     }
                 }
             }
