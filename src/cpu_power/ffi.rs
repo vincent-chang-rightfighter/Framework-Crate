@@ -9,7 +9,7 @@ use windows_sys::Win32::Foundation::HANDLE;
 
 use super::modules::{
     download_and_extract_modules, latest_modules_download_url, local_modules_version,
-    modules_update_needed, sha256_hex, tag_from_modules_url,
+    modules_downloaded, modules_update_needed, sha256_hex, tag_from_modules_url,
 };
 
 // PawnIOLib.dll function signatures (STDMETHODCALLTYPE / WINAPI - same on x64).
@@ -237,7 +237,7 @@ fn run_command_with_timeout(
         .stderr(Stdio::piped());
     let mut child = command
         .spawn()
-        .map_err(|e| format!("failed to run winget: {e}"))?;
+        .map_err(|e| format!("failed to run command: {e}"))?;
     let mut stdout = child.stdout.take();
     let (out_tx, out_rx) = std::sync::mpsc::channel();
     let out_thread = std::thread::spawn(move || {
@@ -264,14 +264,14 @@ fn run_command_with_timeout(
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     stop_and_drain(&mut child, &out_rx, &err_rx, out_thread, err_thread);
-                    return Err(format!("winget timed out after {}s", timeout.as_secs()));
+                    return Err(format!("command timed out after {}s", timeout.as_secs()));
                 }
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
             Err(e) => {
                 stop_and_drain(&mut child, &out_rx, &err_rx, out_thread, err_thread);
-                return Err(format!("failed to wait for winget: {e}"));
+                return Err(format!("failed to wait for command: {e}"));
             }
         };
         let stdout = match out_rx.recv_timeout(Duration::from_secs(2)) {
@@ -507,7 +507,10 @@ pub fn update_pawnio_modules() -> Result<(), String> {
         .as_deref()
         .and_then(tag_from_modules_url);
     let local = local_modules_version();
-    if !modules_update_needed(local.as_deref(), latest_tag.as_deref()) {
+    // A matching version marker is not enough: the bins can be missing or
+    // corrupt while the marker survives. Only skip the download when the
+    // hash-pinned blobs actually verify.
+    if !modules_update_needed(local.as_deref(), latest_tag.as_deref()) && modules_downloaded() {
         tracing::info!(
             "PawnIO Modules already at latest ({})",
             latest_tag.as_deref().unwrap_or_default()
@@ -576,18 +579,18 @@ fn classify_authenticode_output(success: bool, stdout: &[u8]) -> AuthenticodeOut
 }
 
 fn check_authenticode(p: &std::path::Path) -> AuthenticodeOutcome {
-    let out = std::process::Command::new(crate::util::powershell_exe())
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "(Get-AuthenticodeSignature '{}').Status -eq 'Valid'",
-                p.display().to_string().replace('\'', "''")
-            ),
-        ])
-        .creation_flags(0x08000000)
-        .output();
-    match out {
+    let mut command = std::process::Command::new(crate::util::powershell_exe());
+    command.args([
+        "-NoProfile",
+        "-Command",
+        &format!(
+            "(Get-AuthenticodeSignature '{}').Status -eq 'Valid'",
+            p.display().to_string().replace('\'', "''")
+        ),
+    ]);
+    // Bound PowerShell: a hung AV/security hook must not occupy a blocking
+    // thread indefinitely (EC dispatch shares the same blocking pool).
+    match run_command_with_timeout(command, std::time::Duration::from_secs(10)) {
         Ok(out) => classify_authenticode_output(out.status.success(), &out.stdout),
         Err(_) => AuthenticodeOutcome::Unavailable,
     }

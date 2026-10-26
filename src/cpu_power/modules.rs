@@ -824,8 +824,9 @@ pub fn download_and_extract_modules() -> Result<(), String> {
 
     // Download via inline -Command (no script file, no script-path race).
     // Escape single quotes for PowerShell single-quoted strings.
-    // Timeout caps a hung CDN; pre-size check is done by the caller via
-    // Content-Length where available, with a 32M post-check below.
+    // Invoke-WebRequest has no max-size option, so the 32M cap is enforced
+    // by check_zip_size after the transfer. The curl fallback below has
+    // --max-filesize and fails before writing an oversized response.
     let ps_command = format!(
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
          Invoke-WebRequest -Uri '{url}' -OutFile '{zip}' -UseBasicParsing -ErrorAction Stop -TimeoutSec 30",
@@ -833,7 +834,7 @@ pub fn download_and_extract_modules() -> Result<(), String> {
         zip = ps_escape(&zip_tmp.display().to_string()),
     );
 
-    let output = std::process::Command::new(crate::util::powershell_exe())
+    let output = match std::process::Command::new(crate::util::powershell_exe())
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -843,11 +844,20 @@ pub fn download_and_extract_modules() -> Result<(), String> {
         ])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .output()
-        .map_err(|e| format!("failed to run powershell: {}", e))?;
+    {
+        Ok(output) => output,
+        Err(e) => {
+            let _ = std::fs::remove_file(&zip_tmp);
+            return Err(format!("failed to run powershell: {}", e));
+        }
+    };
 
     // PowerShell only downloads; extraction always goes through staged validation.
     let _ = std::fs::remove_file(&zip_path);
     if !output.status.success() {
+        // The temp zip was created before the download; remove the empty or
+        // partial file before the curl fallback so it cannot accumulate.
+        let _ = std::fs::remove_file(&zip_tmp);
         let detail = proc_failure_detail(&output);
         warn!(
             "PowerShell download failed: {}, trying curl fallback",
