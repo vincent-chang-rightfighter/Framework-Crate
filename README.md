@@ -227,9 +227,10 @@ Toggling **launch at startup** on the About page registers a Windows scheduled t
 Notes:
 
 - **Enabling it requires an elevated process.** The task is registered with `RunLevel=HighestAvailable`, so the app reports a readable message instead of letting `schtasks` emit its localized access-denied text.
+- **The executable must live in an administrator-only directory.** `HighestAvailable` runs the image elevated at logon, so a portable copy in a user-writable folder is refused; install under `Program Files` (or another admin-only root).
 - `schtasks` output is decoded using the OEM code page so non-English messages stay readable.
 - After creating the task the app queries it back, so success is only reported once the task is actually queryable.
-- The task document is written to `%TEMP%` as UTF-16LE under an unpredictable hashed name (with a post-write symlink/size check) and removed afterwards. A process killed mid-write never reaches the removal, so stale documents are cleaned up on the next run.
+- The task document is written as UTF-16LE to the admin-only `%ProgramData%\FrameworkCrate\tasks` directory under an unpredictable hashed name, then removed. Debug/unelevated test runs use `%TEMP%`. A process killed mid-write never reaches the removal, so stale documents are cleaned up on the next run.
 - The executable path is validated before it is embedded: quotes, cmd metacharacters, control characters, bidi overrides, `DEL` and a trailing backslash are all rejected, since the path is embedded as XML text and wrapped in quotes for the action `Command`.
 
 ## Logs
@@ -256,6 +257,7 @@ The file rotates once it grows past a size threshold, keeping `app.log.1` throug
 - **Platform-specific**: This project has only been tested on Intel Core Ultra Series 1 (Meteor Lake) Framework laptops; broader support is not yet guaranteed.
 - **EC driver**: The Framework EC kernel driver must be installed for `framework_lib` to communicate with the hardware.
 - **Crash leaves last-applied state**: orderly quit restores firmware fan control and flushes the charge limit, but a crash or kill bypasses that path, so the EC keeps the last written fan duty until sleep, reboot, or the next launch re-asserts it.
+- **Logoff/restart fan handover is not reliable**: on some Windows 11 elevated setups the session-end broadcast is not delivered to the tray window, so manual/curve duty can persist after sign-out until the next launch or reboot. Use **Restore Auto & Exit** before logging off when the fan is under manual/curve control.
 
 ## Third-Party Dependencies
 
