@@ -259,54 +259,68 @@ fn run_command_with_timeout(
 
     let start = Instant::now();
     loop {
-        match child
-            .try_wait()
-            .map_err(|e| format!("failed to wait for winget: {e}"))?
-        {
-            Some(status) => {
-                let stdout = match out_rx.recv_timeout(Duration::from_secs(2)) {
-                    Ok(buf) => {
-                        let _ = out_thread.join();
-                        buf
-                    }
-                    Err(_) => Vec::new(),
-                };
-                let stderr = match err_rx.recv_timeout(Duration::from_secs(2)) {
-                    Ok(buf) => {
-                        let _ = err_thread.join();
-                        buf
-                    }
-                    Err(_) => Vec::new(),
-                };
-                return Ok(std::process::Output {
-                    status,
-                    stdout,
-                    stderr,
-                });
-            }
-            None => {
+        let status = match child.try_wait() {
+            Ok(Some(status)) => status,
+            Ok(None) => {
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let reap_deadline = Instant::now() + Duration::from_secs(1);
-                    while child.try_wait().ok().flatten().is_none()
-                        && Instant::now() < reap_deadline
-                    {
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                    // Join only readers that finished; a grandchild can keep a
-                    // pipe open past the kill, and an unbounded join would
-                    // defeat the timeout.
-                    if out_rx.recv_timeout(Duration::from_secs(1)).is_ok() {
-                        let _ = out_thread.join();
-                    }
-                    if err_rx.recv_timeout(Duration::from_secs(1)).is_ok() {
-                        let _ = err_thread.join();
-                    }
+                    stop_and_drain(&mut child, &out_rx, &err_rx, out_thread, err_thread);
                     return Err(format!("winget timed out after {}s", timeout.as_secs()));
                 }
                 std::thread::sleep(Duration::from_millis(50));
+                continue;
             }
-        }
+            Err(e) => {
+                stop_and_drain(&mut child, &out_rx, &err_rx, out_thread, err_thread);
+                return Err(format!("failed to wait for winget: {e}"));
+            }
+        };
+        let stdout = match out_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(buf) => {
+                let _ = out_thread.join();
+                buf
+            }
+            Err(_) => Vec::new(),
+        };
+        let stderr = match err_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(buf) => {
+                let _ = err_thread.join();
+                buf
+            }
+            Err(_) => Vec::new(),
+        };
+        return Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        });
+    }
+}
+
+/// Kill and reap a child, then drain readers that finished. A grandchild can
+/// keep a pipe open past the kill, so joining is conditional on receiving data.
+fn stop_and_drain(
+    child: &mut std::process::Child,
+    out_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    err_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    out_thread: std::thread::JoinHandle<()>,
+    err_thread: std::thread::JoinHandle<()>,
+) {
+    let _ = child.kill();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while child.try_wait().ok().flatten().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if out_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .is_ok()
+    {
+        let _ = out_thread.join();
+    }
+    if err_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .is_ok()
+    {
+        let _ = err_thread.join();
     }
 }
 

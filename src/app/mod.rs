@@ -142,7 +142,7 @@ pub enum Message {
     ToggleExpansionCardDebug,
     StartupLaunchToggled(bool),
     StartupLaunchSet(bool, Result<(), String>),
-    StartupLaunchQueried(bool),
+    StartupLaunchQueried(crate::system_info::StartupTaskState),
     InstallPawnIO,
     PawnIOInstalled(Result<(), String>),
     DownloadPawnIOModules,
@@ -530,10 +530,10 @@ impl App {
             async {
                 crate::util::spawn_blocking_with_timeout(
                     std::time::Duration::from_secs(6),
-                    system_info::startup_launch_enabled,
+                    system_info::inspect_startup_task,
                 )
                 .await
-                .unwrap_or(false)
+                .unwrap_or_else(system_info::StartupTaskState::Unreadable)
             },
             Message::StartupLaunchQueried,
         );
