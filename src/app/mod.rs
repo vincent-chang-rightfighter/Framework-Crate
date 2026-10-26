@@ -185,6 +185,9 @@ pub struct App {
     pub start_minimized: bool,
     pub init_complete: bool,
     pub config_save_failed: bool,
+    /// User dismissed the save-failure banner; keep it hidden until a new
+    /// save attempt is made.
+    pub config_save_dismissed: bool,
     pub expansion_card_debug: bool,
     pub startup_launch_enabled: bool,
     pub startup_launch_touched: bool,
@@ -194,6 +197,10 @@ pub struct App {
     pub closing_window_id: Option<iced::window::Id>,
     pub quit_duty_value: u32,
     pub system_info: SystemInfo,
+    /// Versions snapshot the header text was last built from. Lets the tick
+    /// pick up versions fetched by the background fallback instead of only
+    /// updating the About page.
+    pub header_versions: Option<crate::cli::ec_wrapper::VersionsData>,
     pub state: AppState,
     pub last_tick: Instant,
     pub tick_interval_ms: u64,
@@ -219,6 +226,9 @@ pub struct App {
     /// Whether window height is fitted to content; resets on layout-changing toggles.
     pub height_set: bool,
     pub modules_download_error: Option<String>,
+    /// True while a PawnIO install/download/update task is in flight. Prevents
+    /// repeated clicks from spawning overlapping 60s blocking tasks/UAC prompts.
+    pub pawnio_busy: bool,
     /// Self update check state (About page): in-flight flag, newer tag when
     /// one exists, and the last failure to reach the API.
     pub update_checking: bool,
@@ -380,6 +390,7 @@ impl App {
             show_settings: false,
             init_complete: false,
             config_save_failed: false,
+            config_save_dismissed: false,
             expansion_card_debug: false,
             startup_launch_enabled: false,
             startup_launch_touched: false,
@@ -398,6 +409,7 @@ impl App {
                 screen,
                 refresh_rate,
             },
+            header_versions: None,
             state: state.clone(),
             last_tick: Instant::now(),
             tick_interval_ms: ui_refresh_ms,
@@ -418,6 +430,7 @@ impl App {
             window_height: None,
             height_set: false,
             modules_download_error: None,
+            pawnio_busy: false,
             update_checking: false,
             update_available: None,
             update_check_error: None,
@@ -594,7 +607,12 @@ impl App {
         }
         match message {
             Message::Tick => self.handle_tick_message(),
-            _ => Task::none(),
+            // Every current variant is handled above. Keep a visible trail
+            // for a future message that is added without a handler.
+            other => {
+                tracing::debug!("Unhandled message: {:?}", other);
+                Task::none()
+            }
         }
     }
 
@@ -627,6 +645,7 @@ impl App {
             }
         }
         let versions = read_lock(&self.state.system.versions);
+        self.header_versions = versions.as_ref().as_ref().cloned();
         self.system_info.header_device_name = versions
             .as_ref()
             .as_ref()

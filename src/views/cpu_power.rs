@@ -50,6 +50,13 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     .on_press(Message::InstallPawnIO)
                     .style(btn_style),
             );
+            if let Some(ref err) = snap.modules_download_error {
+                content = content.push(text(err.as_str()).size(FONT_SMALL).style(move |_theme| {
+                    iced::widget::text::Style {
+                        color: Some(pal.gray),
+                    }
+                }));
+            }
         } else if !crate::cpu_power::modules_downloaded() {
             content = content.push(text("PawnIO Modules required").size(FONT_SMALL).style(
                 move |_theme| iced::widget::text::Style {

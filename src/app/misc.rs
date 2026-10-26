@@ -182,6 +182,7 @@ impl App {
             }
             Message::DismissConfigWarning => {
                 self.config_save_failed = false;
+                self.config_save_dismissed = true;
                 self.config_load_warning = None;
                 Some(Task::none())
             }
@@ -316,8 +317,10 @@ impl App {
                 // Whitelist: only this repo's GitHub pages may be opened.
                 // A future static-str call site with file:// or ms-msdt:
                 // would otherwise become a protocol-handler hijack.
-                if !url.starts_with("https://github.com/vincent-chang-rightfighter/Framework-Crate")
-                {
+                let allowed = url
+                    .strip_prefix("https://github.com/vincent-chang-rightfighter/Framework-Crate")
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+                if !allowed {
                     tracing::warn!("Refusing to open non-whitelisted URL: {}", url);
                     return Some(Task::none());
                 }

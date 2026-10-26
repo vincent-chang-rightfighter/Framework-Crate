@@ -27,7 +27,19 @@ impl App {
             .state
             .lifecycle
             .bg_config_save_failed
-            .load(Ordering::Relaxed);
+            .load(Ordering::Relaxed)
+            && !self.config_save_dismissed;
+
+        // Versions can arrive after InitComplete (the background retry path).
+        // Rebuild the header so the device name / BIOS line are not stale.
+        let header_stale = {
+            let versions = crate::util::read_lock(&self.state.system.versions);
+            versions.as_ref().as_ref() != self.header_versions.as_ref()
+        };
+        if header_stale {
+            self.rebuild_header_info();
+            self.mark_dirty();
+        }
 
         // Startup recovery: background loop may have re-established EC after initial failure.
         if self.startup_error.is_some()
@@ -229,14 +241,14 @@ impl App {
         let target = *self.content_height.lock();
         let target = target?;
         let mut target = target.min(super::AUTO_MAX_HEIGHT + super::WINDOW_CHROME);
-        if let Some((_, work_h)) = crate::system_info::work_area_size() {
+        let work_area = crate::system_info::work_area_size();
+        if let Some((_, work_h)) = work_area {
             let max_h = (work_h as f32 - super::WORK_AREA_MARGIN_H).max(super::WINDOW_MIN_HEIGHT);
             target = target.min(max_h);
         }
-        let width = if let Some((work_w, _)) = crate::system_info::work_area_size() {
-            super::AUTO_WIDTH.min(work_w as f32 - super::WORK_AREA_MARGIN_W)
-        } else {
-            super::AUTO_WIDTH
+        let width = match work_area {
+            Some((work_w, _)) => super::AUTO_WIDTH.min(work_w as f32 - super::WORK_AREA_MARGIN_W),
+            None => super::AUTO_WIDTH,
         };
         if (target - current).abs() > super::RESIZE_EPSILON {
             Some(iced::window::resize(id, iced::Size::new(width, target)))

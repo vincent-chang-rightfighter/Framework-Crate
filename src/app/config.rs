@@ -134,6 +134,10 @@ impl App {
                         && idx < curve.curve.points.len()
                     {
                         curve.curve.points[idx] = [temp, duty];
+                        // Keep in-memory points consistent with the runtime
+                        // monotonic curve so the editor line and labels do
+                        // not disagree.
+                        crate::types::enforce_monotonic_duties(&mut curve.curve.points);
                     }
                 });
                 self.pending_curve_update = true;
@@ -281,6 +285,8 @@ impl App {
 impl App {
     pub(crate) fn save_config(&mut self) {
         self.mark_dirty();
+        // A new save attempt may fail differently; let the banner reappear.
+        self.config_save_dismissed = false;
         let cfg = read_lock(&self.state.lifecycle.config);
         let ver = next_config_version();
         if self.config_tx.send((Arc::clone(&cfg), ver)).is_ok() {

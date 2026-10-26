@@ -179,7 +179,13 @@ pub(crate) fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
                     } else if charging {
                         "AC".to_string()
                     } else {
-                        format!("-{:.1}W", power_w)
+                        // Unknown AC state must not imply discharge; the
+                        // Current row already uses this rule.
+                        let prefix = current_prefix(
+                            battery.power_info.ac_present,
+                            battery.power_info.discharging,
+                        );
+                        format!("{}{:.1}W", prefix, power_w)
                     }
                 })
             })
