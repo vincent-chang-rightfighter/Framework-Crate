@@ -236,6 +236,22 @@ fn ac_transition_pending(prev_ac: bool, ac_now: bool, had_prior_sample: bool) ->
     had_prior_sample && prev_ac && !ac_now
 }
 
+/// Fresh idle verdict. `last_interaction_ts` can change while the loop
+/// sleeps or runs slow EC scans, so code after an await must call this
+/// instead of reusing the snapshot taken at the top of the iteration.
+fn is_idle_now(state: &AppState) -> bool {
+    is_idle_at(
+        state.lifecycle.last_interaction_ts.load(Ordering::Acquire),
+        crate::util::monotonic_ms(),
+    )
+}
+
+/// Pure idle comparison, split out for deterministic tests (`monotonic_ms`
+/// counts from process start, so a fresh test process is never idle).
+fn is_idle_at(last_interaction_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(last_interaction_ms) > IDLE_THRESHOLD_MS
+}
+
 fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
     if fan_count == 0 {
         return;
@@ -721,12 +737,11 @@ pub fn spawn(state: AppState) {
                             .load(Ordering::Acquire)
                             .max(POLL_RATE_MIN_MS as u64),
                     };
-                    let mut now_ms = crate::util::monotonic_ms();
-                    let last_interaction = bg_state2
-                        .lifecycle
-                        .last_interaction_ts
-                        .load(Ordering::Acquire);
-                    let is_idle = now_ms.saturating_sub(last_interaction) > IDLE_THRESHOLD_MS;
+                    // No clock read here: `is_idle_now` samples it internally,
+                    // and `now_ms` is (re-)sampled after the scans below so
+                    // slow EC rounds cannot skew the poll cadences.
+                    let mut now_ms: u64;
+                    let is_idle = is_idle_now(&bg_state2);
                     let hidden = !bg_state2.lifecycle.visible.load(Ordering::Acquire);
                     let effective_interval = match fan_mode {
                         // Curve must keep responding while idle; slowdown only for other modes.
@@ -1093,7 +1108,10 @@ pub fn spawn(state: AppState) {
                     // windows still skip entirely.
                     const CPU_POWER_POLL_MS: u64 = 5000;
                     const CPU_POWER_IDLE_POLL_MS: u64 = 30_000;
-                    let cpu_poll_ms = if is_idle {
+                    // Re-evaluate instead of reusing the top-of-loop
+                    // snapshot: the sleep and EC scans above can take
+                    // seconds under load, flipping idle state meanwhile.
+                    let cpu_poll_ms = if is_idle_now(&bg_state2) {
                         CPU_POWER_IDLE_POLL_MS
                     } else {
                         CPU_POWER_POLL_MS
@@ -1318,6 +1336,33 @@ mod tests {
     #[test]
     fn first_battery_sample_never_triggers_reset() {
         assert!(!ac_transition_pending(true, false, false));
+    }
+
+    #[test]
+    fn idle_verdict_follows_latest_interaction() {
+        // Pure comparison with synthetic clocks (deterministic: the real
+        // clock counts from process start, so a fresh test host is young).
+        assert!(!is_idle_at(1_000, 1_000));
+        assert!(!is_idle_at(0, IDLE_THRESHOLD_MS));
+        assert!(is_idle_at(0, IDLE_THRESHOLD_MS + 1));
+        assert!(is_idle_at(9_000, 20_000));
+
+        // Live helper: just interacted means active.
+        use crate::app::AppState;
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        state
+            .lifecycle
+            .last_interaction_ts
+            .store(crate::util::monotonic_ms(), Ordering::Release);
+        assert!(!is_idle_now(&state));
     }
 
     #[test]
