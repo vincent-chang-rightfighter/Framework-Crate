@@ -841,4 +841,29 @@ mod tests {
         app.pl1_time_edit = "28".into();
         assert!(app.validate_cpu_power_inputs().is_err());
     }
+
+    #[tokio::test]
+    async fn validate_cpu_power_rejects_over_caps() {
+        // Far above every per-model cap and the absolute 120W ceiling, so
+        // this holds regardless of which machine runs the test.
+        let (mut app, _) = App::new(false);
+        app.pl1_edit = "9999".into();
+        app.pl2_edit = "9999".into();
+        app.pl1_time_edit = "28".into();
+        assert!(app.validate_cpu_power_inputs().is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_cpu_power_disabled_zero_time_matches_write_boundary() {
+        // The writer accepts a zero time window on a disabled limit (nothing
+        // is enforced); the UI now defers to that verdict instead of keeping
+        // its own stricter rule.
+        let (mut app, _) = App::new(false);
+        app.pl1_enabled = false;
+        app.pl2_enabled = false;
+        app.pl1_edit = "30".into();
+        app.pl2_edit = "35".into();
+        app.pl1_time_edit = "0".into();
+        assert!(app.validate_cpu_power_inputs().is_ok());
+    }
 }

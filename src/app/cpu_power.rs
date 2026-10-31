@@ -542,6 +542,13 @@ impl App {
     }
 
     /// Validates CPU power inputs; returns Ok((pl1, pl2, pl1_time)) or Err.
+    ///
+    /// String parsing and finiteness are UI-specific. All range/order rules
+    /// defer to the write boundary (`validate_limit_values`) so the UI
+    /// verdict and the MSR encoder can never drift apart. Units stay
+    /// unchecked here: they come from the live snapshot and may be zero
+    /// before the first read; `validate_limit_params` re-checks everything,
+    /// including units, at write time.
     pub(crate) fn validate_cpu_power_inputs(&self) -> Result<(f64, f64, f64), String> {
         let pl1: f64 = self
             .pl1_edit
@@ -564,65 +571,31 @@ impl App {
         if !pl1_time.is_finite() {
             return Err("PL1 time must be a finite number".to_string());
         }
-        // Enabled floor mirrors the write boundary: a sub-5W *enabled*
-        // limit would hard-throttle into an apparent hang. Disabled
-        // limits skip the floor (including 0W), matching
-        // `validate_limit_params`.
-        if self.pl1_enabled && pl1 < crate::cpu_power::LIMIT_MIN_ENABLED_WATTS {
-            return Err(format!(
-                "PL1 must be at least {:.0}W when enabled",
-                crate::cpu_power::LIMIT_MIN_ENABLED_WATTS
-            ));
-        }
-        if self.pl2_enabled && pl2 < crate::cpu_power::LIMIT_MIN_ENABLED_WATTS {
-            return Err(format!(
-                "PL2 must be at least {:.0}W when enabled",
-                crate::cpu_power::LIMIT_MIN_ENABLED_WATTS
-            ));
-        }
-        // Upper bounds: per-model ceiling first (e.g. 40W on Laptop 12),
-        // then the absolute 120W Desktop ceiling. Shared with the write
-        // boundary so UI and encoder never disagree.
-        let model_max = crate::cpu_power::platform_max_watts();
-        if pl1 > model_max {
-            return Err(format!(
-                "PL1 must not exceed {:.0}W on this model",
-                model_max
-            ));
-        }
-        if pl2 > model_max {
-            return Err(format!(
-                "PL2 must not exceed {:.0}W on this model",
-                model_max
-            ));
-        }
-        if pl1 > crate::cpu_power::LIMIT_MAX_WATTS {
-            return Err(format!(
-                "PL1 must not exceed {:.0}W",
-                crate::cpu_power::LIMIT_MAX_WATTS
-            ));
-        }
-        if pl2 > crate::cpu_power::LIMIT_MAX_WATTS {
-            return Err(format!(
-                "PL2 must not exceed {:.0}W",
-                crate::cpu_power::LIMIT_MAX_WATTS
-            ));
-        }
-        if pl1_time <= 0.0 {
-            return Err("PL1 time must be greater than 0s".to_string());
-        }
-        if pl1_time > crate::cpu_power::LIMIT_MAX_TIME_S {
-            return Err(format!(
-                "PL1 time must not exceed {:.0}s",
-                crate::cpu_power::LIMIT_MAX_TIME_S
-            ));
-        }
-        if self.pl1_enabled && self.pl2_enabled && pl1 > pl2 {
-            return Err(format!(
-                "PL1 ({:.1}W) must not exceed PL2 ({:.1}W)",
-                pl1, pl2
-            ));
-        }
+        // Same construction as the Apply/SyncStart handlers below (snapshot
+        // supplies the fields the edit boxes do not cover). Before the first
+        // successful read there is no snapshot yet (Apply no-ops then too),
+        // so judge the inputs symmetrically instead of failing on the zeroed
+        // placeholder PL2 time.
+        let info = self.state.cpu_power.snapshot();
+        let pl2_time = if info.available {
+            info.pl2_time_s
+        } else {
+            pl1_time
+        };
+        let params = crate::cpu_power::PowerLimitParams {
+            pl1_watts: pl1,
+            pl1_enabled: self.pl1_enabled,
+            pl1_clamped: self.pl1_clamped,
+            pl1_time_s: pl1_time,
+            pl2_watts: pl2,
+            pl2_enabled: self.pl2_enabled,
+            pl2_clamped: self.pl2_clamped,
+            pl2_time_s: pl2_time,
+            max_time_s: info.max_time_s,
+            power_unit: info.power_unit,
+            time_unit: info.time_unit,
+        };
+        crate::cpu_power::validate_limit_values(&params)?;
         Ok((pl1, pl2, pl1_time))
     }
 

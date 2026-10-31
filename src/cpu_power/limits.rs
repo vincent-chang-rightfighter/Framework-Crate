@@ -495,6 +495,33 @@ pub fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
             return Err(format!("invalid {name}: implausible RAPL unit ({v})"));
         }
     }
+    validate_limit_values(params)
+}
+
+/// Range and order rules for PL watts/time, shared by the write path and the
+/// UI pre-check so the two verdicts cannot drift apart.
+///
+/// Units are intentionally excluded: they come from the live snapshot, and
+/// the UI must stay usable before the first successful read (unit checks
+/// stay in `validate_limit_params`, which always runs before encoding).
+pub fn validate_limit_values(params: &PowerLimitParams) -> Result<(), String> {
+    // Self-sufficient like the write path: the UI feeds snapshot-derived
+    // PL2 time/units that may be garbage before the first read, so every
+    // field this helper judges is finite/negative-checked here (idempotent
+    // under `validate_limit_params`, which already checked them above).
+    for (name, v) in [
+        ("PL1 watts", params.pl1_watts),
+        ("PL2 watts", params.pl2_watts),
+        ("PL1 time", params.pl1_time_s),
+        ("PL2 time", params.pl2_time_s),
+    ] {
+        if !v.is_finite() {
+            return Err(format!("invalid {name}: not finite ({v})"));
+        }
+        if v < 0.0 {
+            return Err(format!("invalid {name}: negative ({v})"));
+        }
+    }
     for (name, v) in [
         ("PL1 watts", params.pl1_watts),
         ("PL2 watts", params.pl2_watts),
@@ -771,6 +798,65 @@ mod tests {
         p.pl1_watts = 0.0;
         p.pl1_enabled = false;
         assert!(validate_limit_params(&p).is_ok());
+    }
+
+    #[test]
+    fn limit_values_ignores_units_but_params_does_not() {
+        // Same watts/time verdict with zeroed units: the UI must stay usable
+        // before the first successful RAPL read, while the write path still
+        // refuses to encode without plausible units.
+        let mut p = params(30.0, 35.0);
+        p.power_unit = 0.0;
+        p.time_unit = 0.0;
+        assert!(validate_limit_values(&p).is_ok());
+        assert!(validate_limit_params(&p).is_err());
+    }
+
+    #[test]
+    fn limit_values_matches_params_verdict_when_units_valid() {
+        // With sane units the two verdicts coincide, so tightening one side
+        // cannot silently reopen the other.
+        let watts = [
+            0.0,
+            -1.0,
+            1.0,
+            4.9,
+            5.0,
+            30.0,
+            119.0,
+            120.0,
+            121.0,
+            1000.0,
+            f64::NAN,
+            f64::INFINITY,
+        ];
+        let times = [0.0, -1.0, 28.0, 120.0, 121.0, f64::NAN];
+        for &pl1 in &watts {
+            for &pl2 in &watts {
+                for &t1 in &times {
+                    for enabled in [false, true] {
+                        let p = PowerLimitParams {
+                            pl1_watts: pl1,
+                            pl1_enabled: enabled,
+                            pl1_clamped: false,
+                            pl1_time_s: t1,
+                            pl2_watts: pl2,
+                            pl2_enabled: enabled,
+                            pl2_clamped: false,
+                            pl2_time_s: 28.0,
+                            max_time_s: None,
+                            power_unit: POWER_UNIT,
+                            time_unit: TIME_UNIT,
+                        };
+                        assert_eq!(
+                            validate_limit_values(&p).is_ok(),
+                            validate_limit_params(&p).is_ok(),
+                            "diverged for {p:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Encodes a PL1/PL2 pair the way the write path does.

@@ -11,9 +11,9 @@ pub use ffi::{
     update_pawnio, update_pawnio_modules,
 };
 pub use limits::{
-    CpuPowerInfo, CpuPowerUnavailable, LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS, LIMIT_MIN_ENABLED_WATTS,
-    PowerLimitParams, pl_limits_differ_from_bios, platform_max_watts, validate_limit_params,
-    write_bios_defaults, write_msr_pl1_pl2_public,
+    CpuPowerInfo, CpuPowerUnavailable, LIMIT_MAX_TIME_S, PowerLimitParams,
+    pl_limits_differ_from_bios, validate_limit_params, validate_limit_values, write_bios_defaults,
+    write_msr_pl1_pl2_public,
 };
 pub use modules::{
     download_and_extract_modules, modules_downloaded, open_modules_dir, pawnio_modules_version,
