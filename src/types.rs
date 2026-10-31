@@ -975,6 +975,31 @@ mod tests {
     }
 
     #[test]
+    fn curve_full_points_survives_random_input() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        for _ in 0..500 {
+            let count = (next() % 40) as usize;
+            let points: Vec<[u32; 2]> = (0..count).map(|_| [next() % 111, next() % 101]).collect();
+            let full = curve_full_points(&points);
+            assert!(
+                full.windows(2).all(|w| w[0][0] < w[1][0]),
+                "temperatures must be strictly increasing: {full:?}"
+            );
+            assert!(
+                full.windows(2).all(|w| w[0][1] <= w[1][1]),
+                "duty must be non-decreasing: {full:?}"
+            );
+            assert_eq!(full.last(), Some(&[CURVE_TEMP_MAX, 100]));
+        }
+    }
+
+    #[test]
     fn curve_full_points_drops_locked_input() {
         let pts = curve_full_points(&[[30, 0], [101, 20], [60, 40]]);
         assert!(!pts.iter().any(|p| p[0] == 101));

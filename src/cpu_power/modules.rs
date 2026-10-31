@@ -1124,6 +1124,29 @@ mod tests {
     }
 
     #[test]
+    fn member_path_safe_survives_random_ascii() {
+        let alphabet = b"abcXYZ012/\\:. -_<>|?*\0";
+        let mut seed = 0x1234_5678_9ABC_DEF0u64;
+        for _ in 0..1000 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let len = (seed as usize) % 40;
+            let s: String = (0..len)
+                .map(|_| alphabet[(seed.rotate_left(7) as usize + len) % alphabet.len()] as char)
+                .collect();
+            if member_path_safe(&s) {
+                assert!(
+                    !s.replace('\\', "/")
+                        .split('/')
+                        .any(|component| component == ".."),
+                    "accepted a parent traversal: {s:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn tar_listing_rejects_links_and_special_files() {
         let regular = b"-rw-r--r--  0 0 0 12 Jan 25 21:40 file.bin\n\
 drwxr-xr-x  0 0 0  0 Jan 25 21:40 dir/\n";

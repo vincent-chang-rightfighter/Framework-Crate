@@ -994,6 +994,24 @@ mod tests {
     }
 
     #[test]
+    fn config_parser_survives_random_ascii() {
+        let mut seed = 0x0BAD_F00D_DEAD_BEEFu64;
+        for _ in 0..500 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let len = (seed as usize) % 120;
+            let text: String = (0..len)
+                .map(|i| {
+                    let v = seed.rotate_left((i % 63) as u32) as u8;
+                    (b' ' + (v % 95)) as char
+                })
+                .collect();
+            let _ = toml::from_str::<Config>(&text);
+        }
+    }
+
+    #[test]
     fn load_corrupted_toml_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.toml");
