@@ -45,15 +45,24 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             }
         }));
         if !crate::cpu_power::is_pawnio_installed() {
-            content = content.push(
-                button(text("Install PawnIO").size(FONT_BODY))
-                    .on_press(Message::InstallPawnIO)
-                    .style(btn_style),
-            );
+            let install_button = button(text("Install PawnIO").size(FONT_BODY)).style(btn_style);
+            content = content.push(if snap.pawnio_busy {
+                install_button
+            } else {
+                install_button.on_press(Message::InstallPawnIO)
+            });
+            if let Some(ref status) = snap.pawnio_status {
+                content =
+                    content.push(text(status.as_str()).size(FONT_SMALL).style(move |_theme| {
+                        iced::widget::text::Style {
+                            color: Some(pal.gray),
+                        }
+                    }));
+            }
             if let Some(ref err) = snap.modules_download_error {
                 content = content.push(text(err.as_str()).size(FONT_SMALL).style(move |_theme| {
                     iced::widget::text::Style {
-                        color: Some(pal.gray),
+                        color: Some(pal.error),
                     }
                 }));
             }
@@ -63,6 +72,14 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     color: Some(pal.gray),
                 },
             ));
+            if let Some(ref status) = snap.pawnio_status {
+                content =
+                    content.push(text(status.as_str()).size(FONT_SMALL).style(move |_theme| {
+                        iced::widget::text::Style {
+                            color: Some(pal.gray),
+                        }
+                    }));
+            }
             if let Some(ref err) = snap.modules_download_error {
                 content = content.push(text(err.as_str()).size(FONT_SMALL).style(move |_theme| {
                     iced::widget::text::Style {
@@ -70,11 +87,13 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     }
                 }));
             }
-            content = content.push(
-                button(text("Download PawnIO Modules").size(FONT_BODY))
-                    .on_press(Message::DownloadPawnIOModules)
-                    .style(btn_style),
-            );
+            let download_button =
+                button(text("Download PawnIO Modules").size(FONT_BODY)).style(btn_style);
+            content = content.push(if snap.pawnio_busy {
+                download_button
+            } else {
+                download_button.on_press(Message::DownloadPawnIOModules)
+            });
             content = content.push(
                 text("Manual: download latest release_*.zip from https://github.com/namazso/PawnIO.Modules/releases/latest and place IntelMSR.bin / IntelMCHBAR.bin into the modules folder (Open Modules Folder)")
                     .size(FONT_SMALL)
@@ -95,6 +114,14 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             );
         } else {
             // PawnIO and modules present but driver read still fails (needs reboot/elevation)
+            if let Some(ref status) = snap.pawnio_status {
+                content =
+                    content.push(text(status.as_str()).size(FONT_SMALL).style(move |_theme| {
+                        iced::widget::text::Style {
+                            color: Some(pal.gray),
+                        }
+                    }));
+            }
             if let Some(ref err) = snap.cpu_power_error {
                 content = content.push(text(err.as_str()).size(FONT_SMALL).style(move |_theme| {
                     iced::widget::text::Style {

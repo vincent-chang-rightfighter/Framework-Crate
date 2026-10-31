@@ -795,6 +795,17 @@ pub fn download_and_extract_modules() -> Result<(), String> {
             ));
         }
     }
+    // Primary path uses curl so `--max-filesize` rejects an oversized response
+    // before it is written. PowerShell remains the fallback for environments
+    // where curl cannot reach the host (e.g. proxy configuration).
+    match try_curl_download(&url, &dir) {
+        Ok(()) => {
+            debug!("PawnIO modules extracted via curl to {}", dir.display());
+            return Ok(());
+        }
+        Err(e) => warn!("curl download failed ({}), trying PowerShell fallback", e),
+    }
+
     let zip_path = dir.join("pawnio_modules_latest.zip");
     // Primary ZIP is deterministic and vulnerable to pre-created symlink; also use unique tmp
     if let Ok(meta) = std::fs::symlink_metadata(&zip_path)
@@ -822,11 +833,10 @@ pub fn download_and_extract_modules() -> Result<(), String> {
         let _ = std::fs::remove_file(&zip_path);
     }
 
-    // Download via inline -Command (no script file, no script-path race).
-    // Escape single quotes for PowerShell single-quoted strings.
-    // Invoke-WebRequest has no max-size option, so the 32M cap is enforced
-    // by check_zip_size after the transfer. The curl fallback below has
-    // --max-filesize and fails before writing an oversized response.
+    // Fallback download via inline -Command (no script file, no script-path
+    // race). Invoke-WebRequest has no max-size option, so the 32M cap is
+    // enforced by check_zip_size after the transfer; the curl primary path
+    // above normally rejects oversized responses before writing.
     let ps_command = format!(
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
          Invoke-WebRequest -Uri '{url}' -OutFile '{zip}' -UseBasicParsing -ErrorAction Stop -TimeoutSec 30",
@@ -856,21 +866,10 @@ pub fn download_and_extract_modules() -> Result<(), String> {
     let _ = std::fs::remove_file(&zip_path);
     if !output.status.success() {
         // The temp zip was created before the download; remove the empty or
-        // partial file before the curl fallback so it cannot accumulate.
+        // partial file so it cannot accumulate.
         let _ = std::fs::remove_file(&zip_tmp);
         let detail = proc_failure_detail(&output);
-        warn!(
-            "PowerShell download failed: {}, trying curl fallback",
-            detail
-        );
-        if try_curl_download(&url, &dir).is_ok() {
-            debug!(
-                "PawnIO modules extracted via curl fallback to {}",
-                dir.display()
-            );
-            return Ok(());
-        }
-        warn!("curl fallback also failed");
+        warn!("PowerShell fallback download failed: {}", detail);
         return Err(format!(
             "download/extraction failed: {} — {}",
             detail,
@@ -881,14 +880,7 @@ pub fn download_and_extract_modules() -> Result<(), String> {
     // Size sanity check before extraction (too small or too large).
     check_zip_size(&zip_tmp)?;
     if let Err(e) = extract_staged_zip(&zip_tmp, &dir) {
-        warn!("Staged extraction failed: {}, trying curl fallback", e);
-        if try_curl_download(&url, &dir).is_ok() {
-            debug!(
-                "PawnIO modules extracted via curl fallback after staged failure to {}",
-                dir.display()
-            );
-            return Ok(());
-        }
+        warn!("Staged extraction failed: {}", e);
         return Err(format!("{} — {}", e, manual_download_hint()));
     }
     if let Some(tag) = tag_from_modules_url(&url) {

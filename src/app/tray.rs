@@ -148,12 +148,6 @@ impl App {
                         if !self.cpu_power_supported() {
                             return Some(Task::none());
                         }
-                        // Preserve desired sync params before hardware state is re-read.
-                        let was_sync = self.state.cpu_power.sync_enabled.load(Ordering::Acquire);
-                        let desired = self.state.cpu_power.desired_sync_params();
-                        if !was_sync {
-                            self.pl_custom_applied.store(false, Ordering::Release);
-                        }
                         let cpu_power = self.state.cpu_power.clone();
                         // Run the stop/refresh/restart sequence on a blocking
                         // worker. stop_sync() joins the sync thread, and an
@@ -163,8 +157,13 @@ impl App {
                                 let _guard = crate::util::cpu_power_mutex().lock().await;
                                 let task_state = cpu_power.clone();
                                 let result = crate::util::spawn_blocking_with_timeout(
-                                    crate::util::PAWNIO_IO_TIMEOUT,
+                                    crate::util::PAWNIO_SYNC_TIMEOUT,
                                     move || {
+                                        // Re-read intent after acquiring the mutex:
+                                        // a Stop pressed while we waited must win.
+                                        let was_sync =
+                                            task_state.sync_enabled.load(Ordering::Acquire);
+                                        let desired = task_state.desired_sync_params();
                                         if was_sync {
                                             task_state.stop_sync();
                                         }

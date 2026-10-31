@@ -226,6 +226,9 @@ pub struct App {
     /// Whether window height is fitted to content; resets on layout-changing toggles.
     pub height_set: bool,
     pub modules_download_error: Option<String>,
+    /// In-flight PawnIO task status (Installing/Downloading/Updating). Kept
+    /// separate from `modules_download_error` so progress is not rendered red.
+    pub pawnio_status: Option<String>,
     /// True while a PawnIO install/download/update task is in flight. Prevents
     /// repeated clicks from spawning overlapping 60s blocking tasks/UAC prompts.
     pub pawnio_busy: bool,
@@ -253,6 +256,9 @@ pub struct App {
     pub cpu_power_error: Option<String>,
     pub ec_op_error: Option<String>,
     pub pl_custom_applied: Arc<std::sync::atomic::AtomicBool>,
+    /// Monotonic user intent for Start/Stop Sync. A task only applies if its
+    /// captured value is still current after acquiring the hardware mutex.
+    pub sync_intent: Arc<AtomicU64>,
     pub kblight_write_gen: Arc<AtomicU64>,
 }
 
@@ -430,6 +436,7 @@ impl App {
             window_height: None,
             height_set: false,
             modules_download_error: None,
+            pawnio_status: None,
             pawnio_busy: false,
             update_checking: false,
             update_available: None,
@@ -447,7 +454,10 @@ impl App {
             pl_fields_dirty: false,
             cpu_power_error: None,
             ec_op_error: None,
-            pl_custom_applied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pl_custom_applied: Arc::new(std::sync::atomic::AtomicBool::new(
+                loaded_config.pl_custom_applied,
+            )),
+            sync_intent: Arc::new(AtomicU64::new(0)),
             kblight_write_gen: Arc::new(AtomicU64::new(0)),
         };
 

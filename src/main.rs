@@ -764,6 +764,8 @@ mod tests {
             battery: types::BatteryConfig::default(),
             telemetry: types::TelemetryConfig::default(),
             theme: "default".to_string(),
+            pl_custom_applied: false,
+            version: 0,
         };
         let serialized = toml::to_string(&config).expect("serialize");
         let deserialized: types::Config = toml::from_str(&serialized).expect("deserialize");
@@ -791,6 +793,8 @@ mod tests {
             battery: types::BatteryConfig::default(),
             telemetry: types::TelemetryConfig::default(),
             theme: "dracula".to_string(),
+            pl_custom_applied: false,
+            version: 0,
         };
         let serialized = toml::to_string(&config).expect("serialize");
         let deserialized: types::Config = toml::from_str(&serialized).expect("deserialize");
@@ -822,6 +826,8 @@ mod tests {
                 chart_window_seconds: 60,
             },
             theme: "light".to_string(),
+            pl_custom_applied: false,
+            version: 0,
         };
 
         let serialized = toml::to_string(&original).expect("serialize");

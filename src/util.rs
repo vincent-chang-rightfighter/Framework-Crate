@@ -178,6 +178,9 @@ pub fn cpu_power_mutex() -> &'static tokio::sync::Mutex<()> {
 
 pub const EC_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
 pub const PAWNIO_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2000);
+/// Sync-changing operations do stop-sync + write/refresh + start-sync, so
+/// they get more headroom than a single PawnIO read.
+pub const PAWNIO_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// PawnIO install/upgrade and Modules download may take 30s+ (winget + UAC + network)
 pub const PAWNIO_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 

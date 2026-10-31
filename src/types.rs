@@ -20,6 +20,8 @@ pub const CURVE_TEMP_MAX: u32 = 110;
 pub const CURVE_TEMP_LOCK_START: u32 = 100;
 /// Max editable temperature (lock start is fixed).
 pub const CURVE_TEMP_EDIT_MAX: u32 = CURVE_TEMP_LOCK_START - 1;
+/// Config schema version; bumped when a load-time migration should run once.
+const CONFIG_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Config {
@@ -34,6 +36,14 @@ pub struct Config {
     /// default on load so a typo never breaks the UI.
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// A custom PL1/PL2 write may still be active in MSR 0x610. Persisted so
+    /// an app restart on battery does not disarm the AC->battery reset; the
+    /// AC-only live comparison corrects it when the source is known.
+    #[serde(default)]
+    pub pl_custom_applied: bool,
+    /// One-time migration marker; old files have no field and default to 0.
+    #[serde(default)]
+    pub version: u32,
 }
 
 fn default_theme() -> String {
@@ -155,8 +165,10 @@ impl Config {
                 }
             }
             filtered.sort_by_key(|p| p[0]);
-            // Migrate old 4-point configs to 5 editable points (5+2 locked =7 total)
-            if filtered.len() == 4 {
+            // Migrate old 4-point configs to 5 editable points (5+2 locked =7 total).
+            // Version-gated so a hand-edited 4-point curve created by a newer
+            // build is not rewritten on every load.
+            if self.version < CONFIG_VERSION && filtered.len() == 4 {
                 let desired = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
                 for &[t, d] in &desired {
                     if filtered.len() >= 5 {
@@ -199,6 +211,8 @@ impl Config {
                 crate::style::CHARGE_LIMIT_MAX as u8,
             );
         }
+        // Record that load-time migrations have run for this file.
+        self.version = CONFIG_VERSION;
     }
 }
 
@@ -845,6 +859,36 @@ mod tests {
         let sensors = &c.fan.curve.as_ref().unwrap().curve.sensors;
         assert_eq!(sensors.len(), 1);
         assert_eq!(sensors[0], "CPU");
+    }
+
+    #[test]
+    fn validate_marks_the_current_config_version() {
+        let mut c = Config::default();
+        c.validate();
+        assert_eq!(c.version, CONFIG_VERSION);
+    }
+
+    #[test]
+    fn validate_versioned_four_point_curve_is_not_migrated_again() {
+        let mut c = Config {
+            version: CONFIG_VERSION,
+            ..Default::default()
+        };
+        c.fan.curve = Some(GlobalCurveConfig {
+            curve: CurveConfig {
+                sensors: vec![],
+                points: vec![[30, 0], [45, 20], [60, 40], [75, 80]],
+                hysteresis_c: 2,
+                rate_limit_pct_per_step: 10,
+                rate_limit_down_pct_per_step: None,
+            },
+            poll_ms: 1000,
+        });
+        c.validate();
+        // 4 editable + 2 locked, and no 85C default added.
+        let pts = &c.fan.curve.as_ref().unwrap().curve.points;
+        assert_eq!(pts.len(), 6);
+        assert!(!pts.iter().any(|p| p[0] == 85));
     }
 
     #[test]

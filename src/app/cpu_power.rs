@@ -1,5 +1,6 @@
 use super::{App, Message, PL_RESET_RETRY_MS, refresh_cpu_power_task, stop_sync_task};
 use iced::Task;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tracing::{error, warn};
 
@@ -51,6 +52,7 @@ impl App {
             }
             Message::PawnIOInstalled(result) => {
                 self.pawnio_busy = false;
+                self.pawnio_status = None;
                 if let Err(e) = result {
                     error!("PawnIO install failed: {}", e);
                     self.cpu_power_error = Some(format!("PawnIO install failed: {}", e));
@@ -90,6 +92,7 @@ impl App {
             }
             Message::PawnIOModulesDownloaded(result) => {
                 self.pawnio_busy = false;
+                self.pawnio_status = None;
                 match result {
                     Ok(()) => {
                         self.modules_download_error = None;
@@ -164,7 +167,6 @@ impl App {
                 {
                     return Some(Task::none());
                 }
-                self.cpu_power_error = None;
                 Some(Task::perform(
                     async {
                         let r1 = crate::util::spawn_blocking_with_timeout(
@@ -191,6 +193,7 @@ impl App {
             }
             Message::UpdatePawnIOAllDone(result) => {
                 self.pawnio_busy = false;
+                self.pawnio_status = None;
                 match result {
                     Ok(()) => {
                         self.modules_download_error = None;
@@ -284,15 +287,17 @@ impl App {
                     power_unit: info.power_unit,
                     time_unit: info.time_unit,
                 };
-                let was_sync = self.state.cpu_power.sync_enabled.load(Ordering::Acquire);
-                let previous_sync = self.state.cpu_power.desired_sync_params();
                 let cpu_power = self.state.cpu_power.clone();
                 Some(Task::perform(
                     async move {
                         let _guard = crate::util::cpu_power_mutex().lock().await;
                         crate::util::spawn_blocking_with_timeout(
-                            crate::util::PAWNIO_IO_TIMEOUT,
+                            crate::util::PAWNIO_SYNC_TIMEOUT,
                             move || {
+                                // Re-read intent after acquiring the mutex so a
+                                // Stop pressed while we waited is not undone.
+                                let was_sync = cpu_power.sync_enabled.load(Ordering::Acquire);
+                                let previous_sync = cpu_power.desired_sync_params();
                                 cpu_power.stop_sync();
                                 let result = crate::cpu_power::write_msr_pl1_pl2_public(params)
                                     .map_err(|e| e.to_string());
@@ -317,7 +322,7 @@ impl App {
             Message::CpuPowerApplied(result) => {
                 match result {
                     Ok(()) => {
-                        self.pl_custom_applied.store(true, Ordering::Release);
+                        self.set_pl_custom_applied(true);
                         self.pl_fields_dirty = false;
                         self.cpu_power_error = None;
                         return Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}));
@@ -359,17 +364,24 @@ impl App {
                     time_unit: info.time_unit,
                 };
                 let cpu_power = self.state.cpu_power.clone();
+                let intent = self.sync_intent.fetch_add(1, Ordering::AcqRel) + 1;
+                let sync_intent = Arc::clone(&self.sync_intent);
                 Some(Task::perform(
                     async move {
                         let _guard = crate::util::cpu_power_mutex().lock().await;
-                        crate::util::spawn_blocking_with_timeout(
-                            crate::util::PAWNIO_IO_TIMEOUT,
+                        if sync_intent.load(Ordering::Acquire) != intent {
+                            // A newer Start/Stop was issued while we waited.
+                            return Message::CpuPowerSyncStopped;
+                        }
+                        let result = crate::util::spawn_blocking_with_timeout(
+                            crate::util::PAWNIO_SYNC_TIMEOUT,
                             move || cpu_power.start_sync(params).map_err(|e| e.to_string()),
                         )
                         .await
-                        .unwrap_or_else(Err)
+                        .unwrap_or_else(Err);
+                        Message::CpuPowerSyncStarted(result)
                     },
-                    Message::CpuPowerSyncStarted,
+                    |msg| msg,
                 ))
             }
             Message::CpuPowerSyncStarted(result) => {
@@ -380,7 +392,7 @@ impl App {
                             .sync_enabled
                             .store(true, Ordering::Release);
                         // Ensure AC->battery reset triggers for sync users.
-                        self.pl_custom_applied.store(true, Ordering::Release);
+                        self.set_pl_custom_applied(true);
                         self.cpu_power_error = None;
                         tracing::info!("CPU power sync started");
                     }
@@ -396,7 +408,12 @@ impl App {
                 if !self.cpu_power_supported() {
                     return Some(Task::none());
                 }
-                Some(stop_sync_task(self.state.cpu_power.clone()))
+                let intent = self.sync_intent.fetch_add(1, Ordering::AcqRel) + 1;
+                Some(stop_sync_task(
+                    self.state.cpu_power.clone(),
+                    Arc::clone(&self.sync_intent),
+                    intent,
+                ))
             }
             Message::CpuPowerSyncReset => {
                 self.pl_fields_dirty = false;
@@ -406,7 +423,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.cpu_power_error = None;
-                        self.pl_custom_applied.store(false, Ordering::Release);
+                        self.set_pl_custom_applied(false);
                         self.state
                             .lifecycle
                             .pl_reset_pending
@@ -452,10 +469,20 @@ impl App {
         self.state.system.intel_cpu.load(Ordering::Acquire)
     }
 
+    /// Updates the in-memory flag and persists it so an app restart on battery
+    /// still knows that a custom MSR value may be active.
+    pub(crate) fn set_pl_custom_applied(&mut self, applied: bool) {
+        if self.pl_custom_applied.swap(applied, Ordering::Release) == applied {
+            return;
+        }
+        self.mutate_config(|cfg| cfg.pl_custom_applied = applied);
+        self.save_config();
+    }
+
     /// Recover the memory-only custom-limit flag by comparing the live
     /// registers with the persisted BIOS snapshot. Called at startup and on
     /// EC recovery so an app restart does not disarm the AC->battery reset.
-    pub(crate) fn infer_pl_custom_applied(&self) {
+    pub(crate) fn infer_pl_custom_applied(&mut self) {
         if !self.cpu_power_supported() {
             return;
         }
@@ -471,7 +498,7 @@ impl App {
             .cpu_power
             .bios_defaults()
             .is_some_and(|bios| crate::cpu_power::pl_limits_differ_from_bios(&info, &bios));
-        self.pl_custom_applied.store(custom, Ordering::Release);
+        self.set_pl_custom_applied(custom);
     }
 
     /// Marks a PawnIO install/download/update as in flight. Returns false when
@@ -482,7 +509,11 @@ impl App {
             return false;
         }
         self.pawnio_busy = true;
-        self.modules_download_error = Some(status.to_string());
+        self.pawnio_status = Some(status.to_string());
+        // A retry should not keep showing the previous failure next to the new
+        // in-progress status.
+        self.modules_download_error = None;
+        self.cpu_power_error = None;
         self.mark_dirty();
         true
     }
@@ -502,15 +533,17 @@ impl App {
                 return Task::none();
             }
         };
-        let was_sync = self.state.cpu_power.sync_enabled.load(Ordering::Acquire);
-        let previous_sync = self.state.cpu_power.desired_sync_params();
         let cpu_power = self.state.cpu_power.clone();
         Task::perform(
             async move {
                 let _guard = crate::util::cpu_power_mutex().lock().await;
                 let write_result = crate::util::spawn_blocking_with_timeout(
-                    crate::util::PAWNIO_IO_TIMEOUT,
+                    crate::util::PAWNIO_SYNC_TIMEOUT,
                     move || {
+                        // Re-read intent after acquiring the mutex so a Stop
+                        // pressed while we waited is not undone.
+                        let was_sync = cpu_power.sync_enabled.load(Ordering::Acquire);
+                        let previous_sync = cpu_power.desired_sync_params();
                         cpu_power.stop_sync();
                         let result =
                             crate::cpu_power::write_bios_defaults(&bios).map_err(|e| e.to_string());
@@ -640,6 +673,16 @@ impl App {
 mod tests {
     use super::sync_restart_params;
     use crate::cpu_power::PowerLimitParams;
+
+    #[tokio::test]
+    async fn begin_pawnio_task_uses_status_not_error() {
+        let (mut app, _) = crate::App::new(false);
+        assert!(app.begin_pawnio_task("Installing PawnIO..."));
+        assert!(app.pawnio_busy);
+        assert_eq!(app.pawnio_status.as_deref(), Some("Installing PawnIO..."));
+        assert!(app.modules_download_error.is_none());
+        assert!(!app.begin_pawnio_task("again"));
+    }
 
     fn params(pl1: f64) -> PowerLimitParams {
         PowerLimitParams {

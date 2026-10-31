@@ -44,6 +44,8 @@ pub(crate) struct ViewSnapshot {
     pub show_curve_settings: bool,
     pub pl_custom_applied: bool,
     pub modules_download_error: Option<Arc<String>>,
+    pub pawnio_status: Option<Arc<String>>,
+    pub pawnio_busy: bool,
     pub pl1_edit: Arc<String>,
     pub pl2_edit: Arc<String>,
     pub pl1_time_edit: Arc<String>,
@@ -162,6 +164,8 @@ impl ViewSnapshot {
                 .modules_download_error
                 .as_ref()
                 .map(|s| Arc::new(s.clone())),
+            pawnio_status: app.pawnio_status.as_ref().map(|s| Arc::new(s.clone())),
+            pawnio_busy: app.pawnio_busy,
             pl1_edit: Arc::new(app.pl1_edit.clone()),
             pl2_edit: Arc::new(app.pl2_edit.clone()),
             pl1_time_edit: Arc::new(app.pl1_time_edit.clone()),

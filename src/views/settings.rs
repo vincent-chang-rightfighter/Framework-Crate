@@ -176,14 +176,18 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         ]
         .spacing(8),
     );
+    let update_pawnio_button = button(text("Update PawnIO").size(FONT_BODY)).style(btn_style);
+    let update_pawnio_button = if app.pawnio_busy {
+        update_pawnio_button
+    } else {
+        update_pawnio_button.on_press(Message::UpdatePawnIOAll)
+    };
     let mut updates = column![
         section_title(pal, "Updates"),
         update_check_row(app),
         row![
             text("PawnIO:").size(FONT_BODY),
-            button(text("Update PawnIO").size(FONT_BODY))
-                .on_press(Message::UpdatePawnIOAll)
-                .style(btn_style),
+            update_pawnio_button,
             button(text("Open Folder").size(FONT_BODY))
                 .on_press(Message::OpenModulesDir)
                 .style(btn_style),
@@ -212,6 +216,13 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         .spacing(2),
     ]
     .spacing(8);
+    if let Some(ref status) = app.pawnio_status {
+        updates = updates.push(text(status.as_str()).size(FONT_SMALL).style(|theme| {
+            iced::widget::text::Style {
+                color: Some(palette(theme).gray),
+            }
+        }));
+    }
     if let Some(ref err) = app.modules_download_error {
         updates = updates.push(text(err.as_str()).size(FONT_SMALL).style(|theme| {
             iced::widget::text::Style {

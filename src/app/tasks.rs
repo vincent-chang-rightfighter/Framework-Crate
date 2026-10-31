@@ -3,6 +3,7 @@ use crate::types;
 use crate::util;
 use iced::Task;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::warn;
 
 use super::Message;
@@ -93,10 +94,19 @@ pub(crate) fn refresh_cpu_power_task(
 }
 
 /// Stops CPU power sync thread off UI thread (join may block up to 250ms).
-pub(crate) fn stop_sync_task(state: crate::cpu_power::CpuPowerState) -> Task<Message> {
+/// The intent check makes a later Start win if it was issued while this task
+/// was waiting for the hardware mutex.
+pub(crate) fn stop_sync_task(
+    state: crate::cpu_power::CpuPowerState,
+    sync_intent: Arc<AtomicU64>,
+    intent: u64,
+) -> Task<Message> {
     Task::perform(
         async move {
             let _guard = util::cpu_power_mutex().lock().await;
+            if sync_intent.load(Ordering::Acquire) != intent {
+                return Message::CpuPowerSyncStopped;
+            }
             let _ = util::spawn_blocking_with_timeout(util::PAWNIO_IO_TIMEOUT, move || {
                 state.stop_sync()
             })

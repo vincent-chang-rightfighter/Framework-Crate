@@ -2,14 +2,15 @@
 //! driver install/update, and the handle and ioctl wrappers.
 
 use std::ffi::CString;
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 
 use tracing::warn;
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 
 use super::modules::{
     download_and_extract_modules, latest_modules_download_url, local_modules_version,
-    modules_downloaded, modules_update_needed, sha256_hex, tag_from_modules_url,
+    modules_update_needed, redetect_modules, sha256_hex, tag_from_modules_url,
 };
 
 // PawnIOLib.dll function signatures (STDMETHODCALLTYPE / WINAPI - same on x64).
@@ -166,16 +167,14 @@ fn trusted_winget_path(path: &std::path::Path) -> bool {
 }
 
 fn winget_package_from_appx() -> Option<std::path::PathBuf> {
-    let out = std::process::Command::new(crate::util::powershell_exe())
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Select-Object -First 1).InstallLocation",
-        ])
-        .creation_flags(0x08000000)
-        .output()
-        .ok()?;
+    let mut command = std::process::Command::new(crate::util::powershell_exe());
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Select-Object -First 1).InstallLocation",
+    ]);
+    let out = run_command_with_timeout(command, std::time::Duration::from_secs(10)).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -223,6 +222,73 @@ fn resolve_winget() -> Result<std::path::PathBuf, String> {
     )
 }
 
+/// Owns a Job Object configured to kill its whole process tree on close.
+/// Closing the last handle (including on timeout) reaps installers that a
+/// direct `Child::kill()` would leave running.
+struct JobGuard(HANDLE);
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: handle was created by CreateJobObjectW and is owned here.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
+fn assign_kill_on_close_job(child: &std::process::Child) -> Option<JobGuard> {
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+
+    // SAFETY: null attributes/name request an unnamed job with default security.
+    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() {
+        tracing::debug!(
+            "CreateJobObjectW failed: {}",
+            std::io::Error::last_os_error()
+        );
+        return None;
+    }
+    // SAFETY: zeroed POD struct, filled below; the length matches the type.
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: job is live; info points to a struct of the declared size.
+    let configured = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if configured == 0 {
+        tracing::debug!(
+            "SetInformationJobObject failed: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: job is owned and was not handed to a JobGuard.
+        unsafe { CloseHandle(job) };
+        return None;
+    }
+    // SAFETY: both handles are live; assigning a child to a job is allowed
+    // unless the child already belongs to a non-nestable job, in which case
+    // we fall back to the direct kill below.
+    let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) };
+    if assigned == 0 {
+        tracing::debug!(
+            "AssignProcessToJobObject failed: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: job is owned and was not handed to a JobGuard.
+        unsafe { CloseHandle(job) };
+        return None;
+    }
+    Some(JobGuard(job))
+}
+
 fn run_command_with_timeout(
     mut command: std::process::Command,
     timeout: std::time::Duration,
@@ -238,6 +304,7 @@ fn run_command_with_timeout(
     let mut child = command
         .spawn()
         .map_err(|e| format!("failed to run command: {e}"))?;
+    let job = assign_kill_on_close_job(&child);
     let mut stdout = child.stdout.take();
     let (out_tx, out_rx) = std::sync::mpsc::channel();
     let out_thread = std::thread::spawn(move || {
@@ -263,6 +330,9 @@ fn run_command_with_timeout(
             Ok(Some(status)) => status,
             Ok(None) => {
                 if start.elapsed() >= timeout {
+                    // Close the job first so the whole installer tree is
+                    // reaped before the pipe drains wait for EOF.
+                    drop(job);
                     stop_and_drain(&mut child, &out_rx, &err_rx, out_thread, err_thread);
                     return Err(format!("command timed out after {}s", timeout.as_secs()));
                 }
@@ -270,6 +340,7 @@ fn run_command_with_timeout(
                 continue;
             }
             Err(e) => {
+                drop(job);
                 stop_and_drain(&mut child, &out_rx, &err_rx, out_thread, err_thread);
                 return Err(format!("failed to wait for command: {e}"));
             }
@@ -510,7 +581,9 @@ pub fn update_pawnio_modules() -> Result<(), String> {
     // A matching version marker is not enough: the bins can be missing or
     // corrupt while the marker survives. Only skip the download when the
     // hash-pinned blobs actually verify.
-    if !modules_update_needed(local.as_deref(), latest_tag.as_deref()) && modules_downloaded() {
+    // Fresh verify: a cached `modules_downloaded` result could hide files
+    // deleted or replaced after the last check.
+    if !modules_update_needed(local.as_deref(), latest_tag.as_deref()) && redetect_modules() {
         tracing::info!(
             "PawnIO Modules already at latest ({})",
             latest_tag.as_deref().unwrap_or_default()
@@ -529,10 +602,17 @@ enum AuthenticodeOutcome {
 
 /// Cached Authenticode verdict for the loaded DLL. Clearable on purpose:
 /// `reset_dll_fns` drops it so an upgraded DLL is re-verified instead of
-/// inheriting the previous file's result. Transient PowerShell failures are
-/// not cached, so Retry can recover without restarting the app.
-static AUTHENTICODE: parking_lot::Mutex<Option<(std::path::PathBuf, AuthenticodeOutcome)>> =
-    parking_lot::Mutex::new(None);
+/// inheriting the previous file's result. Unavailable verdicts are cached for
+/// a short TTL so a failing PowerShell cannot be respawned on every CPU poll.
+static AUTHENTICODE: parking_lot::Mutex<
+    Option<(std::path::PathBuf, AuthenticodeOutcome, std::time::Instant)>,
+> = parking_lot::Mutex::new(None);
+
+const AUTH_UNAVAILABLE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn unavailable_cache_fresh(checked_at: std::time::Instant) -> bool {
+    checked_at.elapsed() < AUTH_UNAVAILABLE_TTL
+}
 
 /// Drops the cached Authenticode verdict. Called with the DLL pointers so an
 /// upgraded DLL is re-verified on next load.
@@ -541,25 +621,40 @@ fn invalidate_authenticode() {
 }
 
 fn cached_authenticode_status(p: &std::path::Path) -> Result<(), &'static str> {
-    if let Some((cached_path, cached)) = AUTHENTICODE.lock().as_ref()
+    if let Some((cached_path, cached, checked_at)) = AUTHENTICODE.lock().as_ref()
         && cached_path == p
     {
-        return match cached {
-            AuthenticodeOutcome::Valid => Ok(()),
-            AuthenticodeOutcome::Invalid => Err("DLL authenticode not valid"),
-            AuthenticodeOutcome::Unavailable => Err("authenticode check failed"),
-        };
+        match cached {
+            AuthenticodeOutcome::Valid => return Ok(()),
+            AuthenticodeOutcome::Invalid => return Err("DLL authenticode not valid"),
+            AuthenticodeOutcome::Unavailable => {
+                if unavailable_cache_fresh(*checked_at) {
+                    return Err("authenticode check failed");
+                }
+                // Expired: fall through and re-check instead of pinning a
+                // transient failure until restart.
+            }
+        }
     }
+    let checked_at = std::time::Instant::now();
     match check_authenticode(p) {
         AuthenticodeOutcome::Valid => {
-            *AUTHENTICODE.lock() = Some((p.to_path_buf(), AuthenticodeOutcome::Valid));
+            *AUTHENTICODE.lock() = Some((p.to_path_buf(), AuthenticodeOutcome::Valid, checked_at));
             Ok(())
         }
         AuthenticodeOutcome::Invalid => {
-            *AUTHENTICODE.lock() = Some((p.to_path_buf(), AuthenticodeOutcome::Invalid));
+            *AUTHENTICODE.lock() =
+                Some((p.to_path_buf(), AuthenticodeOutcome::Invalid, checked_at));
             Err("DLL authenticode not valid")
         }
-        AuthenticodeOutcome::Unavailable => Err("authenticode check failed"),
+        AuthenticodeOutcome::Unavailable => {
+            *AUTHENTICODE.lock() = Some((
+                p.to_path_buf(),
+                AuthenticodeOutcome::Unavailable,
+                checked_at,
+            ));
+            Err("authenticode check failed")
+        }
     }
 }
 
@@ -896,9 +991,20 @@ mod tests {
         *AUTHENTICODE.lock() = Some((
             std::path::PathBuf::from("test.dll"),
             AuthenticodeOutcome::Valid,
+            std::time::Instant::now(),
         ));
         invalidate_authenticode();
         assert!(AUTHENTICODE.lock().is_none());
+    }
+
+    #[test]
+    fn unavailable_authenticode_cache_expires() {
+        assert!(super::unavailable_cache_fresh(std::time::Instant::now()));
+        assert!(!super::unavailable_cache_fresh(
+            std::time::Instant::now()
+                - super::AUTH_UNAVAILABLE_TTL
+                - std::time::Duration::from_secs(1)
+        ));
     }
 
     #[test]
