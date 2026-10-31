@@ -211,6 +211,8 @@ ui_refresh_ms = 100
 selected_sensors = []
 ```
 
+The app also writes two internal top-level fields: `version` (config schema/migration marker) and `pl_custom_applied` (keeps the AC→battery PL reset armed across restarts). Leave them unchanged when editing the file by hand.
+
 ## Launch at Startup
 
 Toggling **launch at startup** on the About page registers a Windows scheduled task that runs the app at logon. The task is created from a document built in-process and passed to `schtasks /Create /XML`, so every setting is applied atomically in a single call.
@@ -300,6 +302,8 @@ Rendering parameters: optical size 32, stroke weight 1.5, color `#7300ff` (R 115
 ## Development
 
 This project is developed with AI coding agents (pair-programming / review / refactor assistance). Design decisions, hardware behavior, and releases are reviewed and owned by the maintainer.
+
+MSRV: Rust **1.94** (verified with `cargo +1.94.0 check --locked --all-targets`).
 
 ```bash
 cargo fmt --check
