@@ -1,5 +1,8 @@
 # Framework Crate (Windows)
 
+[![Rust CI](https://github.com/vincent-chang-rightfighter/Framework-Crate/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/vincent-chang-rightfighter/Framework-Crate/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/vincent-chang-rightfighter/Framework-Crate)](https://github.com/vincent-chang-rightfighter/Framework-Crate/releases)
+
 A native desktop GUI for Framework laptop fan control, battery charge limits, and live hardware telemetry. Built with Rust and [Iced](https://iced.rs/) 0.14, using [`framework_lib`](https://github.com/FrameworkComputer/framework-system) for direct EC hardware access.
 
 Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-control).
