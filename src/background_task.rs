@@ -202,16 +202,20 @@ fn mark_pd_usb_c_seen(ports: &[cli::ec_wrapper::UsbCPort], seen_ref: &Arc<RwLock
             .map(|p| p.port as usize + 1)
             .max()
             .unwrap_or(0);
-        if seen.len() < need {
+        let mut changed = seen.len() < need;
+        if changed {
             seen.resize(need, false);
         }
         for p in ports {
             let idx = p.port as usize;
-            if p.power_role == Some("Sink") && idx < seen.len() {
+            if p.power_role == Some("Sink") && idx < seen.len() && !seen[idx] {
                 seen[idx] = true;
+                changed = true;
             }
         }
-        *guard = Arc::new(seen);
+        if changed {
+            *guard = Arc::new(seen);
+        }
     });
 }
 
@@ -295,7 +299,13 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
     let now_ts = crate::util::monotonic_ms();
     let fan_count = t.fans.len() as u64;
     state.fan.fan_count.store(fan_count, Ordering::Release);
-    ensure_per_fan_duty(state, t.fans.len());
+    // Per-fan duties are only editable/used in Manual mode; Curve writes one
+    // global duty, so resizing the vector there is pointless write churn.
+    if crate::types::FanControlMode::from_u8(state.fan.mode.load(Ordering::Acquire) as u8)
+        == crate::types::FanControlMode::Manual
+    {
+        ensure_per_fan_duty(state, t.fans.len());
+    }
     if let Some(max_rpm) = t.fans.iter().map(|f| f.rpm).max() {
         let prev = state.fan.fan_max_rpm.load(Ordering::Acquire) as u32;
         let last_reset = state.fan.last_fan_rpm_reset.load(Ordering::Acquire);
@@ -1035,10 +1045,17 @@ pub fn spawn(state: AppState) {
                         }
                     }
                     // Versions rarely change; only fetch a few times at startup.
+                    // Two quick retries after the immediate first attempt,
+                    // then the full refresh interval for the last one.
+                    let versions_retry_ms = if versions_scan_attempts < 2 {
+                        10_000
+                    } else {
+                        VERSIONS_REFRESH_MS
+                    };
                     if versions_scan_attempts < 3
                         && read_lock(&bg_state2.system.versions).is_none()
                         && (last_versions_scan == 0
-                            || now_ms.saturating_sub(last_versions_scan) >= VERSIONS_REFRESH_MS)
+                            || now_ms.saturating_sub(last_versions_scan) >= versions_retry_ms)
                     {
                         last_versions_scan = now_ms;
                         let ec_clone = Arc::clone(&ec);
