@@ -1,16 +1,15 @@
 use iced::{Element, Subscription, Task};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 use std::time::Instant;
 use tracing::warn;
 
 use crate::background_task;
 use crate::cli;
-use crate::config_save_task;
 use crate::sub_state::{
     BatteryState, FanState, LifecycleState, PeripheralState, SystemState, ThermalState,
 };
@@ -44,6 +43,15 @@ const RESIZE_EPSILON: f32 = 0.5;
 /// Maximum debug report files kept in temp directory.
 const MAX_DEBUG_REPORTS: usize = 5;
 pub(crate) const PL_RESET_RETRY_MS: u64 = 30_000;
+
+/// Unit tests keep the watch receiver alive but do not start the save task,
+/// so `save_config` exercises the in-memory path without racing the real
+/// config file or leaking a background task past the test runtime.
+#[cfg(test)]
+type TestConfigRx = tokio::sync::watch::Receiver<(Arc<Config>, u64)>;
+
+#[cfg(test)]
+static TEST_CONFIG_RXS: std::sync::Mutex<Vec<TestConfigRx>> = std::sync::Mutex::new(Vec::new());
 
 /// Monotonic version for config snapshots to prevent stale debounced writes from overwriting newer saves.
 fn next_config_version() -> u64 {
@@ -147,8 +155,6 @@ pub enum Message {
     PawnIOInstalled(Result<(), String>),
     DownloadPawnIOModules,
     PawnIOModulesDownloaded(Result<(), String>),
-    UpdatePawnIO,
-    UpdatePawnIOModules,
     UpdatePawnIOAll,
     UpdatePawnIOAllDone(Result<(), String>),
     OpenModulesDir,
@@ -218,7 +224,7 @@ pub struct App {
     pub(crate) cached_snapshot: Option<crate::views::ViewSnapshot>,
     pub(crate) cached_gen: u64,
     /// Measured main view height (logical px) for window autosizing.
-    pub content_height: Arc<Mutex<Option<f32>>>,
+    pub content_height: Arc<AtomicU32>,
     /// Single window ID learned from first Resized event.
     pub window_id: Option<iced::window::Id>,
     /// Current window height (logical px) tracked via Resized events.
@@ -382,8 +388,22 @@ impl App {
 
         let (config_tx, config_rx) =
             tokio::sync::watch::channel((Arc::new(loaded_config.clone()), 0));
-        let state_for_save = state.clone();
-        config_save_task::spawn(config_rx, state_for_save);
+        #[cfg(not(test))]
+        {
+            let state_for_save = state.clone();
+            crate::config_save_task::spawn(config_rx, state_for_save);
+        }
+        #[cfg(test)]
+        {
+            // Tests do not start the workers, but keeping the function items
+            // referenced keeps their supporting code out of dead_code lints.
+            let _ = crate::background_task::spawn;
+            let _ = crate::config_save_task::spawn;
+            TEST_CONFIG_RXS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(config_rx);
+        }
 
         let app = App {
             cli_present: false,
@@ -431,7 +451,7 @@ impl App {
             iconic_check_count: 0,
             cached_snapshot: None,
             cached_gen: 0,
-            content_height: Arc::new(Mutex::new(None)),
+            content_height: Arc::new(AtomicU32::new(crate::probe::NO_HEIGHT)),
             window_id: None,
             window_height: None,
             height_set: false,
@@ -547,7 +567,10 @@ impl App {
         );
 
         let bg_state = app.state.clone();
+        #[cfg(not(test))]
         background_task::spawn(bg_state);
+        #[cfg(test)]
+        let _ = bg_state;
 
         let startup_query = Task::perform(
             async {
@@ -599,7 +622,9 @@ impl App {
                     .store(now_ms, Ordering::Release);
             }
         }
-        self.maybe_rebuild_snapshot();
+        // The outer update() rebuilds once after the handler runs; rebuilding
+        // again here only repeated work when the previous frame was already
+        // clean.
         if let Some(task) = self.handle_config_message(&message) {
             return task;
         }

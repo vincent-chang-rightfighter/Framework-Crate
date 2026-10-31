@@ -1,31 +1,31 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{Clipboard, Shell, Widget, mouse, overlay};
 use iced::{Element, Event, Length, Rectangle, Size, Vector};
-use parking_lot::Mutex;
 
-/// Records laid-out height into shared report to auto-size window.
+/// Sentinel for "height not measured yet"; a NaN bit pattern no height uses.
+pub(crate) const NO_HEIGHT: u32 = u32::MAX;
+
+/// Records laid-out height into a lock-free shared report to auto-size window.
 pub struct HeightProbe<'a, Message> {
     content: Element<'a, Message>,
-    report: Arc<Mutex<Option<f32>>>,
+    report: Arc<AtomicU32>,
 }
 
 impl<'a, Message> std::fmt::Debug for HeightProbe<'a, Message> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HeightProbe")
-            .field("report", &self.report.lock())
+            .field("report", &self.report.load(Ordering::Relaxed))
             .finish()
     }
 }
 
 impl<'a, Message: Clone + 'a> HeightProbe<'a, Message> {
-    pub fn wrap(
-        content: Element<'a, Message>,
-        report: Arc<Mutex<Option<f32>>>,
-    ) -> Element<'a, Message> {
+    pub fn wrap(content: Element<'a, Message>, report: Arc<AtomicU32>) -> Element<'a, Message> {
         Element::new(Self { content, report })
     }
 }
@@ -56,12 +56,9 @@ impl<'a, Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for Height
         // Quantize to whole logical px so DPI-rounding jitter cannot
         // oscillate the autosize loop (tick only resizes beyond epsilon).
         let h = node.size().height.round();
-        // Avoid lock churn when height unchanged (every layout tick).
-        {
-            let mut guard = self.report.lock();
-            if *guard != Some(h) {
-                *guard = Some(h);
-            }
+        let bits = h.to_bits();
+        if self.report.load(Ordering::Relaxed) != bits {
+            self.report.store(bits, Ordering::Relaxed);
         }
         node
     }

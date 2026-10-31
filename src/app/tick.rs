@@ -239,8 +239,11 @@ impl App {
         }
         let id = self.window_id?;
         let current = self.window_height?;
-        let target = *self.content_height.lock();
-        let target = target?;
+        let bits = self.content_height.load(Ordering::Relaxed);
+        if bits == crate::probe::NO_HEIGHT {
+            return None;
+        }
+        let target = f32::from_bits(bits);
         let mut target = target.min(super::AUTO_MAX_HEIGHT + super::WINDOW_CHROME);
         let work_area = crate::system_info::work_area_size();
         if let Some((_, work_h)) = work_area {
