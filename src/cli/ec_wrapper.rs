@@ -45,11 +45,8 @@ pub struct BatteryData {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct VersionsData {
     pub mainboard_type: Option<String>,
-    pub mainboard_revision: Option<String>,
     pub uefi_version: Option<String>,
-    pub uefi_release_date: Option<String>,
     pub ec_build_version: Option<String>,
-    pub ec_current_image: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -515,7 +512,6 @@ impl EcHw for EcClient {
     fn versions(&self) -> Result<VersionsData, String> {
         let mut data = VersionsData {
             mainboard_type: smbios::get_product_name(),
-            mainboard_revision: smbios::get_platform().map(|p| format!("{:?}", p)),
             ..Default::default()
         };
 
@@ -526,7 +522,6 @@ impl EcHw for EcClient {
                 _ => "Unknown",
             };
             data.ec_build_version = Some(if current == "RO" { ro } else { rw });
-            data.ec_current_image = Some(current.to_string());
         }
 
         if let Some(esrt) = framework_lib::esrt::get_esrt() {
@@ -744,6 +739,8 @@ impl EcHw for EcClient {
     }
 
     fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]> {
+        // framework_lib does not expose expansion-card enumeration; keep the
+        // trait contract empty until a real EC source is available.
         SmallVec::new()
     }
 }
