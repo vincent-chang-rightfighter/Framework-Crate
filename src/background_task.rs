@@ -1,5 +1,5 @@
 use parking_lot::RwLock;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tracing::warn;
 
@@ -38,6 +38,11 @@ pub(super) const FAN_REASSERT_INTERVAL_MS: u64 = 30_000;
 
 /// Rate-limit for curve fail-safe handover to firmware when temps are empty.
 pub(super) const CURVE_TEMP_FAILOVER_MS: u64 = 1_000;
+
+/// Full warning for a persistent handover condition is emitted at most this
+/// often; throttled repeats go to debug so a stale sensor cannot fill the log.
+const HANDOVER_WARN_INTERVAL_MS: u64 = 60_000;
+static LAST_HANDOVER_WARN_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Maximum age of thermal sample before curve considers it stale.
 pub(super) const THERMAL_STALE_MS: u64 = 5_000;
@@ -109,7 +114,13 @@ impl FanCtx<'_> {
         {
             Ok(Ok(())) => {
                 self.consecutive_ec_write_failures = 0;
-                warn!("{}", reason);
+                let last = LAST_HANDOVER_WARN_MS.load(Ordering::Relaxed);
+                if self.now_ms.saturating_sub(last) >= HANDOVER_WARN_INTERVAL_MS {
+                    LAST_HANDOVER_WARN_MS.store(self.now_ms, Ordering::Relaxed);
+                    warn!("{}", reason);
+                } else {
+                    tracing::debug!("{}", reason);
+                }
             }
             Ok(Err(e)) => {
                 warn!("{} failed: {}", op, e);
@@ -586,7 +597,9 @@ pub fn spawn(state: AppState) {
                 };
                 let start_ms = crate::util::monotonic_ms();
                 let mut last_expansion_scan: u64 = start_ms;
-                let mut last_versions_scan: u64 = start_ms;
+                // 0 is the sentinel for "never attempted"; the first poll
+                // should try immediately when versions are still missing.
+                let mut last_versions_scan: u64 = 0;
                 let mut versions_scan_attempts: u32 = 0;
                 let mut last_cpu_power_poll: u64 = 0;
                 let mut last_resume_ts: u64 = 0;
@@ -1024,7 +1037,7 @@ pub fn spawn(state: AppState) {
                     // Versions rarely change; only fetch a few times at startup.
                     if versions_scan_attempts < 3
                         && read_lock(&bg_state2.system.versions).is_none()
-                        && (versions_scan_attempts == 0
+                        && (last_versions_scan == 0
                             || now_ms.saturating_sub(last_versions_scan) >= VERSIONS_REFRESH_MS)
                     {
                         last_versions_scan = now_ms;
@@ -1058,13 +1071,20 @@ pub fn spawn(state: AppState) {
                         }
                     }
 
-                    // Poll CPU power every 5s; skip when window hidden to save power.
+                    // Poll CPU power every 5s; slow to 30s while idle so the
+                    // card keeps updating without a 5s PawnIO wake-up. Hidden
+                    // windows still skip entirely.
                     const CPU_POWER_POLL_MS: u64 = 5000;
+                    const CPU_POWER_IDLE_POLL_MS: u64 = 30_000;
+                    let cpu_poll_ms = if is_idle {
+                        CPU_POWER_IDLE_POLL_MS
+                    } else {
+                        CPU_POWER_POLL_MS
+                    };
                     let visible = bg_state2.lifecycle.visible.load(Ordering::Acquire);
                     if visible
                         && bg_state2.system.intel_cpu.load(Ordering::Acquire)
-                        && !is_idle
-                        && now_ms.saturating_sub(last_cpu_power_poll) >= CPU_POWER_POLL_MS
+                        && now_ms.saturating_sub(last_cpu_power_poll) >= cpu_poll_ms
                     {
                         last_cpu_power_poll = now_ms;
                         // Run PawnIO ioctls off async worker like other EC I/O.
