@@ -2,6 +2,7 @@
 name = "framework-crate"
 version = "0.9.2"
 edition = "2024"
+rust-version = "1.94"
 authors = ["Vincent Chang"]
 license = "MIT"
 
