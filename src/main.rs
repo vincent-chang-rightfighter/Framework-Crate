@@ -113,6 +113,12 @@ impl LogSink {
     fn open(path: std::path::PathBuf) -> std::io::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+            if crate::config::dir_has_reparse_point(parent) {
+                return Err(std::io::Error::other(format!(
+                    "log directory is a reparse point: {}",
+                    parent.display()
+                )));
+            }
         }
         let sink = Self {
             path,
@@ -142,6 +148,14 @@ impl LogSink {
     fn reopen(&self, state: &mut LogState) -> std::io::Result<()> {
         // Drop the handle first so the rename below is not blocked on Windows.
         state.file = None;
+        if let Some(parent) = self.path.parent()
+            && crate::config::dir_has_reparse_point(parent)
+        {
+            return Err(std::io::Error::other(format!(
+                "log directory is a reparse point: {}",
+                parent.display()
+            )));
+        }
         if state.written > MAX_LOG_BYTES {
             rotate_files(&self.path);
             // The previous contents are now in app.log.1. Clearing the counter
