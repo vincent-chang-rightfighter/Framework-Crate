@@ -7,8 +7,8 @@ mod sync;
 
 pub use bios::{BiosDefaults, publish_ac_snapshot, read_ac_present};
 pub use ffi::{
-    install_pawnio, is_pawnio_installed, pawnio_version, reset_dll_fns, update_pawnio,
-    update_pawnio_modules,
+    install_pawnio, invalidate_authenticode, is_pawnio_installed, pawnio_version, reset_dll_fns,
+    update_pawnio, update_pawnio_modules,
 };
 pub use limits::{
     CpuPowerInfo, CpuPowerUnavailable, LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS, LIMIT_MIN_ENABLED_WATTS,

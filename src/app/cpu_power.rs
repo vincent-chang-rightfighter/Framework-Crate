@@ -126,40 +126,6 @@ impl App {
                     Some(Task::none())
                 }
             }
-            Message::UpdatePawnIO => {
-                tracing::info!("UpdatePawnIO triggered");
-                if !self.begin_pawnio_task("Updating PawnIO...") {
-                    return Some(Task::none());
-                }
-                Some(Task::perform(
-                    async {
-                        crate::util::spawn_blocking_with_timeout(
-                            crate::util::PAWNIO_INSTALL_TIMEOUT,
-                            || crate::cpu_power::update_pawnio().map_err(|e| e.to_string()),
-                        )
-                        .await
-                        .unwrap_or_else(Err)
-                    },
-                    Message::PawnIOInstalled,
-                ))
-            }
-            Message::UpdatePawnIOModules => {
-                tracing::info!("UpdatePawnIOModules triggered");
-                if !self.begin_pawnio_task("Updating PawnIO Modules...") {
-                    return Some(Task::none());
-                }
-                Some(Task::perform(
-                    async {
-                        crate::util::spawn_blocking_with_timeout(
-                            crate::util::PAWNIO_INSTALL_TIMEOUT,
-                            || crate::cpu_power::update_pawnio_modules().map_err(|e| e.to_string()),
-                        )
-                        .await
-                        .unwrap_or_else(Err)
-                    },
-                    Message::PawnIOModulesDownloaded,
-                ))
-            }
             Message::UpdatePawnIOAll => {
                 tracing::info!("UpdatePawnIOAll triggered");
                 if !self
@@ -287,6 +253,9 @@ impl App {
                     power_unit: info.power_unit,
                     time_unit: info.time_unit,
                 };
+                // Invalidate an older Start/Stop task: this explicit Apply is
+                // the newest sync-affecting intent.
+                self.sync_intent.fetch_add(1, Ordering::AcqRel);
                 let cpu_power = self.state.cpu_power.clone();
                 Some(Task::perform(
                     async move {
@@ -417,6 +386,8 @@ impl App {
             }
             Message::CpuPowerSyncReset => {
                 self.pl_fields_dirty = false;
+                // A queued Start/Stop from before this Reset must not run after it.
+                self.sync_intent.fetch_add(1, Ordering::AcqRel);
                 Some(self.handle_cpu_power_sync_reset())
             }
             Message::CpuPowerResetDone(result) => {
@@ -457,6 +428,9 @@ impl App {
                 Some(Task::none())
             }
             Message::RefreshCpuPower => {
+                // Retry must bypass the 60s Unavailable TTL, otherwise a
+                // transient PowerShell failure makes the button a no-op.
+                crate::cpu_power::invalidate_authenticode();
                 Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}))
             }
             _ => None,

@@ -616,7 +616,7 @@ fn unavailable_cache_fresh(checked_at: std::time::Instant) -> bool {
 
 /// Drops the cached Authenticode verdict. Called with the DLL pointers so an
 /// upgraded DLL is re-verified on next load.
-fn invalidate_authenticode() {
+pub fn invalidate_authenticode() {
     *AUTHENTICODE.lock() = None;
 }
 
