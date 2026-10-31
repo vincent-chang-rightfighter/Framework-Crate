@@ -88,46 +88,43 @@ pub(super) enum PersistedBios {
 }
 
 pub(super) fn bios_defaults_valid(d: &BiosDefaults) -> bool {
-    // Restored values go straight into register encoding, so they get the
-    // same finite/range guarantees as UI input. Zero watts is allowed for a
-    // disabled limit, but an enabled limit must meet the 5W floor or the
-    // CPU would hard-throttle; PL1 must not exceed PL2. Upper bounds match
-    // the write boundary so a corrupt huge snapshot is quarantined.
+    // The MSR half is what Reset restores, so it gets the full write-boundary
+    // guarantees: finite/range checks, the enabled 5W floor, and PL1 <= PL2.
+    // The MMIO mirror is read-only and never written by this app; only reject
+    // clearly malformed values instead of quarantining an otherwise valid MSR
+    // snapshot because the factory mirror exceeded the model cap.
     use super::limits::{
         LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS, LIMIT_MIN_ENABLED_WATTS, platform_max_watts,
     };
-    let watts = [d.pl1_watts, d.pl2_watts, d.pl1_mmio_watts, d.pl2_mmio_watts];
-    let times = [
-        d.pl1_time_s,
-        d.pl2_time_s,
-        d.pl1_mmio_time_s,
-        d.pl2_mmio_time_s,
-    ];
-    let enabled = [
-        d.pl1_enabled,
-        d.pl2_enabled,
-        d.pl1_mmio_enabled,
-        d.pl2_mmio_enabled,
-    ];
     let model_max = platform_max_watts();
-    watts
+    let msr_watts = [d.pl1_watts, d.pl2_watts];
+    let msr_times = [d.pl1_time_s, d.pl2_time_s];
+    let msr_enabled = [d.pl1_enabled, d.pl2_enabled];
+    let mmio_watts = [d.pl1_mmio_watts, d.pl2_mmio_watts];
+    let mmio_times = [d.pl1_mmio_time_s, d.pl2_mmio_time_s];
+    let msr_valid = msr_watts
         .iter()
         .all(|v| v.is_finite() && *v >= 0.0 && *v <= LIMIT_MAX_WATTS && *v <= model_max)
-        && times
+        && msr_times
             .iter()
             .all(|v| v.is_finite() && *v >= 0.0 && *v <= LIMIT_MAX_TIME_S)
-        && super::limits::plausible_rapl_unit(d.power_unit)
-        && super::limits::plausible_rapl_unit(d.time_unit)
-        && watts
+        && msr_watts
             .iter()
-            .zip(enabled)
+            .zip(msr_enabled)
             .all(|(w, en)| !en || *w >= LIMIT_MIN_ENABLED_WATTS)
         && (!d.pl1_enabled || d.pl1_time_s > 0.0)
         && (!d.pl2_enabled || d.pl2_time_s > 0.0)
-        && (!d.pl1_mmio_enabled || d.pl1_mmio_time_s > 0.0)
-        && (!d.pl2_mmio_enabled || d.pl2_mmio_time_s > 0.0)
-        && (!d.pl1_enabled || !d.pl2_enabled || d.pl1_watts <= d.pl2_watts)
-        && (!d.pl1_mmio_enabled || !d.pl2_mmio_enabled || d.pl1_mmio_watts <= d.pl2_mmio_watts)
+        && (!d.pl1_enabled || !d.pl2_enabled || d.pl1_watts <= d.pl2_watts);
+    let mmio_valid = mmio_watts
+        .iter()
+        .all(|v| v.is_finite() && *v >= 0.0 && *v <= LIMIT_MAX_WATTS)
+        && mmio_times
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.0 && *v <= LIMIT_MAX_TIME_S);
+    msr_valid
+        && mmio_valid
+        && super::limits::plausible_rapl_unit(d.power_unit)
+        && super::limits::plausible_rapl_unit(d.time_unit)
 }
 
 /// Backs up a corrupt or invalid snapshot aside and refuses to overwrite it.
@@ -414,6 +411,31 @@ mod tests {
             "over-cap watts must be Unusable, not Loaded"
         );
         assert!(path.exists(), "the invalid file must be kept, not removed");
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", v) };
+        } else {
+            unsafe { std::env::remove_var("FRAMEWORK_CONTROL_CONFIG_DIR") };
+        }
+    }
+
+    #[test]
+    fn high_mmio_values_do_not_block_an_msr_reset() {
+        let _env_guard = crate::config::CONFIG_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR");
+        unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", dir.path()) };
+        let path = dir.path().join("bios_defaults.toml");
+        // Valid MSR half; the read-only MMIO mirror exceeds the per-model cap
+        // but is still within the absolute encoder limit.
+        std::fs::write(
+            &path,
+            "pl1_watts = 30.0\npl1_enabled = true\npl1_clamped = false\npl1_time_s = 28.0\npl2_watts = 60.0\npl2_enabled = true\npl2_clamped = true\npl2_time_s = 2.5\npl1_mmio_watts = 119.0\npl2_mmio_watts = 119.0\npower_unit = 0.125\ntime_unit = 0.001\n",
+        )
+        .unwrap();
+        assert!(
+            matches!(load_persisted_bios_defaults(), PersistedBios::Loaded(_)),
+            "MMIO model-cap overflow must not quarantine a valid MSR snapshot"
+        );
         if let Some(v) = prev {
             unsafe { std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", v) };
         } else {
