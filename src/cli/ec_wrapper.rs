@@ -636,8 +636,10 @@ impl EcHw for EcClient {
         // framework_lib reports success for the EC command, but the EC can
         // still ignore or clamp the value. Read it back like the keyboard
         // backlight path, allowing a short update window and ±1 rounding.
+        // Keep the retry window small: this runs inside one EC dispatcher op,
+        // and the startup caller bounds the whole set+readback to 1.5s.
         let mut last_readback = None;
-        for _ in 0..5 {
+        for _ in 0..3 {
             match self.ec.get_charge_limit() {
                 Ok((read_min, read_max)) => {
                     if read_max.abs_diff(max_pct) <= 1 {
@@ -652,7 +654,7 @@ impl EcHw for EcClient {
                     return Ok(());
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         Err(format!(
             "Charge limit write failed: wrote {}%, read back {:?}",
