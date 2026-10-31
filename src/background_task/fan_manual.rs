@@ -19,11 +19,12 @@ fn active_manual_duty_low(
     manual_duty: Option<u32>,
     per_fan: &[u32],
     fan_count: usize,
+    min_duty: u32,
 ) -> bool {
     if unified {
-        manual_duty.is_none_or(|d| d < 60)
+        manual_duty.is_none_or(|d| d < min_duty)
     } else {
-        fan_count > 0 && per_fan.iter().take(fan_count).any(|&d| d < 60)
+        fan_count > 0 && per_fan.iter().take(fan_count).any(|&d| d < min_duty)
     }
 }
 
@@ -56,21 +57,23 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 .max()
                 .unwrap_or(0);
             if max_temp >= 80 {
+                // 80C requires at least 60%, 90C requires at least 80%.
+                let min_duty = if max_temp >= 90 { 80 } else { 60 };
                 let unified = ctx.state.fan.unified_duty.load(Ordering::Acquire);
                 let low = if unified {
-                    active_manual_duty_low(true, ctx.manual_duty, &[], 0)
+                    active_manual_duty_low(true, ctx.manual_duty, &[], 0, min_duty)
                 } else {
                     let per_fan = crate::util::read_lock(&ctx.state.fan.per_fan_duty);
                     let fan_count = ctx.state.fan.fan_count.load(Ordering::Acquire) as usize;
-                    active_manual_duty_low(false, ctx.manual_duty, &per_fan, fan_count)
+                    active_manual_duty_low(false, ctx.manual_duty, &per_fan, fan_count, min_duty)
                 };
                 if low {
                     return ctx
                         .handover_to_firmware(
                             "manual-high-temp-handover",
                             &format!(
-                                "Manual mode: {}C (non-battery max) with sub-60% duty, handed to firmware",
-                                max_temp
+                                "Manual mode: {}C (non-battery max) with sub-{}% duty, handed to firmware",
+                                max_temp, min_duty
                             ),
                         )
                         .await;
@@ -378,14 +381,17 @@ mod tests {
 
     #[test]
     fn high_temp_guard_uses_only_the_active_unified_path() {
-        assert!(active_manual_duty_low(true, Some(50), &[0], 1));
-        assert!(!active_manual_duty_low(true, Some(100), &[0], 1));
+        assert!(active_manual_duty_low(true, Some(50), &[0], 1, 60));
+        assert!(!active_manual_duty_low(true, Some(100), &[0], 1, 60));
+        // >=90C tier raises the floor to 80%.
+        assert!(active_manual_duty_low(true, Some(70), &[0], 1, 80));
+        assert!(!active_manual_duty_low(true, Some(80), &[0], 1, 80));
     }
 
     #[test]
     fn high_temp_guard_uses_only_active_per_fan_entries() {
-        assert!(active_manual_duty_low(false, Some(100), &[50, 100], 2));
-        assert!(!active_manual_duty_low(false, Some(50), &[100, 50], 1));
-        assert!(!active_manual_duty_low(false, Some(50), &[], 0));
+        assert!(active_manual_duty_low(false, Some(100), &[50, 100], 2, 60));
+        assert!(!active_manual_duty_low(false, Some(50), &[100, 50], 1, 60));
+        assert!(!active_manual_duty_low(false, Some(50), &[], 0, 60));
     }
 }
