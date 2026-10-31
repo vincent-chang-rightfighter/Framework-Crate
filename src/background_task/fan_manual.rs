@@ -40,9 +40,9 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     }
     // High-temp guard: Manual low duty with fresh hot readings would cook
     // the machine while stale detection stays quiet. Hand back to firmware.
-    // Checked before the stale path so fresh-hot still trips. Threshold
-    // mirrors the curve 80C/60% floor (non-battery max): below 60% at 80C+
-    // is unsafe. Battery sensors are excluded so charging heat can't trip it.
+    // Checked before the stale path so fresh-hot still trips. Below 60% at
+    // 80C+ (non-battery max) is unsafe. Battery sensors are excluded so
+    // charging heat can't trip it.
     {
         if shutdown_requested(ctx.state) {
             return Flow::Stop;

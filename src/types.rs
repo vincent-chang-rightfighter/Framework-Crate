@@ -134,12 +134,6 @@ impl Config {
                 // Clamp to plot domain to keep points drawable.
                 point[0] = point[0].clamp(0, CURVE_TEMP_MAX);
                 point[1] = point[1].clamp(0, 100);
-                // High-temp floor: an 80C+ point at 0% would cook the
-                // machine while temps look "fresh" (no stale failover).
-                // Force at least 60% duty at/above 80C.
-                if point[0] >= 80 {
-                    point[1] = point[1].max(60);
-                }
             }
             // Dedupe by temp keeping highest duty; use BTreeMap to share
             // dedupe/sort semantics with `curve_full_points` and avoid drift.
@@ -185,11 +179,8 @@ impl Config {
             // hand-edited settings on every load. Only the absolute safety
             // cap applies now.
             filtered.truncate(MAX_CURVE_POINTS.saturating_sub(2));
-            // Duty must never decrease as temperature rises. Without this,
-            // a legal pair such as [79, 0] -> [85, 60] interpolates to a
-            // sub-60% duty at 80C even though both stored points obey the
-            // per-point floor. Raising later points keeps the curve safe
-            // and also makes interpolation monotonic.
+            // Duty must never decrease as temperature rises; otherwise a
+            // rising temperature could lower fan speed.
             enforce_monotonic_duties(&mut filtered);
             // Append locked endpoints
             filtered.push([CURVE_TEMP_LOCK_START, 100]);
@@ -355,31 +346,8 @@ pub fn enforce_monotonic_duties(points: &mut [[u32; 2]]) {
     }
 }
 
-/// Linear duty at `temp` over sorted points. Used only to decide whether the
-/// rendered curve needs a synthetic 80C floor point; the control path has its
-/// own clamp in `fan_control::calculate_duty_from_curve`.
-fn duty_at_temp(points: &[[u32; 2]], temp: u32) -> u32 {
-    for w in points.windows(2) {
-        let (x1, y1) = (w[0][0] as f64, w[0][1] as f64);
-        let (x2, y2) = (w[1][0] as f64, w[1][1] as f64);
-        if temp as f64 <= x1 {
-            return y1 as u32;
-        }
-        if temp as f64 <= x2 {
-            if x2 == x1 {
-                return y2 as u32;
-            }
-            let ratio = (temp as f64 - x1) / (x2 - x1);
-            return (y1 + ratio * (y2 - y1)).round() as u32;
-        }
-    }
-    100
-}
-
 pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
     // BTreeMap sorted by temp; keep max duty on duplicates to match validate.
-    // High-temp floor lives here (not only in validate) so runtime drags
-    // can't hold 80C+ at 0%: every write path goes through this function.
     // Truncate first: a crafted config with millions of points would spin
     // the BTreeMap insert loop (DoS via config file).
     let points: &[[u32; 2]] = if points.len() > 1024 {
@@ -397,7 +365,6 @@ pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
         if temp >= CURVE_TEMP_LOCK_START {
             continue;
         }
-        let duty = if temp >= 80 { duty.max(60) } else { duty };
         map.entry(temp)
             .and_modify(|e| *e = (*e).max(duty))
             .or_insert(duty);
@@ -409,14 +376,6 @@ pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
     // Interpolation is only safe when duty is non-decreasing with
     // temperature; otherwise a rising temperature can lower fan speed.
     enforce_monotonic_duties(&mut full);
-    // The control path clamps >=80C to 60%, but the canvas draws this
-    // polyline. Add the floor point so the rendered curve cannot show a
-    // sub-60% line at 80C while the fan actually runs at 60%.
-    if duty_at_temp(&full, 80) < 60 && !full.iter().any(|p| p[0] == 80) {
-        full.push([80, 60]);
-        full.sort_by_key(|p| p[0]);
-        enforce_monotonic_duties(&mut full);
-    }
     full
 }
 
@@ -957,20 +916,11 @@ mod tests {
     }
 
     #[test]
-    fn curve_full_points_inserts_the_displayed_80c_floor_point() {
+    fn curve_full_points_has_no_synthetic_80c_point() {
         let pts = curve_full_points(&[[79, 0], [85, 60]]);
         assert!(
-            pts.contains(&[80, 60]),
-            "canvas needs a 60% point at 80C: {pts:?}"
-        );
-    }
-
-    #[test]
-    fn curve_full_points_keeps_points_already_above_the_80c_floor() {
-        let pts = curve_full_points(&[[79, 90], [85, 90]]);
-        assert!(
-            !pts.contains(&[80, 60]),
-            "an already-safe curve must not be lowered: {pts:?}"
+            !pts.iter().any(|p| p[0] == 80),
+            "no synthetic 80C point: {pts:?}"
         );
     }
 

@@ -99,7 +99,7 @@ impl CurveStepper {
 }
 
 pub fn calculate_duty_from_curve(temp: i32, full_points: &[[u32; 2]]) -> u32 {
-    let duty = if temp >= crate::types::CURVE_TEMP_LOCK_START as i32 {
+    if temp >= crate::types::CURVE_TEMP_LOCK_START as i32 {
         100
     } else if full_points.len() < 2 {
         // Defensive: full_points always has >=2, but raw slices may not.
@@ -137,10 +137,7 @@ pub fn calculate_duty_from_curve(temp: i32, full_points: &[[u32; 2]]) -> u32 {
         }
         // No curve: max fan to prevent overheat.
         duty.unwrap_or(100)
-    };
-    // Defense-in-depth for the high-temp floor: even with monotonic points,
-    // a segment starting just below 80C can interpolate below 60% at 80C.
-    if temp >= 80 { duty.max(60) } else { duty }
+    }
 }
 
 pub fn apply_rate_limit(current: u32, target: u32, max_change: u32) -> u32 {
@@ -194,12 +191,11 @@ mod tests {
     }
 
     #[test]
-    fn calculate_duty_interpolation_keeps_the_80c_floor() {
-        // Both points are legal (79C has no floor, 85C is raised to 60%),
-        // but the segment between them would interpolate to 10% at 80C.
+    fn calculate_duty_interpolation_is_not_forced_at_80c() {
+        // No high-temperature floor: 79C/0% -> 85C/60% interpolates normally.
         let points = types::curve_full_points(&[[79, 0], [85, 60]]);
-        assert_eq!(calculate_duty_from_curve(80, &points), 60);
-        assert_eq!(calculate_duty_from_curve(81, &points), 60);
+        assert_eq!(calculate_duty_from_curve(80, &points), 10);
+        assert_eq!(calculate_duty_from_curve(81, &points), 20);
     }
 
     #[test]

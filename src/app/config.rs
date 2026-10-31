@@ -72,12 +72,6 @@ impl App {
                 if temp >= crate::types::CURVE_TEMP_LOCK_START {
                     duty = 100;
                 }
-                // Mirror the validate()/curve_full_points() 80C floor here
-                // so config memory never holds a sub-60% high-temp point,
-                // even briefly before the debounced full-points rebuild.
-                if temp >= 80 {
-                    duty = duty.max(60);
-                }
                 // Locked points (100,110) are not editable.
                 {
                     let cfg = read_lock(&self.state.lifecycle.config);
