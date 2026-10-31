@@ -303,7 +303,7 @@ Rendering parameters: optical size 32, stroke weight 1.5, color `#7300ff` (R 115
 
 This project is developed with AI coding agents (pair-programming / review / refactor assistance). Design decisions, hardware behavior, and releases are reviewed and owned by the maintainer.
 
-MSRV: Rust **1.94** (verified with `cargo +1.94.0 check --locked --all-targets`).
+MSRV: Rust **1.99.1** (verified with `cargo +1.99.1 check --locked --all-targets`).
 
 ```bash
 cargo fmt --check
