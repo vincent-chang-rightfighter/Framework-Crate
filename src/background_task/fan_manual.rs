@@ -10,22 +10,14 @@ use super::{
 };
 use crate::util::read_lock;
 
+/// Temperature at or above which Manual duty is floored (non-battery max).
+const HOT_FLOOR_TEMP_C: i32 = 95;
+/// Forced minimum duty at or above [`HOT_FLOOR_TEMP_C`]. Applied as a floor
+/// (`max(user, 90)`), never a ceiling: a user at 100% keeps 100%.
+const HOT_FLOOR_DUTY_PCT: u32 = 90;
+
 fn unified_transition_resets(prev: Option<bool>, now: bool) -> bool {
     prev != Some(now)
-}
-
-fn active_manual_duty_low(
-    unified: bool,
-    manual_duty: Option<u32>,
-    per_fan: &[u32],
-    fan_count: usize,
-    min_duty: u32,
-) -> bool {
-    if unified {
-        manual_duty.is_none_or(|d| d < min_duty)
-    } else {
-        fan_count > 0 && per_fan.iter().take(fan_count).any(|&d| d < min_duty)
-    }
 }
 
 /// Drives Manual mode: unified single ramp, or one ramp per fan.
@@ -38,49 +30,39 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         *ctx.manual_per_fan_ramp = None;
         ctx.last_duty_write_ms = 0;
     }
-    // High-temp guard: Manual low duty with fresh hot readings would cook
-    // the machine while stale detection stays quiet. Hand back to firmware.
-    // Checked before the stale path so fresh-hot still trips. Below 60% at
-    // 80C+ (non-battery max) is unsafe. Battery sensors are excluded so
-    // charging heat can't trip it.
-    {
+    // Hot floor: at 95C+ (non-battery max) Manual duty is lifted to at
+    // least 90%, because open-loop fixed duty has no feedback to save it.
+    // Below 95C the user's duty is fully honored. The floor is evaluated
+    // fresh every round from live readings and never persisted, so duty
+    // eases back (rate-limited) as soon as temperature drops. Battery
+    // sensors stay excluded so charging heat can't trip it.
+    // Checked before the stale path so fresh-hot still trips; when readings
+    // go stale the handover below takes over instead.
+    let hot_floor: Option<u32> = {
         if shutdown_requested(ctx.state) {
             return Flow::Stop;
         }
         let thermal = crate::util::read_lock(&ctx.state.thermal.data);
-        if let Some(info) = thermal.as_ref().as_ref() {
-            let max_temp = info
-                .temps
-                .iter()
-                .filter(|(n, _)| !crate::types::is_battery_sensor(n))
-                .map(|(_, t)| *t)
-                .max()
-                .unwrap_or(0);
-            if max_temp >= 80 {
-                // 80C requires at least 60%, 90C requires at least 80%.
-                let min_duty = if max_temp >= 90 { 80 } else { 60 };
-                let unified = ctx.state.fan.unified_duty.load(Ordering::Acquire);
-                let low = if unified {
-                    active_manual_duty_low(true, ctx.manual_duty, &[], 0, min_duty)
-                } else {
-                    let per_fan = crate::util::read_lock(&ctx.state.fan.per_fan_duty);
-                    let fan_count = ctx.state.fan.fan_count.load(Ordering::Acquire) as usize;
-                    active_manual_duty_low(false, ctx.manual_duty, &per_fan, fan_count, min_duty)
-                };
-                if low {
-                    return ctx
-                        .handover_to_firmware(
-                            "manual-high-temp-handover",
-                            &format!(
-                                "Manual mode: {}C (non-battery max) with sub-{}% duty, handed to firmware",
-                                max_temp, min_duty
-                            ),
-                        )
-                        .await;
-                }
-            }
-        }
-    }
+        thermal
+            .as_ref()
+            .as_ref()
+            .and_then(|info| {
+                info.temps
+                    .iter()
+                    .filter(|(n, _)| !crate::types::is_battery_sensor(n))
+                    .map(|(_, t)| *t)
+                    .max()
+            })
+            .filter(|max_temp| *max_temp >= HOT_FLOOR_TEMP_C)
+            .map(|max_temp| {
+                tracing::debug!(
+                    "Manual mode: {}C (non-battery max), flooring duty at {}%",
+                    max_temp,
+                    HOT_FLOOR_DUTY_PCT
+                );
+                HOT_FLOOR_DUTY_PCT
+            })
+    };
     // Same stale-thermal handover as Curve: driving blind on dead readings
     // risks holding a low duty into rising heat, so hand back to firmware.
     let last_ok = ctx.state.thermal.last_success_ms.load(Ordering::Acquire);
@@ -99,6 +81,8 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     let unified = ctx.state.fan.unified_duty.load(Ordering::Acquire);
     if unified {
         if let Some(target) = ctx.manual_duty {
+            // Hot floor is a minimum, never a ceiling.
+            let target = hot_floor.map_or(target, |floor| target.max(floor));
             let current = ctx
                 .manual_ramp_current
                 .or_else(|| {
@@ -209,6 +193,8 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 if idx >= fan_count_now {
                     continue;
                 }
+                // Hot floor is a minimum, never a ceiling.
+                let target = hot_floor.map_or(target, |floor| target.max(floor));
                 let current = ramp.get(idx).copied().unwrap_or(target);
                 let next_i = crate::fan_control::apply_rate_limit(current, target, 10);
                 // Write even when converged on resume or periodic re-assert.
@@ -295,7 +281,6 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
 
 #[cfg(test)]
 mod tests {
-    use super::active_manual_duty_low;
     use super::run;
     use super::unified_transition_resets;
     use crate::app::AppState;
@@ -379,19 +364,127 @@ mod tests {
         assert!(!unified_transition_resets(Some(false), false));
     }
 
-    #[test]
-    fn high_temp_guard_uses_only_the_active_unified_path() {
-        assert!(active_manual_duty_low(true, Some(50), &[0], 1, 60));
-        assert!(!active_manual_duty_low(true, Some(100), &[0], 1, 60));
-        // >=90C tier raises the floor to 80%.
-        assert!(active_manual_duty_low(true, Some(70), &[0], 1, 80));
-        assert!(!active_manual_duty_low(true, Some(80), &[0], 1, 80));
+    fn manual_ctx_with_temp<'a>(
+        state: &'a AppState,
+        ec: &'a Arc<dyn EcHw>,
+        ramp: &'a mut Option<Vec<u32>>,
+        stepper: &'a mut CurveStepper,
+        temp_c: i32,
+        duty: u32,
+    ) -> FanCtx<'a> {
+        use crate::cli::ec_wrapper::ThermalData;
+        use std::collections::BTreeMap;
+        let mut temps = BTreeMap::new();
+        temps.insert("CPU".to_string(), temp_c);
+        with_write_lock(&state.thermal.data, |guard| {
+            *guard = Arc::new(Some(ThermalData {
+                temps: Arc::new(temps),
+                fans: smallvec::SmallVec::new(),
+            }));
+        });
+        FanCtx {
+            state,
+            ec,
+            mode: FanControlMode::Manual,
+            now_ms: 60_000,
+            manual_duty: Some(duty),
+            curve_hysteresis: None,
+            curve_rate_limit: None,
+            curve_rate_limit_down: None,
+            curve_sensors: Vec::new(),
+            consecutive_ec_write_failures: 0,
+            last_duty_write_ms: 0,
+            last_handover_ms: 0,
+            last_manual_duty: None,
+            manual_ramp_current: None,
+            manual_per_fan_ramp: ramp,
+            curve_stepper: stepper,
+            last_fan_mode: Some(FanControlMode::Manual),
+            last_unified_duty: Some(true),
+            just_resumed: false,
+        }
     }
 
-    #[test]
-    fn high_temp_guard_uses_only_active_per_fan_entries() {
-        assert!(active_manual_duty_low(false, Some(100), &[50, 100], 2, 60));
-        assert!(!active_manual_duty_low(false, Some(50), &[100, 50], 1, 60));
-        assert!(!active_manual_duty_low(false, Some(50), &[], 0, 60));
+    fn manual_test_state() -> AppState {
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        state
+            .fan
+            .mode
+            .store(FanControlMode::Manual.to_u8() as u64, Ordering::Release);
+        state
+            .thermal
+            .last_success_ms
+            .store(60_000, Ordering::Release);
+        state
+    }
+
+    #[tokio::test]
+    async fn hot_floor_lifts_low_duty_to_90() {
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
+        let state = manual_test_state();
+        let mock = Arc::new(MockEc::new());
+        let ec: Arc<dyn EcHw> = mock.clone();
+        let mut ramp = None;
+        let mut stepper = CurveStepper::new();
+        // 30% at 95C is lifted to the 90% floor.
+        let mut ctx = manual_ctx_with_temp(&state, &ec, &mut ramp, &mut stepper, 95, 30);
+        assert!(matches!(run(&mut ctx).await, Flow::Done));
+        let ops = mock.ops.lock().unwrap();
+        assert!(
+            ops.iter().any(|op| op == "set_fan_duty(90,None)"),
+            "hot floor must lift duty to 90: {ops:?}"
+        );
+        assert!(
+            ops.iter().all(|op| op != "autofanctrl"),
+            "floor writes duty, never hands over: {ops:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hot_floor_never_caps_a_high_duty() {
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
+        let state = manual_test_state();
+        let mock = Arc::new(MockEc::new());
+        let ec: Arc<dyn EcHw> = mock.clone();
+        let mut ramp = None;
+        let mut stepper = CurveStepper::new();
+        // 100% at 99C stays 100%: the floor is a minimum, not a ceiling.
+        let mut ctx = manual_ctx_with_temp(&state, &ec, &mut ramp, &mut stepper, 99, 100);
+        assert!(matches!(run(&mut ctx).await, Flow::Done));
+        let ops = mock.ops.lock().unwrap();
+        assert!(
+            ops.iter().any(|op| op == "set_fan_duty(100,None)"),
+            "high duty must be kept: {ops:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn below_floor_stays_manual_even_at_zero_duty() {
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
+        let state = manual_test_state();
+        let mock = Arc::new(MockEc::new());
+        let ec: Arc<dyn EcHw> = mock.clone();
+        let mut ramp = None;
+        let mut stepper = CurveStepper::new();
+        // 0% at 94C is the user's explicit choice: no floor below 95C.
+        let mut ctx = manual_ctx_with_temp(&state, &ec, &mut ramp, &mut stepper, 94, 0);
+        assert!(matches!(run(&mut ctx).await, Flow::Done));
+        let ops = mock.ops.lock().unwrap();
+        assert!(
+            ops.iter().any(|op| op == "set_fan_duty(0,None)"),
+            "manual duty must be written: {ops:?}"
+        );
+        assert!(
+            ops.iter().all(|op| op != "autofanctrl"),
+            "no handover below the floor: {ops:?}"
+        );
     }
 }
