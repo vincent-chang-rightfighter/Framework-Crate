@@ -473,6 +473,9 @@ pub trait EcHw: Send + Sync {
     fn charge_limit_set(&self, min_pct: u8, max_pct: u8) -> Result<(), String>;
     fn pd_ports(&self) -> SmallVec<[UsbCPort; 4]>;
     fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]>;
+    /// Liveness ping: cheap EC echo used as a tiebreaker before tearing
+    /// down the client after repeated read failures.
+    fn hello(&self) -> Result<(), String>;
     /// Deep smart-battery telemetry (~25 EC commands). Callers fetch it on
     /// the rare firmware-info path, never the 5s battery poll.
     fn smart_battery(&self) -> Result<SmartBatteryData, String>;
@@ -691,6 +694,12 @@ impl EcHw for EcClient {
         }
 
         Ok(data)
+    }
+
+    fn hello(&self) -> Result<(), String> {
+        self.ec
+            .check_hello()
+            .map_err(|e| format!("EC hello failed: {:?}", e))
     }
 
     fn versions(&self) -> Result<VersionsData, String> {
@@ -1102,6 +1111,9 @@ pub(crate) mod tests {
         /// When set, `set_fan_duty` blocks until cleared: simulates a hung
         /// driver for dispatcher wedge/timeout tests.
         pub hang: std::sync::atomic::AtomicBool,
+        /// When set, `hello` fails: simulates a silent EC for the hello
+        /// tiebreak tests.
+        pub fail_hello: std::sync::atomic::AtomicBool,
     }
 
     impl MockEc {
@@ -1110,6 +1122,7 @@ pub(crate) mod tests {
                 ops: std::sync::Mutex::new(Vec::new()),
                 fail_writes: std::sync::atomic::AtomicUsize::new(0),
                 hang: std::sync::atomic::AtomicBool::new(false),
+                fail_hello: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -1161,6 +1174,15 @@ pub(crate) mod tests {
         fn power(&self) -> Result<BatteryData, String> {
             self.record("power".to_string());
             Ok(BatteryData::default())
+        }
+
+        fn hello(&self) -> Result<(), String> {
+            self.record("hello".to_string());
+            if self.fail_hello.load(std::sync::atomic::Ordering::SeqCst) {
+                Err("mock hello failure".to_string())
+            } else {
+                Ok(())
+            }
         }
 
         fn versions(&self) -> Result<VersionsData, String> {

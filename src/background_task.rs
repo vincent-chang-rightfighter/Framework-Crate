@@ -19,7 +19,9 @@ mod fan_manual;
 /// PD history depth to distinguish USB-A cards from transient USB device states.
 const MAX_PD_HISTORY: usize = 3;
 
-/// Consecutive EC read failures before reinitializing client (recovers after sleep/resume).
+/// Consecutive thermal read failures before the hello tiebreak.
+/// The client is reinitialized only when the EC stays silent; a live EC
+/// with a flaky thermal path rides through instead.
 pub(super) const MAX_EC_IO_FAILURES: u32 = 5;
 
 /// Consecutive EC write failures before reinitializing client (separate from reads).
@@ -234,6 +236,64 @@ fn shutdown_requested(state: &AppState) -> bool {
 
 fn ac_transition_pending(prev_ac: bool, ac_now: bool, had_prior_sample: bool) -> bool {
     had_prior_sample && prev_ac && !ac_now
+}
+
+/// Outcome of the hello tiebreak when thermal reads keep failing.
+#[derive(Debug, PartialEq, Eq)]
+enum ThermalVerdict {
+    /// EC answers: keep the client and ride through. The fan arms hand
+    /// control to firmware on staleness by themselves, so no reset, no
+    /// backoff sleep, and the rest of the round still runs.
+    RideThrough,
+    /// EC silent: full client reset with backoff; the caller skips the round.
+    Reset,
+}
+
+/// Pings the EC once thermal failures hit the threshold. A ~1ms hello
+/// separates a dead EC (reset the client) from a flaky thermal path
+/// (keep the client: tearing it down would also wipe fan state and stall
+/// control for 3s for no reason).
+async fn thermal_failure_verdict(
+    state: &AppState,
+    ec: &Arc<dyn cli::EcHw>,
+    consecutive_failures: u32,
+) -> ThermalVerdict {
+    let ec_clone = Arc::clone(ec);
+    match crate::ec_serial::exec(
+        "ec-hello",
+        crate::util::EC_IO_TIMEOUT,
+        ec_clone,
+        move |ec| ec.hello(),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            warn!(
+                "Thermal read failed {} times but EC answers hello; keeping client (no reset)",
+                consecutive_failures
+            );
+            ThermalVerdict::RideThrough
+        }
+        // Dispatcher saturated: backpressure, not proof of death. Same
+        // rule as everywhere else: overload never counts as failure.
+        Err(e) if e.is_overloaded() => ThermalVerdict::RideThrough,
+        Ok(Err(e)) => {
+            warn!(
+                "Thermal read failed {} times and EC hello failed ({}); resetting client",
+                consecutive_failures, e
+            );
+            reset_ec_after_failures(state, consecutive_failures);
+            ThermalVerdict::Reset
+        }
+        Err(e) => {
+            warn!(
+                "Thermal read failed {} times and EC hello dispatch failed ({}); resetting client",
+                consecutive_failures, e
+            );
+            reset_ec_after_failures(state, consecutive_failures);
+            ThermalVerdict::Reset
+        }
+    }
 }
 
 /// Fresh idle verdict. `last_interaction_ts` can change while the loop
@@ -834,9 +894,27 @@ pub fn spawn(state: AppState) {
                                 warn!("Thermal read returned empty temps");
                                 consecutive_ec_failures += 1;
                                 if consecutive_ec_failures >= MAX_EC_IO_FAILURES {
-                                    reset_ec_after_failures(&bg_state2, consecutive_ec_failures);
-                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                    continue;
+                                    match thermal_failure_verdict(
+                                        &bg_state2,
+                                        &ec,
+                                        consecutive_ec_failures,
+                                    )
+                                    .await
+                                    {
+                                        ThermalVerdict::Reset => {
+                                            tokio::time::sleep(std::time::Duration::from_secs(3))
+                                                .await;
+                                            continue;
+                                        }
+                                        // EC proven alive: count fresh so the next
+                                        // ping is another full run away instead of
+                                        // every round. Falls through so battery/PD
+                                        // stay fresh and the fan arms hand over on
+                                        // staleness by themselves.
+                                        ThermalVerdict::RideThrough => {
+                                            consecutive_ec_failures = 0;
+                                        }
+                                    }
                                 }
                             } else {
                                 consecutive_ec_failures = 0;
@@ -1415,6 +1493,65 @@ mod tests {
     #[test]
     fn first_battery_sample_never_triggers_reset() {
         assert!(!ac_transition_pending(true, false, false));
+    }
+
+    fn live_client_state(ec: Arc<dyn crate::cli::EcHw>) -> AppState {
+        use crate::app::AppState;
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        with_write_lock(&state.system.ec_client, |guard| {
+            *guard = Arc::new(Some(ec));
+        });
+        state.system.cli_available.store(true, Ordering::Release);
+        state
+    }
+
+    #[tokio::test]
+    async fn thermal_verdict_rides_through_when_ec_alive() {
+        use crate::cli::ec_wrapper::tests::MockEc;
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
+        let mock = Arc::new(MockEc::new());
+        let dyn_ec: Arc<dyn crate::cli::EcHw> = mock.clone();
+        let state = live_client_state(dyn_ec.clone());
+        let verdict = thermal_failure_verdict(&state, &dyn_ec, 5).await;
+        assert_eq!(verdict, ThermalVerdict::RideThrough);
+        // Client untouched: no reset happened.
+        assert!(state.system.cli_available.load(Ordering::Acquire));
+        assert!(
+            read_lock(&state.system.ec_client)
+                .as_ref()
+                .as_ref()
+                .is_some()
+        );
+        assert!(mock.ops.lock().unwrap().contains(&"hello".to_string()));
+    }
+
+    #[tokio::test]
+    async fn thermal_verdict_resets_when_ec_silent() {
+        use crate::cli::ec_wrapper::tests::MockEc;
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
+        let mock = Arc::new(MockEc::new());
+        mock.fail_hello.store(true, Ordering::SeqCst);
+        let dyn_ec: Arc<dyn crate::cli::EcHw> = mock.clone();
+        let state = live_client_state(dyn_ec.clone());
+        let verdict = thermal_failure_verdict(&state, &dyn_ec, 5).await;
+        assert_eq!(verdict, ThermalVerdict::Reset);
+        // reset_ec_after_failures drops the client and flags a fan reset.
+        assert!(!state.system.cli_available.load(Ordering::Acquire));
+        assert!(
+            read_lock(&state.system.ec_client)
+                .as_ref()
+                .as_ref()
+                .is_none()
+        );
+        assert!(state.lifecycle.fan_reset_pending.load(Ordering::Acquire));
     }
 
     #[test]
