@@ -113,11 +113,12 @@ pub(crate) fn view_battery_info(
     rows.into()
 }
 
-pub(crate) fn view_battery_verbose(
+pub(crate) fn view_battery_verbose<'a>(
     pal: crate::style::Palette,
-    battery: &crate::cli::ec_wrapper::BatteryData,
+    battery: &'a crate::cli::ec_wrapper::BatteryData,
+    smart: &'a std::sync::Arc<Option<crate::cli::ec_wrapper::SmartBatteryData>>,
     show_details: bool,
-) -> Option<Element<'_, Message>> {
+) -> Option<Element<'a, Message>> {
     let has_verbose = battery.manufacturer.is_some()
         || battery.model_number.is_some()
         || battery.serial_number.is_some()
@@ -126,7 +127,9 @@ pub(crate) fn view_battery_verbose(
         || battery.design_capacity_wh.is_some()
         || battery.charger_temp_c.is_some()
         || battery.charger_voltage_mv.is_some()
-        || battery.charger_current_ma.is_some();
+        || battery.charger_current_ma.is_some()
+        || battery.chg_input_current_ma.is_some()
+        || smart.as_ref().as_ref().is_some();
 
     if !has_verbose {
         return None;
@@ -146,7 +149,7 @@ pub(crate) fn view_battery_verbose(
             .style(btn_style),
     ]);
 
-    if show_details && let Some(details) = battery_detail_rows(pal, battery) {
+    if show_details && let Some(details) = battery_detail_rows(pal, battery, smart) {
         content = content.push(details);
     }
 
@@ -155,6 +158,74 @@ pub(crate) fn view_battery_verbose(
 
 /// Height cap prevents Battery card from stretching with outer row.
 const BATTERY_SECTION_MAX_HEIGHT: f32 = 300.0;
+
+/// Deep pack telemetry rendered inside the Details fold, not the card
+/// body: cells, pack temperature, and the analyzed findings.
+pub(crate) fn smart_detail_rows(
+    pal: crate::style::Palette,
+    smart: &crate::cli::ec_wrapper::SmartBatteryData,
+) -> Element<'_, Message> {
+    let mut rows = column![].spacing(2);
+    let max_cell = smart.cell_mv.iter().max().copied().unwrap_or(0);
+    let min_cell = smart.cell_mv.iter().min().copied().unwrap_or(0);
+    rows = rows.push(
+        row![
+            text("Cells:").size(FONT_SMALL),
+            space::horizontal(),
+            text(format!(
+                "{} mV (Δ{} mV)",
+                smart
+                    .cell_mv
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" / "),
+                max_cell.saturating_sub(min_cell)
+            ))
+            .size(FONT_SMALL)
+        ]
+        .spacing(4),
+    );
+    if let Some(t) = smart.temp_c {
+        rows = rows.push(
+            row![
+                text("Pack Temp:").size(FONT_SMALL),
+                space::horizontal(),
+                text(format!("{:.1}°C", t)).size(FONT_SMALL)
+            ]
+            .spacing(4),
+        );
+    }
+    let (issues, warnings) = crate::cli::ec_wrapper::smart_battery_findings(smart);
+    for issue in &issues {
+        rows = rows.push(
+            text(format!("! {}", issue))
+                .size(FONT_SMALL)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.error),
+                }),
+        );
+    }
+    for warning in &warnings {
+        rows = rows.push(
+            text(format!("* {}", warning))
+                .size(FONT_SMALL)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.warning),
+                }),
+        );
+    }
+    if issues.is_empty() && warnings.is_empty() {
+        rows = rows.push(
+            text("Pack status: OK")
+                .size(FONT_SMALL)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.green),
+                }),
+        );
+    }
+    rows.into()
+}
 
 pub(crate) fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<'a, Message> {
     if !snap.platform.has_battery() {
@@ -222,9 +293,12 @@ pub(crate) fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
         ));
         content = content.push(view_battery_info(&battery.power_info));
 
-        if let Some(verbose) =
-            view_battery_verbose(pal, &battery.power_info, app.show_battery_details)
-        {
+        if let Some(verbose) = view_battery_verbose(
+            pal,
+            &battery.power_info,
+            &snap.smart_battery,
+            app.show_battery_details,
+        ) {
             content = content.push(verbose);
         }
 
@@ -248,10 +322,11 @@ pub(crate) fn view_battery<'a>(app: &'a App, snap: &'a ViewSnapshot) -> Element<
     }
 }
 
-pub(crate) fn battery_detail_rows(
+pub(crate) fn battery_detail_rows<'a>(
     pal: crate::style::Palette,
-    battery_info: &crate::cli::ec_wrapper::BatteryData,
-) -> Option<Element<'_, Message>> {
+    battery_info: &'a crate::cli::ec_wrapper::BatteryData,
+    smart: &'a std::sync::Arc<Option<crate::cli::ec_wrapper::SmartBatteryData>>,
+) -> Option<Element<'a, Message>> {
     let mut rows = column![].spacing(2).padding(4);
     let mut has_content = false;
 
@@ -336,23 +411,27 @@ pub(crate) fn battery_detail_rows(
         has_content = true;
         rows = rows.push(
             row![
-                text("Charger Voltage:").size(FONT_SMALL),
+                text("Adapter Voltage:").size(FONT_SMALL),
                 space::horizontal(),
                 text(format!("{:.0} mV", v)).size(FONT_SMALL)
             ]
             .spacing(4),
         );
     }
-    if let Some(v) = battery_info.charger_current_ma {
+    if let Some(v) = battery_info.chg_input_current_ma {
         has_content = true;
         rows = rows.push(
             row![
-                text("Charger Current:").size(FONT_SMALL),
+                text("Adapter Input:").size(FONT_SMALL),
                 space::horizontal(),
                 text(format!("{} mA", v)).size(FONT_SMALL)
             ]
             .spacing(4),
         );
+    }
+    if let Some(data) = smart.as_ref().as_ref() {
+        has_content = true;
+        rows = rows.push(smart_detail_rows(pal, data));
     }
 
     if has_content {

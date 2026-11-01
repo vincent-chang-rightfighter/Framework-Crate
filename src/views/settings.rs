@@ -69,6 +69,12 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
             sw_content = sw_content.push(info_row("EC Firmware", ec));
         }
     }
+    let pd_fw = read_lock(&app.state.system.pd_fw);
+    if let Some(versions) = pd_fw.as_ref().as_ref()
+        && !versions.is_empty()
+    {
+        sw_content = sw_content.push(info_row("PD Firmware", &versions.join(" / ")));
+    }
     sw_content = sw_content.push(info_row("framework_lib", env!("FRAMEWORK_LIB_VERSION")));
     if let Some(ref ver) = crate::cpu_power::pawnio_version() {
         sw_content = sw_content.push(info_row("PawnIO", ver));

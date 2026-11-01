@@ -627,6 +627,14 @@ pub fn spawn(state: AppState) {
                 // should try immediately when versions are still missing.
                 let mut last_versions_scan: u64 = 0;
                 let mut versions_scan_attempts: u32 = 0;
+                // Same startup budget for the other slow firmware reads
+                // (PD controller versions, deep smart-battery telemetry),
+                // with independent flags so one failing never blocks the
+                // others.
+                let mut last_pd_fw_scan: u64 = 0;
+                let mut pd_fw_scan_attempts: u32 = 0;
+                let mut last_smart_scan: u64 = 0;
+                let mut smart_scan_attempts: u32 = 0;
                 let mut last_cpu_power_poll: u64 = 0;
                 let mut last_resume_ts: u64 = 0;
                 // Wall-clock fallback for missed tray resume events: if the
@@ -1099,6 +1107,77 @@ pub fn spawn(state: AppState) {
                             Err(e) if e.is_overloaded() => {}
                             _ => {
                                 versions_scan_attempts += 1;
+                            }
+                        }
+                    }
+                    // PD controller firmware changes as rarely as versions;
+                    // best-effort alongside it so one failing never blocks
+                    // the other.
+                    if pd_fw_scan_attempts < 3
+                        && read_lock(&bg_state2.system.pd_fw).is_none()
+                        && (last_pd_fw_scan == 0
+                            || now_ms.saturating_sub(last_pd_fw_scan) >= versions_retry_ms)
+                    {
+                        last_pd_fw_scan = now_ms;
+                        let ec_clone = Arc::clone(&ec);
+                        match crate::ec_serial::exec(
+                            "pd-fw-versions",
+                            crate::util::EC_IO_TIMEOUT,
+                            ec_clone,
+                            move |ec| ec.pd_fw_versions(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(v)) => {
+                                with_write_lock(&bg_state2.system.pd_fw, |guard| {
+                                    if guard.as_ref().as_ref() != Some(&v) {
+                                        *guard = Arc::new(Some(v));
+                                        mark_view_dirty(&bg_state2);
+                                    }
+                                });
+                                if read_lock(&bg_state2.system.pd_fw).is_some() {
+                                    pd_fw_scan_attempts = 3;
+                                }
+                            }
+                            Err(e) if e.is_overloaded() => {}
+                            _ => {
+                                pd_fw_scan_attempts += 1;
+                            }
+                        }
+                    }
+                    // Deep smart-battery telemetry (~25 EC commands) is far
+                    // too heavy for the 5s battery poll; fetch it here on the
+                    // same startup budget instead. Cells and cycle counts go
+                    // stale slowly, so a rare fetch is plenty.
+                    if smart_scan_attempts < 3
+                        && read_lock(&bg_state2.battery.smart).is_none()
+                        && (last_smart_scan == 0
+                            || now_ms.saturating_sub(last_smart_scan) >= versions_retry_ms)
+                    {
+                        last_smart_scan = now_ms;
+                        let ec_clone = Arc::clone(&ec);
+                        match crate::ec_serial::exec(
+                            "smart-battery",
+                            crate::util::EC_IO_TIMEOUT,
+                            ec_clone,
+                            move |ec| ec.smart_battery(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(v)) => {
+                                with_write_lock(&bg_state2.battery.smart, |guard| {
+                                    if guard.as_ref().as_ref() != Some(&v) {
+                                        *guard = Arc::new(Some(v));
+                                        mark_view_dirty(&bg_state2);
+                                    }
+                                });
+                                if read_lock(&bg_state2.battery.smart).is_some() {
+                                    smart_scan_attempts = 3;
+                                }
+                            }
+                            Err(e) if e.is_overloaded() => {}
+                            _ => {
+                                smart_scan_attempts += 1;
                             }
                         }
                     }

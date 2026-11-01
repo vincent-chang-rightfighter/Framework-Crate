@@ -27,6 +27,7 @@ pub(crate) struct ViewSnapshot {
     pub sensor_cache: Arc<crate::app::SensorCache>,
     pub temp_history: std::sync::Arc<std::collections::VecDeque<crate::temp_chart::TempSample>>,
     pub battery: Arc<Option<crate::types::BatteryInfo>>,
+    pub smart_battery: Arc<Option<cli::ec_wrapper::SmartBatteryData>>,
     pub kblight: Arc<Option<u32>>,
     pub expansion_cards: Arc<SmallVec<[cli::ec_wrapper::ExpansionCard; 4]>>,
     pub pd_ports: Arc<SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>,
@@ -144,6 +145,7 @@ impl ViewSnapshot {
             sensor_cache: thermal_snap.sensor_cache,
             temp_history: thermal_snap.temp_history,
             battery: Arc::clone(&read_lock(&app.state.battery.info)),
+            smart_battery: Arc::clone(&read_lock(&app.state.battery.smart)),
             kblight: peripheral_snap.kblight,
             expansion_cards: peripheral_snap.expansion_cards,
             pd_ports: peripheral_snap.pd_ports,
@@ -513,8 +515,9 @@ mod tests {
     fn view_battery_verbose_no_verbose_fields() {
         let bat = default_battery_info();
         let pal = crate::style::palette_for(crate::style::ThemeId::Default);
-        assert!(view_battery_verbose(pal, &bat, false).is_none());
-        assert!(view_battery_verbose(pal, &bat, true).is_none());
+        let none_smart = std::sync::Arc::new(None);
+        assert!(view_battery_verbose(pal, &bat, &none_smart, false).is_none());
+        assert!(view_battery_verbose(pal, &bat, &none_smart, true).is_none());
     }
 
     #[test]
@@ -522,8 +525,9 @@ mod tests {
         let mut bat = default_battery_info();
         bat.manufacturer = Some("Intel".to_string());
         let pal = crate::style::palette_for(crate::style::ThemeId::Default);
-        assert!(view_battery_verbose(pal, &bat, false).is_some());
-        assert!(view_battery_verbose(pal, &bat, true).is_some());
+        let none_smart = std::sync::Arc::new(None);
+        assert!(view_battery_verbose(pal, &bat, &none_smart, false).is_some());
+        assert!(view_battery_verbose(pal, &bat, &none_smart, true).is_some());
     }
 
     #[test]
@@ -533,7 +537,38 @@ mod tests {
         bat.serial_number = Some("SN001".to_string());
         bat.battery_type = Some("Li-ion".to_string());
         let pal = crate::style::palette_for(crate::style::ThemeId::Default);
-        assert!(view_battery_verbose(pal, &bat, false).is_some());
+        let none_smart = std::sync::Arc::new(None);
+        assert!(view_battery_verbose(pal, &bat, &none_smart, false).is_some());
+    }
+
+    #[test]
+    fn view_battery_verbose_with_smart_data() {
+        // Smart telemetry alone summons Details, and renders folded inside.
+        use crate::cli::ec_wrapper::SmartBatteryData;
+        let bat = default_battery_info();
+        let pal = crate::style::palette_for(crate::style::ThemeId::Default);
+        let smart = std::sync::Arc::new(Some(SmartBatteryData {
+            cell_mv: [4050, 4048, 4052, 4049],
+            temp_c: Some(29.5),
+            cycle_count: 42,
+            full_charge_mah: 4500,
+            design_mah: 5000,
+            ..Default::default()
+        }));
+        assert!(view_battery_verbose(pal, &bat, &smart, false).is_some());
+        assert!(view_battery_verbose(pal, &bat, &smart, true).is_some());
+    }
+
+    #[test]
+    fn view_battery_verbose_with_charger_fields() {
+        // Charger telemetry now flows from power(): voltage/current alone
+        // must summon the Details section.
+        let mut bat = default_battery_info();
+        bat.charger_voltage_mv = Some(17144);
+        bat.charger_current_ma = Some(0);
+        let pal = crate::style::palette_for(crate::style::ThemeId::Default);
+        let none_smart = std::sync::Arc::new(None);
+        assert!(view_battery_verbose(pal, &bat, &none_smart, false).is_some());
     }
 
     #[test]

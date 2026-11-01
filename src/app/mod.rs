@@ -314,6 +314,7 @@ impl App {
                 ec_client: Arc::new(RwLock::new(Arc::new(None))),
                 ec_init_done: Arc::new(AtomicBool::new(false)),
                 versions: Arc::new(RwLock::new(Arc::new(None))),
+                pd_fw: Arc::new(RwLock::new(Arc::new(None))),
                 platform: Arc::new(RwLock::new(Arc::new(
                     crate::cli::ec_wrapper::detect_platform(),
                 ))),
@@ -358,6 +359,7 @@ impl App {
                 info: Arc::new(RwLock::new(Arc::new(None))),
                 prev_ac_present: Arc::new(AtomicBool::new(true)),
                 last_success_ms: Arc::new(AtomicU64::new(0)),
+                smart: Arc::new(RwLock::new(Arc::new(None))),
             },
             cpu_power: crate::cpu_power::CpuPowerState::default(),
             lifecycle: LifecycleState {

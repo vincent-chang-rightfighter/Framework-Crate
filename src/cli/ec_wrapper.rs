@@ -49,6 +49,167 @@ pub struct VersionsData {
     pub ec_build_version: Option<String>,
 }
 
+/// Deep battery telemetry from the smart-battery EC interface: per-cell
+/// voltages, pack temperature, and the safety/permanent-failure flags that
+/// `analyze_health` judges. Fetched on the rare firmware-info path, not the
+/// 5s battery poll: `collect_data` costs ~25 EC commands.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SmartBatteryData {
+    pub cell_mv: [u16; 4],
+    pub temp_c: Option<f32>,
+    pub cycle_count: u16,
+    pub device_name: String,
+    pub manufacturer_name: String,
+    pub full_charge_mah: u16,
+    pub design_mah: u16,
+    pub battery_status: u16,
+    pub safety_status: u32,
+    pub pf_status: u32,
+    pub lifetime1: Vec<u8>,
+    pub lifetime4: Vec<u8>,
+    pub lifetime5: Vec<u8>,
+}
+
+/// Cell imbalance warn threshold (mV), mirroring framework_lib's analysis.
+pub const SMART_CELL_IMBALANCE_MV: u16 = 100;
+
+/// Picks the human-meaningful PD controller version. framework_lib's
+/// `active_fw_ver` always formats the app slot, but newer CCG firmware
+/// (e.g. Ultra Series 1: base 3.6.0.115, app Notebook 0.0.10) carries the
+/// release in the base version while app stays a slot id.
+pub fn pd_version_string(active: &framework_lib::ccgx::ControllerVersion) -> String {
+    if active.app.major == 0 && active.app.minor == 0 {
+        active.base.to_dec_string()
+    } else {
+        active.app.to_string()
+    }
+}
+
+/// Replicates framework_lib's `analyze_health` verdicts as data (that
+/// function only println!s). Returns (issues, warnings): issues mean the
+/// pack reports a fault, warnings mean degradation or recorded events.
+pub fn smart_battery_findings(data: &SmartBatteryData) -> (Vec<String>, Vec<String>) {
+    let mut issues: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    if data.safety_status != 0 {
+        issues.push("Safety status flags active".to_string());
+    }
+    if data.pf_status != 0 {
+        issues.push("Permanent failure flags active".to_string());
+    }
+    if data.battery_status & (1 << 15) != 0 {
+        issues.push("Over-Charged Alarm active".to_string());
+    }
+    if data.battery_status & (1 << 12) != 0 {
+        issues.push("Over Temperature Alarm active".to_string());
+    }
+    if data.battery_status & (1 << 14) != 0 {
+        warnings.push("Terminate Charge Alarm active".to_string());
+    }
+    if data.battery_status & (1 << 11) != 0 {
+        warnings.push("Terminate Discharge Alarm active".to_string());
+    }
+    if data.battery_status & (1 << 4) != 0 {
+        warnings.push("Battery is fully discharged".to_string());
+    }
+
+    if data.design_mah > 0 && data.full_charge_mah > 0 {
+        let retention = (data.full_charge_mah as f32 / data.design_mah as f32) * 100.0;
+        if retention < 50.0 {
+            issues.push("Severe capacity degradation (<50%)".to_string());
+        } else if retention < 70.0 {
+            warnings.push(format!(
+                "Significant capacity degradation: {:.0}%",
+                retention
+            ));
+        } else if retention < 80.0 {
+            warnings.push(format!("Moderate capacity degradation: {:.0}%", retention));
+        }
+    }
+
+    let max_cell = data.cell_mv.iter().max().copied().unwrap_or(0);
+    let min_cell = data.cell_mv.iter().min().copied().unwrap_or(0);
+    let cell_delta = max_cell.saturating_sub(min_cell);
+    if cell_delta > SMART_CELL_IMBALANCE_MV {
+        warnings.push(format!(
+            "Cell imbalance: {}mV difference (>100mV)",
+            cell_delta
+        ));
+    }
+
+    if data.lifetime1.len() >= 32 {
+        let lt1 = &data.lifetime1;
+        let max_delta = u16::from_le_bytes([lt1[16], lt1[17]]);
+        if max_delta > 200 {
+            warnings.push(format!(
+                "Historical cell imbalance: {}mV max delta recorded",
+                max_delta
+            ));
+        }
+        let max_temp = lt1[26];
+        let min_temp = lt1[27];
+        if max_temp > 55 {
+            warnings.push(format!("High temperature recorded: {}C max", max_temp));
+        }
+        if min_temp < 5 {
+            warnings.push(format!("Low temperature recorded: {}C min", min_temp));
+        }
+    }
+
+    if data.lifetime4.len() >= 32 {
+        let lt4 = &data.lifetime4;
+        let cov_events = u16::from_le_bytes([lt4[0], lt4[1]]);
+        let cuv_events = u16::from_le_bytes([lt4[4], lt4[5]]);
+        let ocd_events =
+            u16::from_le_bytes([lt4[8], lt4[9]]) + u16::from_le_bytes([lt4[12], lt4[13]]);
+        let occ_events = u16::from_le_bytes([lt4[16], lt4[17]]);
+        let scd_events = u16::from_le_bytes([lt4[28], lt4[29]]);
+        if cov_events > 0 {
+            warnings.push(format!("{} cell over-voltage events", cov_events));
+        }
+        if cuv_events > 5 {
+            warnings.push(format!(
+                "{} cell under-voltage events (deep discharge)",
+                cuv_events
+            ));
+        }
+        if ocd_events > 0 {
+            warnings.push(format!("{} over-current discharge events", ocd_events));
+        }
+        if occ_events > 0 {
+            warnings.push(format!("{} over-current charge events", occ_events));
+        }
+        if scd_events > 0 {
+            issues.push("Short-circuit events detected".to_string());
+        }
+    }
+
+    if data.lifetime5.len() >= 32 {
+        let lt5 = &data.lifetime5;
+        let valid_terminations = u16::from_le_bytes([lt5[16], lt5[17]]);
+        let ra_updates = u16::from_le_bytes([lt5[24], lt5[25]]);
+        let ra_fails = u16::from_le_bytes([lt5[28], lt5[29]]);
+        if data.cycle_count > 10 && valid_terminations < (data.cycle_count * 8 / 10) {
+            warnings.push(format!(
+                "Low charge termination rate: {} terminations over {} cycles",
+                valid_terminations, data.cycle_count
+            ));
+        }
+        if ra_updates > 0 {
+            let fail_rate = (ra_fails as f32 / ra_updates as f32) * 100.0;
+            if fail_rate > 20.0 {
+                warnings.push(format!(
+                    "High resistance update fail rate: {:.1}%",
+                    fail_rate
+                ));
+            }
+        }
+    }
+
+    (issues, warnings)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformFamily {
     Laptop12,
@@ -312,6 +473,11 @@ pub trait EcHw: Send + Sync {
     fn charge_limit_set(&self, min_pct: u8, max_pct: u8) -> Result<(), String>;
     fn pd_ports(&self) -> SmallVec<[UsbCPort; 4]>;
     fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]>;
+    /// Deep smart-battery telemetry (~25 EC commands). Callers fetch it on
+    /// the rare firmware-info path, never the 5s battery poll.
+    fn smart_battery(&self) -> Result<SmartBatteryData, String>;
+    /// Active PD controller firmware versions, one per controller.
+    fn pd_fw_versions(&self) -> Result<Vec<String>, String>;
 }
 
 fn sensor_name_for_index(platform: Option<Platform>, index: usize) -> String {
@@ -503,6 +669,24 @@ impl EcHw for EcClient {
             if batt.design_voltage > 0 {
                 data.remaining_capacity_wh =
                     Some(batt.remaining_capacity as f32 * batt.design_voltage as f32 / 1_000_000.0);
+            }
+        }
+
+        // Charger-side telemetry (EC_CMD_CHARGE_STATE_GET): a single extra
+        // command, best-effort so a failure never fails the battery read.
+        // Fills the charger_* fields the Details section renders on AC.
+        {
+            use framework_lib::chromium_ec::EcRequestRaw;
+            use framework_lib::chromium_ec::commands::{ChargeStateCmd, EcRequestChargeStateGetV0};
+            let req = EcRequestChargeStateGetV0 {
+                cmd: ChargeStateCmd::GetState as u8,
+                param: 0,
+            };
+            if let Ok(res) = req.send_command(&self.ec) {
+                // Packed struct: copy the scalars out, never borrow them.
+                data.charger_voltage_mv = Some(res.chg_voltage);
+                data.charger_current_ma = Some(res.chg_current);
+                data.chg_input_current_ma = Some(res.chg_input_current);
             }
         }
 
@@ -742,6 +926,49 @@ impl EcHw for EcClient {
         // framework_lib does not expose expansion-card enumeration; keep the
         // trait contract empty until a real EC source is available.
         SmallVec::new()
+    }
+
+    fn smart_battery(&self) -> Result<SmartBatteryData, String> {
+        use framework_lib::smart_battery::SmartBattery;
+        let raw = SmartBattery::new()
+            .collect_data(&self.ec, None)
+            .map_err(|e| format!("smart battery read failed: {:?}", e))?;
+        Ok(SmartBatteryData {
+            cell_mv: [
+                raw.cell_voltage1,
+                raw.cell_voltage2,
+                raw.cell_voltage3,
+                raw.cell_voltage4,
+            ],
+            // SBS temperature register is 0.1 Kelvin.
+            temp_c: Some(raw.temperature as f32 / 10.0 - 273.15),
+            cycle_count: raw.cycle_count,
+            device_name: raw.device_name,
+            manufacturer_name: raw.manufacturer_name,
+            full_charge_mah: raw.full_charge_capacity,
+            design_mah: raw.design_capacity,
+            battery_status: raw.battery_status,
+            safety_status: raw.safety_status,
+            pf_status: raw.pf_status,
+            lifetime1: raw.lifetime1,
+            lifetime4: raw.lifetime4,
+            lifetime5: raw.lifetime5,
+        })
+    }
+
+    fn pd_fw_versions(&self) -> Result<Vec<String>, String> {
+        use framework_lib::ccgx::{PdVersions, get_pd_controller_versions};
+        let versions = get_pd_controller_versions(&self.ec)
+            .map_err(|e| format!("PD firmware read failed: {:?}", e))?;
+        let controllers: Vec<framework_lib::ccgx::ControllerFirmwares> = match versions {
+            PdVersions::Single(fw) => vec![fw],
+            PdVersions::RightLeft((left, right)) => vec![left, right],
+            PdVersions::Many(all) => all,
+        };
+        Ok(controllers
+            .iter()
+            .map(|fw| pd_version_string(&fw.active_fw()))
+            .collect())
     }
 }
 
@@ -986,6 +1213,30 @@ pub(crate) mod tests {
             self.record("expansion_cards".to_string());
             SmallVec::new()
         }
+
+        fn smart_battery(&self) -> Result<SmartBatteryData, String> {
+            self.record("smart_battery".to_string());
+            Ok(SmartBatteryData {
+                cell_mv: [4050, 4048, 4052, 4049],
+                temp_c: Some(29.5),
+                cycle_count: 42,
+                device_name: "MockBat".to_string(),
+                manufacturer_name: "MockCells".to_string(),
+                full_charge_mah: 4500,
+                design_mah: 5000,
+                battery_status: 0,
+                safety_status: 0,
+                pf_status: 0,
+                lifetime1: Vec::new(),
+                lifetime4: Vec::new(),
+                lifetime5: Vec::new(),
+            })
+        }
+
+        fn pd_fw_versions(&self) -> Result<Vec<String>, String> {
+            self.record("pd_fw_versions".to_string());
+            Ok(vec!["3.6.0.115".to_string(), "3.6.0.115".to_string()])
+        }
     }
 
     #[test]
@@ -1019,4 +1270,199 @@ pub(crate) mod tests {
         assert!(ec.set_fan_duty(80, None).is_ok());
         assert_eq!(mock.ops.lock().unwrap().len(), 3);
     }
+
+    #[test]
+    fn smart_battery_findings_clean_pack_is_quiet() {
+        let data = SmartBatteryData {
+            cell_mv: [4050, 4048, 4052, 4049],
+            temp_c: Some(29.5),
+            cycle_count: 42,
+            full_charge_mah: 4500,
+            design_mah: 5000,
+            ..Default::default()
+        };
+        let (issues, warnings) = smart_battery_findings(&data);
+        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn smart_battery_findings_flags_faults_and_degradation() {
+        let data = SmartBatteryData {
+            cell_mv: [4050, 4048, 3900, 4049],
+            temp_c: Some(29.5),
+            cycle_count: 400,
+            full_charge_mah: 2000,
+            design_mah: 5000,
+            battery_status: 1 << 15,
+            pf_status: 1,
+            ..Default::default()
+        };
+        let (issues, warnings) = smart_battery_findings(&data);
+        assert!(
+            issues.iter().any(|m| m.contains("Permanent failure")),
+            "issues: {issues:?}"
+        );
+        assert!(
+            issues.iter().any(|m| m.contains("Severe capacity")),
+            "issues: {issues:?}"
+        );
+        assert!(
+            issues.iter().any(|m| m.contains("Over-Charged Alarm")),
+            "issues: {issues:?}"
+        );
+        assert!(
+            warnings.iter().any(|m| m.contains("Cell imbalance")),
+            "warnings: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn smart_battery_findings_reads_lifetime_blobs() {
+        fn le(v: u16) -> [u8; 2] {
+            v.to_le_bytes()
+        }
+        let mut lt1 = vec![0u8; 32];
+        lt1[16..18].copy_from_slice(&le(250));
+        lt1[26] = 60;
+        lt1[27] = 3;
+        let mut lt4 = vec![0u8; 32];
+        lt4[0..2].copy_from_slice(&le(2));
+        lt4[28..30].copy_from_slice(&le(1));
+        let mut lt5 = vec![0u8; 32];
+        lt5[16..18].copy_from_slice(&le(5));
+        let data = SmartBatteryData {
+            cell_mv: [4000, 4000, 4000, 4000],
+            cycle_count: 100,
+            full_charge_mah: 4500,
+            design_mah: 5000,
+            lifetime1: lt1,
+            lifetime4: lt4,
+            lifetime5: lt5,
+            ..Default::default()
+        };
+        let (issues, warnings) = smart_battery_findings(&data);
+        assert!(
+            warnings
+                .iter()
+                .any(|m| m.contains("Historical cell imbalance")),
+            "warnings: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|m| m.contains("High temperature recorded")),
+            "warnings: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|m| m.contains("over-voltage events")),
+            "warnings: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|m| m.contains("termination rate")),
+            "warnings: {warnings:?}"
+        );
+        assert!(
+            issues.iter().any(|m| m.contains("Short-circuit")),
+            "issues: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn pd_version_prefers_base_when_app_is_a_slot_id() {
+        use framework_lib::ccgx::{AppVersion, Application, BaseVersion, ControllerVersion};
+        // Ultra Series 1 live shape: release lives in base, app is a slot id.
+        let ultra = ControllerVersion {
+            base: BaseVersion {
+                major: 3,
+                minor: 6,
+                patch: 0,
+                build_number: 115,
+            },
+            app: AppVersion {
+                application: Application::Notebook,
+                major: 0,
+                minor: 0,
+                circuit: 10,
+            },
+        };
+        assert_eq!(pd_version_string(&ultra), "3.6.0.115");
+        // Older layout where app carries the release: keep framework's form.
+        let legacy = ControllerVersion {
+            base: BaseVersion {
+                major: 0,
+                minor: 0,
+                patch: 0,
+                build_number: 0,
+            },
+            app: AppVersion {
+                application: Application::Notebook,
+                major: 1,
+                minor: 2,
+                circuit: 3,
+            },
+        };
+        assert_eq!(pd_version_string(&legacy), legacy.app.to_string());
+    }
+
+    #[test]
+    fn mock_serves_smart_and_pd_fw() {
+        let mock = MockEc::new();
+        let ec: &dyn EcHw = &mock;
+        let smart = ec.smart_battery().unwrap();
+        assert_eq!(smart.cell_mv, [4050, 4048, 4052, 4049]);
+        assert_eq!(
+            ec.pd_fw_versions().unwrap(),
+            vec!["3.6.0.115".to_string(), "3.6.0.115".to_string()]
+        );
+        let ops = mock.ops.lock().unwrap();
+        assert!(ops.contains(&"smart_battery".to_string()));
+        assert!(ops.contains(&"pd_fw_versions".to_string()));
+    }
+
+    // Hardware probe for EC_CMD_CHARGE_STATE_GET, kept disabled until the
+    // charger card work starts. To run: uncomment the test below, then
+    // cargo test --locked charge_state_probe -- --ignored --nocapture
+    // (needs a Framework EC with the Windows driver, usually elevated).
+    // Last live reading (2026-10-31, AC connected, 90% SoC):
+    // ac=1 chg_voltage=17144mV chg_current=0mA chg_input_current=3084mA.
+    /*
+    #[test]
+    #[ignore]
+    fn charge_state_probe_reads_charger_telemetry() {
+        use framework_lib::chromium_ec::EcRequestRaw;
+        use framework_lib::chromium_ec::commands::{ChargeStateCmd, EcRequestChargeStateGetV0};
+
+        let client = match super::EcClient::new() {
+            Ok(c) => c,
+            Err(e) => {
+                println!("SKIP: no usable EC ({e})");
+                return;
+            }
+        };
+        let res = EcRequestChargeStateGetV0 {
+            cmd: ChargeStateCmd::GetState as u8,
+            param: 0,
+        }
+        .send_command(&client.ec)
+        .unwrap_or_else(|e| panic!("charge state command failed: {e:?}"));
+        // Packed struct: copy the scalars out, never borrow them.
+        let (ac, volt_mv, cur_ma, in_ma, soc) = (
+            res.ac,
+            res.chg_voltage,
+            res.chg_current,
+            res.chg_input_current,
+            res.batt_state_of_charge,
+        );
+        println!(
+            "ac={ac} chg_voltage={volt_mv}mV chg_current={cur_ma}mA \
+             chg_input_current={in_ma}mA soc={soc}%"
+        );
+        assert!(soc <= 100, "SoC out of range: {soc}");
+        assert!(
+            volt_mv <= 25_000,
+            "charger voltage out of range: {volt_mv}mV"
+        );
+    }
+    */
 }

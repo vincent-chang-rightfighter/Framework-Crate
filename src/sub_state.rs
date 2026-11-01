@@ -124,6 +124,9 @@ pub struct BatteryState {
     /// NOTE: Tracks AC→battery transitions.
     pub prev_ac_present: Arc<AtomicBool>,
     pub last_success_ms: Arc<AtomicU64>,
+    /// Deep smart-battery telemetry, fetched on the rare firmware-info path
+    /// (collect_data costs ~25 EC commands, never the 5s poll).
+    pub smart: Arc<RwLock<Arc<Option<cli::ec_wrapper::SmartBatteryData>>>>,
 }
 
 impl Default for BatteryState {
@@ -132,6 +135,7 @@ impl Default for BatteryState {
             info: Arc::new(RwLock::new(Arc::new(None))),
             prev_ac_present: Arc::new(AtomicBool::new(true)),
             last_success_ms: Arc::new(AtomicU64::new(0)),
+            smart: Arc::new(RwLock::new(Arc::new(None))),
         }
     }
 }
@@ -143,6 +147,9 @@ pub struct SystemState {
     /// NOTE: While false, background loop must not create EC client concurrently.
     pub ec_init_done: Arc<AtomicBool>,
     pub versions: Arc<RwLock<Arc<Option<cli::ec_wrapper::VersionsData>>>>,
+    /// Active PD controller firmware versions, fetched with the versions
+    /// block and shown on the About page. None until the first success.
+    pub pd_fw: Arc<RwLock<Arc<Option<Vec<String>>>>>,
     pub platform: Arc<RwLock<Arc<cli::ec_wrapper::PlatformFamily>>>,
     pub intel_cpu: Arc<AtomicBool>,
 }
@@ -154,6 +161,7 @@ impl Default for SystemState {
             ec_client: Arc::new(RwLock::new(Arc::new(None))),
             ec_init_done: Arc::new(AtomicBool::new(false)),
             versions: Arc::new(RwLock::new(Arc::new(None))),
+            pd_fw: Arc::new(RwLock::new(Arc::new(None))),
             platform: Arc::new(RwLock::new(Arc::new(
                 cli::ec_wrapper::PlatformFamily::Unknown,
             ))),
