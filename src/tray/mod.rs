@@ -271,7 +271,15 @@ impl TrayManager {
     /// `TIP_UPDATE_INTERVAL`. No-ops until the icon exists; a failed push is
     /// debug-logged and retried on the next changed text.
     pub fn update_tip(&mut self, tip: &str) {
-        if !self.initialized || !self.icon_loaded || self.hwnd == 0 {
+        if !self.initialized || !self.icon_loaded {
+            return;
+        }
+        // The icon is registered under the pump's hidden window, not the
+        // main window: targeting self.hwnd silently misses (NIM_MODIFY matches
+        // on hWnd+uID). Shell_NotifyIconW is thread-safe, so calling from the
+        // UI thread is fine.
+        let hwnd = message_pump::load_global_hwnd();
+        if hwnd == 0 {
             return;
         }
         let changed = self.last_tip.as_deref() != Some(tip);
@@ -281,7 +289,7 @@ impl TrayManager {
         if !changed || !due {
             return;
         }
-        if crate::system_info::shell_notify_modify_tip(self.hwnd, tip) {
+        if crate::system_info::shell_notify_modify_tip(hwnd, tip) {
             self.last_tip = Some(tip.to_string());
             self.last_tip_at = Some(std::time::Instant::now());
         } else {

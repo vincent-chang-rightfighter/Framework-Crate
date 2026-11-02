@@ -44,7 +44,10 @@ fn store_global_hwnd(hwnd: isize) {
     TRAY_HWND_GLOBAL.store(hwnd as u64, Ordering::Release);
 }
 
-fn load_global_hwnd() -> isize {
+/// Icon-owner window handle for out-of-pump Shell calls (e.g. tooltip
+/// rewrites). The icon is registered under this hidden window, not the
+/// main window, so `NIM_MODIFY` must target it.
+pub(crate) fn load_global_hwnd() -> isize {
     TRAY_HWND_GLOBAL.load(Ordering::Acquire) as isize
 }
 
