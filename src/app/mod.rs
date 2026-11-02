@@ -256,9 +256,6 @@ pub struct App {
     pub pl2_enabled: bool,
     pub pl1_clamped: bool,
     pub pl2_clamped: bool,
-    /// True when the user has uncommitted PL field edits; while set, incoming
-    /// CPU power readbacks must not overwrite the edit boxes (#7).
-    pub pl_fields_dirty: bool,
     pub cpu_power_error: Option<String>,
     pub ec_op_error: Option<String>,
     pub pl_custom_applied: Arc<std::sync::atomic::AtomicBool>,
@@ -473,7 +470,6 @@ impl App {
             pl2_enabled: true,
             pl1_clamped: false,
             pl2_clamped: false,
-            pl_fields_dirty: false,
             cpu_power_error: None,
             ec_op_error: None,
             pl_custom_applied: Arc::new(std::sync::atomic::AtomicBool::new(

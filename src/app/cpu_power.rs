@@ -61,7 +61,7 @@ impl App {
                 } else {
                     // Reset DLL pointers so next read picks up upgraded DLL.
                     self.cpu_power_error = None;
-                    self.pl_fields_dirty = false;
+
                     crate::cpu_power::reset_dll_fns();
                     Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {
                         crate::cpu_power::pawnio_version();
@@ -96,7 +96,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.modules_download_error = None;
-                        self.pl_fields_dirty = false;
+
                         Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}))
                     }
                     Err(e) => {
@@ -118,7 +118,7 @@ impl App {
                 let ok = crate::cpu_power::redetect_modules();
                 if ok {
                     self.modules_download_error = None;
-                    self.pl_fields_dirty = false;
+
                     Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}))
                 } else {
                     self.modules_download_error = Some("Modules not found or hash mismatch".into());
@@ -164,7 +164,7 @@ impl App {
                     Ok(()) => {
                         self.modules_download_error = None;
                         self.cpu_power_error = None;
-                        self.pl_fields_dirty = false;
+
                         crate::cpu_power::reset_dll_fns();
                         return Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}));
                     }
@@ -179,46 +179,46 @@ impl App {
             }
             Message::CpuPowerPl1Changed(val) => {
                 self.pl1_edit = val.clone();
-                self.pl_fields_dirty = true;
+
                 self.cpu_power_error = None;
                 self.mark_dirty();
                 Some(Task::none())
             }
             Message::CpuPowerPl2Changed(val) => {
                 self.pl2_edit = val.clone();
-                self.pl_fields_dirty = true;
+
                 self.cpu_power_error = None;
                 self.mark_dirty();
                 Some(Task::none())
             }
             Message::CpuPowerPl1TimeChanged(val) => {
                 self.pl1_time_edit = val.clone();
-                self.pl_fields_dirty = true;
+
                 self.cpu_power_error = None;
                 self.mark_dirty();
                 Some(Task::none())
             }
             Message::CpuPowerPl1EnabledToggled(v) => {
                 self.pl1_enabled = *v;
-                self.pl_fields_dirty = true;
+
                 self.mark_dirty();
                 Some(Task::none())
             }
             Message::CpuPowerPl2EnabledToggled(v) => {
                 self.pl2_enabled = *v;
-                self.pl_fields_dirty = true;
+
                 self.mark_dirty();
                 Some(Task::none())
             }
             Message::CpuPowerPl1ClampedToggled(v) => {
                 self.pl1_clamped = *v;
-                self.pl_fields_dirty = true;
+
                 self.mark_dirty();
                 Some(Task::none())
             }
             Message::CpuPowerPl2ClampedToggled(v) => {
                 self.pl2_clamped = *v;
-                self.pl_fields_dirty = true;
+
                 self.mark_dirty();
                 Some(Task::none())
             }
@@ -237,7 +237,7 @@ impl App {
                         return Some(Task::none());
                     }
                 };
-                self.pl_fields_dirty = false;
+
                 self.cpu_power_error = None;
                 let info = self.state.cpu_power.snapshot();
                 let params = crate::cpu_power::PowerLimitParams {
@@ -292,7 +292,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.set_pl_custom_applied(true);
-                        self.pl_fields_dirty = false;
+
                         self.cpu_power_error = None;
                         return Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}));
                     }
@@ -316,7 +316,7 @@ impl App {
                         return Some(Task::none());
                     }
                 };
-                self.pl_fields_dirty = false;
+
                 self.cpu_power_error = None;
                 let info = self.state.cpu_power.snapshot();
                 let params = crate::cpu_power::PowerLimitParams {
@@ -385,7 +385,6 @@ impl App {
                 ))
             }
             Message::CpuPowerSyncReset => {
-                self.pl_fields_dirty = false;
                 // A queued Start/Stop from before this Reset must not run after it.
                 self.sync_intent.fetch_add(1, Ordering::AcqRel);
                 Some(self.handle_cpu_power_sync_reset())
@@ -599,12 +598,12 @@ impl App {
         Ok((pl1, pl2, pl1_time))
     }
 
-    /// Populates edit fields from CPU power snapshot.
+    /// Populates edit fields from CPU power snapshot. Always overwrites:
+    /// this only runs on explicit refresh paths (Refresh button, Apply /
+    /// Reset completion, module events), never on the background poll, so
+    /// in-progress typing is never clobbered while the card always shows
+    /// the latest hardware values after hardware-changing operations.
     fn apply_edit_fields_from_snapshot(&mut self, info: &crate::cpu_power::CpuPowerInfo) {
-        // Do not clobber uncommitted user edits with a fresh readback (#7).
-        if self.pl_fields_dirty {
-            return;
-        }
         let (pl1, pl2, p1en, p2en, p1cl, p2cl, t1, _t2) = info.init_edit_fields();
         self.pl1_edit = pl1;
         self.pl2_edit = pl2;
@@ -619,7 +618,27 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::sync_restart_params;
-    use crate::cpu_power::PowerLimitParams;
+    use crate::cpu_power::{CpuPowerInfo, PowerLimitParams};
+
+    #[test]
+    fn refresh_always_overwrites_edit_fields() {
+        // Edit boxes follow the hardware on every explicit refresh; there is
+        // no dirty flag to get stuck (background polls never touch them).
+        let (mut app, _) = crate::App::new(false);
+        app.pl1_edit = "stale".into();
+        app.pl1_enabled = false;
+        let info = CpuPowerInfo {
+            available: true,
+            pl1_msr: 30.0,
+            pl1_msr_enabled: true,
+            pl2_msr: 35.0,
+            ..Default::default()
+        };
+        app.apply_edit_fields_from_snapshot(&info);
+        assert_eq!(app.pl1_edit, "30.0");
+        assert_eq!(app.pl2_edit, "35.0");
+        assert!(app.pl1_enabled);
+    }
 
     #[tokio::test]
     async fn begin_pawnio_task_uses_status_not_error() {

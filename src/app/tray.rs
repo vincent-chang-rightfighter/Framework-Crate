@@ -53,7 +53,6 @@ impl App {
             }
             Message::RestoreFromTray => {
                 self.tray.mark_restored();
-                self.pl_fields_dirty = false;
                 self.state.lifecycle.visible.store(true, Ordering::Release);
                 self.mark_dirty();
                 self.icon_create_in_flight = false;
