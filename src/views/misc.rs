@@ -25,6 +25,8 @@ pub(crate) fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
         }));
     }
 
+    content = content.push(privacy_section(snap));
+
     if snap.platform.has_keyboard_backlight() {
         content = content.push(kblight_section(snap));
     } else {
@@ -33,8 +35,6 @@ pub(crate) fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
             "Keyboard Backlight",
         ));
     }
-
-    content = content.push(space::vertical().height(8));
 
     if snap.platform.has_fingerprint_led() {
         let pal = snap.palette;
@@ -64,8 +64,6 @@ pub(crate) fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
             "Fingerprint LED",
         ));
     }
-
-    content = content.push(space::vertical().height(8));
 
     content = content.push(ports_section(snap));
 
@@ -113,6 +111,48 @@ pub(crate) fn kblight_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 color: Some(pal.header),
             },
         ));
+        content = content.push(text("Unavailable").size(FONT_BODY).style(move |_theme| {
+            iced::widget::text::Style {
+                color: Some(pal.gray),
+            }
+        }));
+    }
+    content.into()
+}
+
+pub(crate) fn privacy_section(snap: &ViewSnapshot) -> Element<'_, Message> {
+    let pal = snap.palette;
+    let mut content = column![].spacing(2);
+    content = content.push(
+        text("Privacy Switches")
+            .size(FONT_SECTION)
+            .style(move |_theme| iced::widget::text::Style {
+                color: Some(pal.header),
+            }),
+    );
+    if let Some(switches) = snap.privacy.as_ref().as_ref() {
+        let mic = if switches.mic { "Mic On" } else { "Mic Off" };
+        let cam = if switches.camera {
+            "Camera On"
+        } else {
+            "Camera Off"
+        };
+        content = content.push(
+            row![
+                text(mic).size(FONT_BODY).style(move |_theme| {
+                    iced::widget::text::Style {
+                        color: Some(if switches.mic { pal.green } else { pal.gray }),
+                    }
+                }),
+                text(cam).size(FONT_BODY).style(move |_theme| {
+                    iced::widget::text::Style {
+                        color: Some(if switches.camera { pal.green } else { pal.gray }),
+                    }
+                }),
+            ]
+            .spacing(6),
+        );
+    } else {
         content = content.push(text("Unavailable").size(FONT_BODY).style(move |_theme| {
             iced::widget::text::Style {
                 color: Some(pal.gray),

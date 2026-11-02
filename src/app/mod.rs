@@ -354,6 +354,7 @@ impl App {
                 pd_ports: Arc::new(RwLock::new(Arc::new(smallvec::SmallVec::new()))),
                 pd_ports_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
                 pd_usb_c_seen: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+                privacy: Arc::new(RwLock::new(Arc::new(None))),
             },
             battery: BatteryState {
                 info: Arc::new(RwLock::new(Arc::new(None))),

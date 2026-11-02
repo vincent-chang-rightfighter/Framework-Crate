@@ -1144,6 +1144,34 @@ pub fn spawn(state: AppState) {
                                 }
                             }
                         }
+                        // Privacy switches move with a physical slider: the
+                        // 30s peripheral cadence is plenty, and the round
+                        // itself is the retry (no attempt budget needed).
+                        let ec_clone = Arc::clone(&ec);
+                        match crate::ec_serial::exec(
+                            "privacy-switches",
+                            crate::util::EC_IO_TIMEOUT,
+                            ec_clone,
+                            move |ec| ec.privacy_switches(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(switches)) => {
+                                with_write_lock(&bg_state2.peripherals.privacy, |guard| {
+                                    if guard.as_ref().as_ref() != Some(&switches) {
+                                        *guard = Arc::new(Some(switches));
+                                        mark_view_dirty(&bg_state2);
+                                    }
+                                });
+                            }
+                            Err(e) if e.is_overloaded() => {}
+                            Ok(Err(e)) => {
+                                tracing::debug!("Privacy switches read failed: {}", e);
+                            }
+                            Err(e) => {
+                                tracing::debug!("Privacy switches dispatch failed: {}", e);
+                            }
+                        }
                     }
                     // Versions rarely change; only fetch a few times at startup.
                     // Two quick retries after the immediate first attempt,

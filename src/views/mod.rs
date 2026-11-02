@@ -33,6 +33,7 @@ pub(crate) struct ViewSnapshot {
     pub pd_ports: Arc<SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>,
     pub pd_ports_history: Arc<crate::sub_state::PdPortsHistory>,
     pub pd_usb_c_seen: Arc<Vec<bool>>,
+    pub privacy: Arc<Option<cli::ec_wrapper::PrivacySwitches>>,
     pub curve_full_points: Arc<Vec<[u32; 2]>>,
     pub platform: cli::ec_wrapper::PlatformFamily,
     pub fan_count: u64,
@@ -151,6 +152,7 @@ impl ViewSnapshot {
             pd_ports: peripheral_snap.pd_ports,
             pd_ports_history: peripheral_snap.pd_ports_history,
             pd_usb_c_seen: peripheral_snap.pd_usb_c_seen,
+            privacy: peripheral_snap.privacy,
             curve_full_points: Arc::clone(&read_lock(&app.state.fan.curve_full_points)),
             platform,
             fan_count,
@@ -569,6 +571,16 @@ mod tests {
         let pal = crate::style::palette_for(crate::style::ThemeId::Default);
         let none_smart = std::sync::Arc::new(None);
         assert!(view_battery_verbose(pal, &bat, &none_smart, false).is_some());
+    }
+
+    #[test]
+    fn view_battery_info_with_cutoff_engaged() {
+        let mut bat = default_battery_info();
+        bat.cutoff = Some(true);
+        let _el = view_battery_info(&bat);
+        let mut bat = default_battery_info();
+        bat.cutoff = Some(false);
+        let _el = view_battery_info(&bat);
     }
 
     #[test]

@@ -109,6 +109,14 @@ pub(crate) fn view_battery_info(
             text(format!("{}{:.2} A", prefix, v as f32 / 1000.0)).size(FONT_BODY),
         ]);
     }
+    // Ship mode is exceptional: only render when engaged.
+    if battery.cutoff == Some(true) {
+        rows = rows.push(row![
+            text("Cutoff:").size(FONT_BODY),
+            space::horizontal(),
+            text("engaged (ship mode)").size(FONT_BODY),
+        ]);
+    }
 
     rows.into()
 }

@@ -3,7 +3,8 @@ use std::os::windows::ffi::OsStringExt;
 use std::os::windows::process::CommandExt;
 use std::sync::OnceLock;
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
 
 #[allow(clippy::upper_case_acronyms)]
@@ -1806,6 +1807,22 @@ pub fn shell_notify_delete(hwnd: isize) -> bool {
     nid.uID = 1;
     // SAFETY: Shell_NotifyIconW with NIM_DELETE.
     unsafe { Shell_NotifyIconW(NIM_DELETE, &nid) != 0 }
+}
+
+/// Rewrites the tray hover text; SAFETY hwnd must match add handle.
+pub fn shell_notify_modify_tip(hwnd: isize, tip: &str) -> bool {
+    let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd as *mut core::ffi::c_void;
+    nid.uID = 1;
+    nid.uFlags = NIF_TIP;
+    let tip_wide = to_wide(tip);
+    let copy_len = tip_wide.len().min(127);
+    nid.szTip[..copy_len].copy_from_slice(&tip_wide[..copy_len]);
+    // Keep buffer NUL-terminated when tip exceeds limit.
+    nid.szTip[copy_len] = 0;
+    // SAFETY: Shell_NotifyIconW with valid NID.
+    unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) != 0 }
 }
 
 /// Posts message to window queue; SAFETY hwnd must be valid.

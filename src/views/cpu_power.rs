@@ -191,6 +191,26 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
         ]
         .spacing(4),
     );
+    // Turbo telemetry is display-only: current/limit, whichever was readable.
+    let turbo_text = match (info.turbo_now_ghz, info.turbo_limit_ghz) {
+        (None, None) => None,
+        (Some(n), Some(l)) => Some(format!("{:.1} / {:.1} GHz", n, l)),
+        (Some(n), None) => Some(format!("{:.1} GHz", n)),
+        (None, Some(l)) => Some(format!("max {:.1} GHz", l)),
+    };
+    if let Some(t) = turbo_text {
+        content = content.push(
+            row![
+                text("  Turbo:".to_string()).size(FONT_BODY),
+                text(t).size(FONT_BODY).style(move |_theme| {
+                    iced::widget::text::Style {
+                        color: Some(pal.header),
+                    }
+                }),
+            ]
+            .spacing(4),
+        );
+    }
     content = content.push(
         text("MSR-controlled (MMIO mirror is read-only)")
             .size(FONT_SMALL)

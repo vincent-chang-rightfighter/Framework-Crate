@@ -1,6 +1,7 @@
 use super::{App, Message, PL_RESET_RETRY_MS, refresh_cpu_power_task, tick_task};
 use crate::style::{IDLE_THRESHOLD_MS, UI_HIDDEN_INTERVAL_MS, UI_IDLE_INTERVAL_MS};
 use crate::system_info;
+use crate::util::read_lock;
 use iced::Task;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -145,6 +146,16 @@ impl App {
             } else {
                 // Retry icon creation until tray thread is ready.
                 self.tray.show_icon_async();
+                // Hover text carries the hottest non-battery temp; throttled
+                // inside update_tip so ticks stay cheap.
+                if self.tray.icon_loaded() {
+                    let max_temp = read_lock(&self.state.thermal.data)
+                        .as_ref()
+                        .as_ref()
+                        .and_then(|t| crate::types::curve_control_temp(&t.temps, &[]));
+                    self.tray
+                        .update_tip(&crate::tray::format_tray_tip(max_temp));
+                }
                 // Validate HWND every 5s to avoid frequent syscalls.
                 const HWND_CHECK_INTERVAL_MS: u64 = 5000;
                 if now_ms.saturating_sub(self.last_hwnd_check_ts) >= HWND_CHECK_INTERVAL_MS {

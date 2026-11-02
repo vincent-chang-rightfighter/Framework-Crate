@@ -84,6 +84,9 @@ pub struct PeripheralState {
     pub pd_ports_history: Arc<RwLock<Arc<PdPortsHistory>>>,
     /// NOTE: Ports once seen as Sink are permanently USB-C.
     pub pd_usb_c_seen: Arc<RwLock<Arc<Vec<bool>>>>,
+    /// Physical camera/mic privacy switches, refreshed on the slow
+    /// peripheral cadence.
+    pub privacy: Arc<RwLock<Arc<Option<cli::ec_wrapper::PrivacySwitches>>>>,
 }
 
 impl Default for PeripheralState {
@@ -94,6 +97,7 @@ impl Default for PeripheralState {
             pd_ports: Arc::new(RwLock::new(Arc::new(SmallVec::new()))),
             pd_ports_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
             pd_usb_c_seen: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            privacy: Arc::new(RwLock::new(Arc::new(None))),
         }
     }
 }
@@ -104,6 +108,7 @@ pub struct PeripheralSnapshot {
     pub pd_ports: Arc<SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>,
     pub pd_ports_history: Arc<PdPortsHistory>,
     pub pd_usb_c_seen: Arc<Vec<bool>>,
+    pub privacy: Arc<Option<cli::ec_wrapper::PrivacySwitches>>,
 }
 
 impl PeripheralState {
@@ -114,6 +119,7 @@ impl PeripheralState {
             pd_ports: Arc::clone(&read_lock(&self.pd_ports)),
             pd_ports_history: Arc::clone(&read_lock(&self.pd_ports_history)),
             pd_usb_c_seen: Arc::clone(&read_lock(&self.pd_usb_c_seen)),
+            privacy: Arc::clone(&read_lock(&self.privacy)),
         }
     }
 }

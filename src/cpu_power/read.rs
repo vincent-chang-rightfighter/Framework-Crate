@@ -25,6 +25,24 @@ pub(super) fn decode_rapl_units(raw: u64) -> (f64, f64) {
     (power_unit, time_unit)
 }
 
+/// Reference clock for turbo ratios. Meteor Lake (and all recent client
+/// Intel CPUs) run BCLK at 100MHz.
+const TURBO_BCLK_GHZ: f64 = 0.1;
+
+/// Decodes the 1-core-max turbo ratio from MSR_TURBO_RATIO_LIMIT (0x1AD):
+/// eight per-group bytes, LE byte 0 covers 1 active core. `None` when no
+/// group reports a ratio.
+pub(super) fn decode_turbo_limit_ghz(raw: u64) -> Option<f64> {
+    let max_ratio = (0..8).map(|i| (raw >> (i * 8)) & 0xFF).max()?;
+    (max_ratio > 0).then_some(max_ratio as f64 * TURBO_BCLK_GHZ)
+}
+
+/// Decodes the current operating ratio from IA32_PERF_STATUS (0x198[15:8]).
+pub(super) fn decode_turbo_now_ghz(raw: u64) -> Option<f64> {
+    let ratio = (raw >> 8) & 0xFF;
+    (ratio > 0).then_some(ratio as f64 * TURBO_BCLK_GHZ)
+}
+
 /// Reads MSR 0x606 live, so writes never trust persisted RAPL units.
 pub(super) fn read_rapl_units() -> Result<(f64, f64), String> {
     let blob = load_intel_msr_blob().map_err(|e| e.to_string())?;
@@ -96,6 +114,31 @@ pub(super) fn read_cpu_power() -> CpuPowerInfo {
             }
             Err(reason) => {
                 debug!("MSR 0x614 unavailable, time-window bounds unknown: {reason:?}");
+            }
+        }
+    }
+
+    // Turbo ratio telemetry (0x1AD limit, 0x198 current). Best-effort and
+    // display-only like the 0x614 bounds above: failure keeps the old
+    // behavior and never trips availability or any write decision.
+    if let Some(ref handle) = msr_handle {
+        let mut out = [0u64; 1];
+        match exec_ioctl(handle, "ioctl_read_msr", &[0x1AD], &mut out) {
+            Ok(_) => {
+                info.turbo_limit_ghz = decode_turbo_limit_ghz(out[0]);
+                debug!("Turbo ratio limit: {:?}", info.turbo_limit_ghz);
+            }
+            Err(reason) => {
+                debug!("MSR 0x1AD unavailable, turbo limit unknown: {reason:?}");
+            }
+        }
+        match exec_ioctl(handle, "ioctl_read_msr", &[0x198], &mut out) {
+            Ok(_) => {
+                info.turbo_now_ghz = decode_turbo_now_ghz(out[0]);
+                debug!("Turbo current ratio: {:?}", info.turbo_now_ghz);
+            }
+            Err(reason) => {
+                debug!("MSR 0x198 unavailable, current turbo unknown: {reason:?}");
             }
         }
     }
@@ -199,6 +242,22 @@ mod tests {
         let (power_unit, time_unit) = decode_rapl_units(raw);
         assert!((power_unit - 0.125).abs() < 1e-12);
         assert!((time_unit - 1.0 / 1024.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn decode_turbo_limit_takes_max_group() {
+        // LE byte 0 covers 1 active core: groups 48..34, max 48 -> 4.8GHz.
+        let v = decode_turbo_limit_ghz(0x222426282A2C2E30).expect("limit");
+        assert!((v - 4.8).abs() < 1e-9, "got {v}");
+        assert_eq!(decode_turbo_limit_ghz(0), None);
+    }
+
+    #[test]
+    fn decode_turbo_now_reads_perf_status_ratio() {
+        // IA32_PERF_STATUS[15:8] = 12 -> 1.2GHz.
+        let v = decode_turbo_now_ghz(0x0C00).expect("now");
+        assert!((v - 1.2).abs() < 1e-9, "got {v}");
+        assert_eq!(decode_turbo_now_ghz(0), None);
     }
 
     #[test]

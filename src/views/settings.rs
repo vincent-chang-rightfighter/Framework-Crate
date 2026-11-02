@@ -40,6 +40,10 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
             hw_content = hw_content.push(text("No device info available").size(FONT_BODY));
         }
     }
+    // Board revision is SMBIOS, not EC: no fetch state, read directly.
+    if let Some(rev) = framework_lib::smbios::get_baseboard_version() {
+        hw_content = hw_content.push(info_row("Board", &format!("{:?}", rev)));
+    }
     let cpu = &app.system_info.cpu;
     let mem = &app.system_info.mem;
     let res = &app.system_info.screen;

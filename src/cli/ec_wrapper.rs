@@ -32,6 +32,9 @@ pub struct BatteryData {
     pub charger_current_ma: Option<u32>,
     pub chg_input_current_ma: Option<u32>,
     pub charger_temp_c: Option<f32>,
+    /// Battery cutoff (ship mode) engaged. Best-effort like the charger
+    /// fields; `None` hides the row.
+    pub cutoff: Option<bool>,
     pub design_capacity_mah: Option<u32>,
     pub design_capacity_wh: Option<f32>,
     pub cycle_count: Option<u32>,
@@ -68,6 +71,14 @@ pub struct SmartBatteryData {
     pub lifetime1: Vec<u8>,
     pub lifetime4: Vec<u8>,
     pub lifetime5: Vec<u8>,
+}
+
+/// Physical camera/microphone privacy switch state. `true` means the
+/// device is enabled/connected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrivacySwitches {
+    pub mic: bool,
+    pub camera: bool,
 }
 
 /// Cell imbalance warn threshold (mV), mirroring framework_lib's analysis.
@@ -481,6 +492,9 @@ pub trait EcHw: Send + Sync {
     fn smart_battery(&self) -> Result<SmartBatteryData, String>;
     /// Active PD controller firmware versions, one per controller.
     fn pd_fw_versions(&self) -> Result<Vec<String>, String>;
+    /// Physical privacy switch state. Switches move rarely; callers poll at
+    /// most on the slow peripheral cadence, never the 5s battery poll.
+    fn privacy_switches(&self) -> Result<PrivacySwitches, String>;
 }
 
 fn sensor_name_for_index(platform: Option<Platform>, index: usize) -> String {
@@ -692,6 +706,9 @@ impl EcHw for EcClient {
                 data.chg_input_current_ma = Some(res.chg_input_current);
             }
         }
+
+        // Cutoff (ship mode) state: same best-effort single command.
+        data.cutoff = power::get_cutoff_status(&self.ec);
 
         Ok(data)
     }
@@ -979,6 +996,14 @@ impl EcHw for EcClient {
             .map(|fw| pd_version_string(&fw.active_fw()))
             .collect())
     }
+
+    fn privacy_switches(&self) -> Result<PrivacySwitches, String> {
+        let (mic, camera) = self
+            .ec
+            .get_privacy_info()
+            .map_err(|e| format!("privacy switches read failed: {:?}", e))?;
+        Ok(PrivacySwitches { mic, camera })
+    }
 }
 
 #[cfg(test)]
@@ -1259,6 +1284,14 @@ pub(crate) mod tests {
             self.record("pd_fw_versions".to_string());
             Ok(vec!["3.6.0.115".to_string(), "3.6.0.115".to_string()])
         }
+
+        fn privacy_switches(&self) -> Result<PrivacySwitches, String> {
+            self.record("privacy_switches".to_string());
+            Ok(PrivacySwitches {
+                mic: true,
+                camera: false,
+            })
+        }
     }
 
     #[test]
@@ -1425,6 +1458,25 @@ pub(crate) mod tests {
             },
         };
         assert_eq!(pd_version_string(&legacy), legacy.app.to_string());
+    }
+
+    #[test]
+    fn mock_serves_privacy_switches() {
+        let mock = MockEc::new();
+        let ec: &dyn EcHw = &mock;
+        assert_eq!(
+            ec.privacy_switches().unwrap(),
+            PrivacySwitches {
+                mic: true,
+                camera: false,
+            }
+        );
+        assert!(
+            mock.ops
+                .lock()
+                .unwrap()
+                .contains(&"privacy_switches".to_string())
+        );
     }
 
     #[test]

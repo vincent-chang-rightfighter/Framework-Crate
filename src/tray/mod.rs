@@ -41,6 +41,22 @@ pub struct TrayManager {
     /// Last WM_COMMAND_READY wake time for retry until icon creation.
     last_notify_at: Option<std::time::Instant>,
     pub(crate) just_restored_at: Option<std::time::Instant>,
+    /// Last tooltip text pushed to the shell, with its push time.
+    last_tip: Option<String>,
+    last_tip_at: Option<std::time::Instant>,
+}
+
+/// Minimum gap between tooltip rewrites; hover text is cached by the
+/// shell, so per-tick updates would only burn syscalls.
+const TIP_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Hover text for the tray icon: app name plus the hottest reading when
+/// thermal data is available.
+pub fn format_tray_tip(max_temp_c: Option<i32>) -> String {
+    match max_temp_c {
+        Some(t) => format!("Framework Crate · {}°C", t),
+        None => "Framework Crate".to_string(),
+    }
 }
 
 /// Retry interval for WM_COMMAND_READY wake-ups while icon creation is pending.
@@ -73,6 +89,8 @@ impl TrayManager {
             reinit_requested_at: None,
             last_notify_at: None,
             just_restored_at: None,
+            last_tip: None,
+            last_tip_at: None,
         }
     }
 
@@ -121,6 +139,10 @@ impl TrayManager {
         self.last_notify_at = None;
         self.init_started_at = Some(std::time::Instant::now());
         self.icon_loaded = false;
+        // Fresh icon comes up with the default tip; drop the cache so the
+        // next update pushes live state instead of skipping as unchanged.
+        self.last_tip = None;
+        self.last_tip_at = None;
     }
 
     /// Posts CreateIcon once pump signals readiness; re-posts every NOTIFY_RETRY_INTERVAL to recover lost wake-ups.
@@ -229,6 +251,8 @@ impl TrayManager {
         self.icon_ready_rx = None;
         self.thread_ready_rx = None;
         self.pending_reinit_hwnd = None;
+        self.last_tip = None;
+        self.last_tip_at = None;
         self.initialized = false;
         self.thread_ready = false;
         self.icon_requested = false;
@@ -241,6 +265,28 @@ impl TrayManager {
 
     pub fn icon_loaded(&self) -> bool {
         self.icon_loaded
+    }
+
+    /// Pushes hover text to the shell icon, throttled to changed text and
+    /// `TIP_UPDATE_INTERVAL`. No-ops until the icon exists; a failed push is
+    /// debug-logged and retried on the next changed text.
+    pub fn update_tip(&mut self, tip: &str) {
+        if !self.initialized || !self.icon_loaded || self.hwnd == 0 {
+            return;
+        }
+        let changed = self.last_tip.as_deref() != Some(tip);
+        let due = self
+            .last_tip_at
+            .is_none_or(|t| t.elapsed() >= TIP_UPDATE_INTERVAL);
+        if !changed || !due {
+            return;
+        }
+        if crate::system_info::shell_notify_modify_tip(self.hwnd, tip) {
+            self.last_tip = Some(tip.to_string());
+            self.last_tip_at = Some(std::time::Instant::now());
+        } else {
+            tracing::debug!("Tray tooltip update failed");
+        }
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -374,6 +420,20 @@ mod tests {
     fn tray_manager_receive_event_none_when_not_init() {
         let tm = TrayManager::new();
         assert_eq!(tm.receive_event(), None);
+    }
+
+    #[test]
+    fn format_tray_tip_shows_temp_or_name_only() {
+        assert_eq!(format_tray_tip(Some(62)), "Framework Crate · 62°C");
+        assert_eq!(format_tray_tip(None), "Framework Crate");
+    }
+
+    #[test]
+    fn update_tip_noops_before_icon_exists() {
+        // Uninitialized manager must not touch the shell (would fail and
+        // log); nothing observable except no panic.
+        let mut tm = TrayManager::new();
+        tm.update_tip("Framework Crate · 62°C");
     }
 
     #[test]

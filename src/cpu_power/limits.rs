@@ -86,6 +86,10 @@ pub struct CpuPowerInfo {
     pub pl2_mmio_enabled: bool,
     pub pl2_mmio_clamped: bool,
     pub pl2_mmio_time_s: f64,
+    /// Turbo ratio telemetry (100MHz BCLK assumed). Best-effort reads that
+    /// never affect availability or any write decision; `None` hides the row.
+    pub turbo_limit_ghz: Option<f64>,
+    pub turbo_now_ghz: Option<f64>,
     /// True when the MMIO mirror was read successfully. Distinguishes a
     /// genuine 0 W/disabled mirror from an unavailable IntelMCHBAR module.
     pub mmio_available: bool,
