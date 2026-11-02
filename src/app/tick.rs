@@ -58,16 +58,32 @@ impl App {
                 .lifecycle
                 .view_dirty
                 .store(false, Ordering::Release);
-            // Ensure CPU power is initialized if needed (non-blocking)
-            if self.cpu_power_supported() {
-                let info = self.state.cpu_power.snapshot();
-                if !info.available {
-                    let cpu_power = self.state.cpu_power.clone();
-                    return Task::batch([
-                        refresh_cpu_power_task(cpu_power, || {}),
-                        tick_task(self.tick_interval_ms),
-                    ]);
-                }
+        }
+
+        // Ensure CPU power is initialized if needed (non-blocking). This runs
+        // every tick (not only startup recovery): PawnIO/modules often become
+        // ready after the one-shot startup refresh already filled empties.
+        if self.cpu_power_supported() {
+            let info = self.state.cpu_power.snapshot();
+            if !info.available {
+                let cpu_power = self.state.cpu_power.clone();
+                return Task::batch([
+                    refresh_cpu_power_task(cpu_power, || {}),
+                    tick_task(self.tick_interval_ms),
+                ]);
+            } else if !self.pl_fields_primed {
+                // Hardware just appeared (the background poll brought it
+                // up without a refresh message): populate the edit boxes
+                // once so they never sit empty on a working machine.
+                // The flag latches in the completion handler, so a failed
+                // refresh retries on the next tick. Later refreshes stay
+                // explicit-only, so in-progress typing is never clobbered
+                // by the poll loop.
+                let cpu_power = self.state.cpu_power.clone();
+                return Task::batch([
+                    refresh_cpu_power_task(cpu_power, || {}),
+                    tick_task(self.tick_interval_ms),
+                ]);
             }
         }
 

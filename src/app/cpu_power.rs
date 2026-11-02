@@ -418,6 +418,12 @@ impl App {
             Message::CpuPowerDataRefreshed => {
                 let info = self.state.cpu_power.snapshot();
                 self.apply_edit_fields_from_snapshot(&info);
+                if info.available {
+                    // Latched once live hardware has populated the boxes;
+                    // the tick loop uses it to fire exactly one catch-up
+                    // refresh when hardware appears without a message.
+                    self.pl_fields_primed = true;
+                }
                 self.infer_pl_custom_applied();
                 self.mark_dirty();
                 Some(Task::none())
@@ -638,6 +644,17 @@ mod tests {
         assert_eq!(app.pl1_edit, "30.0");
         assert_eq!(app.pl2_edit, "35.0");
         assert!(app.pl1_enabled);
+    }
+
+    #[test]
+    fn primed_latches_only_on_live_hardware() {
+        use crate::app::Message;
+        let (mut app, _) = crate::App::new(false);
+        assert!(!app.pl_fields_primed);
+        // Unavailable snapshot: boxes cleared, latch stays open so the tick
+        // loop keeps firing catch-up refreshes.
+        let _ = app.handle_cpu_power_message(&Message::CpuPowerDataRefreshed);
+        assert!(!app.pl_fields_primed);
     }
 
     #[tokio::test]

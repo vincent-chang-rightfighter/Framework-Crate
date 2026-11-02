@@ -256,6 +256,11 @@ pub struct App {
     pub pl2_enabled: bool,
     pub pl1_clamped: bool,
     pub pl2_clamped: bool,
+    /// Latched once a refresh has populated the edit boxes from live
+    /// hardware. Lets the tick loop fire exactly one catch-up refresh when
+    /// hardware appears without a refresh message (background polls never
+    /// send one, so the boxes would otherwise sit empty).
+    pub pl_fields_primed: bool,
     pub cpu_power_error: Option<String>,
     pub ec_op_error: Option<String>,
     pub pl_custom_applied: Arc<std::sync::atomic::AtomicBool>,
@@ -470,6 +475,7 @@ impl App {
             pl2_enabled: true,
             pl1_clamped: false,
             pl2_clamped: false,
+            pl_fields_primed: false,
             cpu_power_error: None,
             ec_op_error: None,
             pl_custom_applied: Arc::new(std::sync::atomic::AtomicBool::new(
