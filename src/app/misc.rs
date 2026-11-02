@@ -135,8 +135,8 @@ impl App {
                 self.height_set = false;
                 Some(Task::none())
             }
-            Message::ToggleExpansionCardDebug => {
-                self.expansion_card_debug = !self.expansion_card_debug;
+            Message::TogglePortsDebug => {
+                self.ports_debug = !self.ports_debug;
                 // Mark dirty; snapshot-backed value.
                 self.mark_dirty();
                 Some(Task::none())
@@ -255,10 +255,6 @@ impl App {
                 if !pd_ports.is_empty() {
                     let history = read_lock(&self.state.peripherals.pd_ports_history);
                     let seen = read_lock(&self.state.peripherals.pd_usb_c_seen);
-                    let cards = read_lock(&self.state.peripherals.expansion_cards);
-                    let dp_card = cards
-                        .iter()
-                        .find(|c| c.name.contains("DisplayPort") || c.name.contains("HDMI"));
                     report.push_str("\n=== PD Ports ===\n");
                     for port in pd_ports.iter() {
                         let ever_seen_sink = seen.get(port.port as usize).copied().unwrap_or(false);
@@ -266,7 +262,6 @@ impl App {
                             port,
                             history.iter().map(|a| a.as_ref().as_slice()),
                             crate::style::STABLE_THRESHOLD,
-                            dp_card.is_some(),
                             ever_seen_sink,
                         );
                         report.push_str(&format!("  Port {}: role={:?}, data={:?}, dp_alt={}, watts={:?}, type=\"{}\", ever_sink={}\n",

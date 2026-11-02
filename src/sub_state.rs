@@ -79,7 +79,6 @@ impl ThermalState {
 #[derive(Clone)]
 pub struct PeripheralState {
     pub kblight: Arc<RwLock<Arc<Option<u32>>>>,
-    pub expansion_cards: Arc<RwLock<Arc<SmallVec<[cli::ec_wrapper::ExpansionCard; 4]>>>>,
     pub pd_ports: Arc<RwLock<Arc<SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>>>,
     pub pd_ports_history: Arc<RwLock<Arc<PdPortsHistory>>>,
     /// NOTE: Ports once seen as Sink are permanently USB-C.
@@ -93,7 +92,6 @@ impl Default for PeripheralState {
     fn default() -> Self {
         Self {
             kblight: Arc::new(RwLock::new(Arc::new(None))),
-            expansion_cards: Arc::new(RwLock::new(Arc::new(SmallVec::new()))),
             pd_ports: Arc::new(RwLock::new(Arc::new(SmallVec::new()))),
             pd_ports_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
             pd_usb_c_seen: Arc::new(RwLock::new(Arc::new(Vec::new()))),
@@ -104,7 +102,6 @@ impl Default for PeripheralState {
 
 pub struct PeripheralSnapshot {
     pub kblight: Arc<Option<u32>>,
-    pub expansion_cards: Arc<SmallVec<[cli::ec_wrapper::ExpansionCard; 4]>>,
     pub pd_ports: Arc<SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>,
     pub pd_ports_history: Arc<PdPortsHistory>,
     pub pd_usb_c_seen: Arc<Vec<bool>>,
@@ -115,7 +112,6 @@ impl PeripheralState {
     pub fn snapshot(&self) -> PeripheralSnapshot {
         PeripheralSnapshot {
             kblight: Arc::clone(&read_lock(&self.kblight)),
-            expansion_cards: Arc::clone(&read_lock(&self.expansion_cards)),
             pd_ports: Arc::clone(&read_lock(&self.pd_ports)),
             pd_ports_history: Arc::clone(&read_lock(&self.pd_ports_history)),
             pd_usb_c_seen: Arc::clone(&read_lock(&self.pd_usb_c_seen)),

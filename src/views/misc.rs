@@ -68,7 +68,7 @@ pub(crate) fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
     content = content.push(ports_section(snap));
 
     let right_pad = iced::Padding::ZERO.right(14.0);
-    let max_h = if snap.expansion_card_debug {
+    let max_h = if snap.ports_debug {
         500.0
     } else {
         MISC_SECTION_MAX_HEIGHT
@@ -163,13 +163,12 @@ pub(crate) fn privacy_section(snap: &ViewSnapshot) -> Element<'_, Message> {
 }
 
 pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
-    let cards = &snap.expansion_cards;
     let ports = &snap.pd_ports;
     let history = &snap.pd_ports_history;
     let pal = snap.palette;
     let mut content =
         column![
-            text("Ports & Expansion Cards")
+            text("Ports")
                 .size(FONT_SECTION)
                 .style(move |_theme| iced::widget::text::Style {
                     color: Some(pal.header)
@@ -177,25 +176,22 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
         ]
         .spacing(2);
 
-    if ports.is_empty() && cards.is_empty() {
+    // Card names have no EC source (the enumeration was always empty), so
+    // every label below is inferred from PD state alone.
+    if ports.is_empty() {
         content = content.push(text("None detected").size(FONT_BODY).style(move |_theme| {
             iced::widget::text::Style {
                 color: Some(pal.gray),
             }
         }));
-        if snap.expansion_card_debug {
-            content = content.push(
-                text("[Debug] No ports or expansion cards detected")
-                    .size(FONT_SMALL)
-                    .style(move |_theme| iced::widget::text::Style {
-                        color: Some(pal.gray),
-                    }),
-            );
+        if snap.ports_debug {
+            content = content.push(text("[Debug] No ports detected").size(FONT_SMALL).style(
+                move |_theme| iced::widget::text::Style {
+                    color: Some(pal.gray),
+                },
+            ));
         }
     } else {
-        let dp_card = cards
-            .iter()
-            .find(|c| c.name.contains("DisplayPort") || c.name.contains("HDMI"));
         for port in ports.iter() {
             let ever_seen_sink = snap
                 .pd_usb_c_seen
@@ -206,43 +202,25 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 port,
                 history.iter().map(|a| a.as_ref().as_slice()),
                 STABLE_THRESHOLD,
-                dp_card.is_some(),
                 ever_seen_sink,
             );
             let is_display_card = card_type == "DisplayPort Expansion Card"
                 || card_type == "HDMI Expansion Card"
                 || card_type == "DP/HDMI Expansion Card";
-            let display_type = if card_type == "DP/HDMI Expansion Card" {
-                dp_card.map(|c| c.name.as_str()).unwrap_or(card_type)
-            } else {
-                card_type
-            };
 
             let mut row_content =
-                row![text(format!("Port {} ({})", port.port, display_type)).size(FONT_BODY),]
+                row![text(format!("Port {} ({})", port.port, card_type)).size(FONT_BODY),]
                     .align_y(iced::Alignment::Center)
                     .spacing(6);
-            if port.dp_alt_mode || is_display_card {
-                if let Some(card) = dp_card {
-                    if let Some(ref fw) = card.active_firmware {
-                        row_content =
-                            row_content.push(text(format!("v{}", fw)).size(FONT_SMALL).style(
-                                move |_theme| iced::widget::text::Style {
-                                    color: Some(pal.gray),
-                                },
-                            ));
+            if port.dp_alt_mode {
+                let badge = pal.header;
+                row_content = row_content.push(text("DP").size(FONT_SMALL).style(move |_theme| {
+                    iced::widget::text::Style {
+                        // Badge text follows the theme header instead of
+                        // fixed sensor blue (low contrast on Light).
+                        color: Some(badge),
                     }
-                } else if port.dp_alt_mode {
-                    let badge = pal.header;
-                    row_content =
-                        row_content.push(text("DP").size(FONT_SMALL).style(move |_theme| {
-                            iced::widget::text::Style {
-                                // Badge text follows the theme header instead of
-                                // fixed sensor blue (low contrast on Light).
-                                color: Some(badge),
-                            }
-                        }));
-                }
+                }));
             }
             content = content.push(row_content);
             if port.pd_contract
@@ -260,7 +238,7 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                         .style(move |_theme| iced::widget::text::Style { color: Some(color) }),
                 );
             }
-            if snap.expansion_card_debug {
+            if snap.ports_debug {
                 let dp_alt_str = if port.dp_alt_mode { "DP_ALT" } else { "" };
                 let role_str = port.power_role.unwrap_or("?");
                 let data_str = port.data_role.unwrap_or("?");
@@ -277,45 +255,6 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                         color: Some(pal.gray),
                     }
                 }));
-            }
-        }
-
-        for card in cards.iter().filter(|c| c.name.contains("Audio")) {
-            let mut row_content = row![
-                colored_dot(pal.green, 8.0),
-                text(card.name.as_str()).size(FONT_BODY),
-            ]
-            .align_y(iced::Alignment::Center)
-            .spacing(6);
-            if let Some(ref fw) = card.active_firmware {
-                row_content = row_content.push(text(format!("v{}", fw)).size(FONT_SMALL).style(
-                    move |_theme| iced::widget::text::Style {
-                        color: Some(pal.gray),
-                    },
-                ));
-            }
-            content = content.push(row_content);
-            if snap.expansion_card_debug {
-                let fw_str = card.active_firmware.as_deref().unwrap_or("N/A");
-                content = content.push(
-                    text(format!("  [Debug] name={} fw={}", card.name, fw_str))
-                        .size(FONT_SMALL)
-                        .style(move |_theme| iced::widget::text::Style {
-                            color: Some(pal.gray),
-                        }),
-                );
-            }
-        }
-        for card in cards.iter().filter(|c| !c.name.contains("Audio")) {
-            if snap.expansion_card_debug {
-                let fw_str = card.active_firmware.as_deref().unwrap_or("N/A");
-                content = content.push(
-                    text(format!("  [Debug] {} fw={}", card.name, fw_str))
-                        .size(FONT_SMALL)
-                        .style(move |_theme| iced::widget::text::Style {
-                            color: Some(pal.gray),
-                        }),
-                );
             }
         }
     }

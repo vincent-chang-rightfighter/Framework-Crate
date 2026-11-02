@@ -151,13 +151,13 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     );
 
     let mut content = column![].spacing(8);
-    let ec_debug = app.expansion_card_debug;
+    let ec_debug = app.ports_debug;
     let diagnostics = column![
         section_title(pal, "Diagnostics"),
         row![
-            text("Expansion Card Debug Mode:").size(FONT_BODY),
+            text("Ports Debug Mode:").size(FONT_BODY),
             button(text(if ec_debug { "ON" } else { "OFF" }).size(FONT_BODY))
-                .on_press(Message::ToggleExpansionCardDebug)
+                .on_press(Message::TogglePortsDebug)
                 .style(move |theme, status| mode_style(theme, status, ec_debug)),
         ]
         .spacing(8)

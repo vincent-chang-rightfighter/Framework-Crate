@@ -517,7 +517,6 @@ pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<dyn c
     let kblight_ref = Arc::clone(&state.peripherals.kblight);
     let pd_ports_ref = Arc::clone(&state.peripherals.pd_ports);
     let pd_history_ref = Arc::clone(&state.peripherals.pd_ports_history);
-    let exp_ref = Arc::clone(&state.peripherals.expansion_cards);
     let mut ec_alive = true;
     let thermal = read_ec(&mut ec_alive, "thermal", || {
         crate::ec_serial::exec(
@@ -555,15 +554,6 @@ pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<dyn c
         )
     })
     .await;
-    let exp_cards = read_ec(&mut ec_alive, "expansion cards", || {
-        crate::ec_serial::exec(
-            "refresh-expansion-cards",
-            crate::util::EC_IO_TIMEOUT,
-            Arc::clone(ec),
-            |ec| Ok::<_, String>(ec.expansion_cards()),
-        )
-    })
-    .await;
 
     if let Some(t) = thermal {
         record_thermal_sample(state, t);
@@ -587,11 +577,6 @@ pub(crate) async fn refresh_all_data(state: &AppState, ec: &std::sync::Arc<dyn c
     if let Some(ports) = pd_ports {
         with_write_lock(&pd_ports_ref, |guard| {
             *guard = Arc::new(ports);
-        });
-    }
-    if let Some(cards) = exp_cards {
-        with_write_lock(&exp_ref, |guard| {
-            *guard = Arc::new(cards);
         });
     }
     mark_pd_usb_c_seen(&read_lock(&pd_ports_ref), &state.peripherals.pd_usb_c_seen);
@@ -660,9 +645,8 @@ pub fn spawn(state: AppState) {
                 let mut consecutive_ec_write_failures: u32 = 0;
                 // Last successful duty write time for periodic re-assert.
                 let mut last_duty_write_ms: u64 = 0;
-                // Last successful PD/expansion scan times for staleness.
+                // Last successful PD scan time for staleness.
                 let mut last_pd_success_ms: u64 = 0;
-                let mut last_expansion_success_ms: u64 = 0;
                 // Last curve fail-safe handover time.
                 let mut last_handover_ms: u64 = 0;
                 // True on iteration after resume to re-assert manual control.
@@ -1044,7 +1028,7 @@ pub fn spawn(state: AppState) {
                         }
                     }
 
-                    // Expansion/PD scans; lengthen interval when hidden to save power.
+                    // PD/privacy scans; lengthen interval when hidden to save power.
                     now_ms = crate::util::monotonic_ms();
                     let expansion_interval = if bg_state2.lifecycle.visible.load(Ordering::Acquire)
                     {
@@ -1104,43 +1088,6 @@ pub fn spawn(state: AppState) {
                                             }
                                         });
                                     }
-                                }
-                            }
-                        }
-                        let ec_clone = Arc::clone(&ec);
-                        match crate::ec_serial::exec(
-                            "expansion_cards",
-                            crate::util::EC_IO_TIMEOUT,
-                            ec_clone,
-                            move |ec| ec.expansion_cards(),
-                        )
-                        .await
-                        {
-                            Ok(cards) => {
-                                last_expansion_success_ms = crate::util::monotonic_ms();
-                                with_write_lock(&bg_state2.peripherals.expansion_cards, |guard| {
-                                    if **guard != cards {
-                                        *guard = Arc::new(cards);
-                                        mark_view_dirty(&bg_state2);
-                                    }
-                                });
-                            }
-                            Err(e) => {
-                                warn!("Expansion cards read failed: {}", e);
-                                if last_expansion_success_ms != 0
-                                    && crate::util::monotonic_ms()
-                                        .saturating_sub(last_expansion_success_ms)
-                                        > 30_000
-                                {
-                                    with_write_lock(
-                                        &bg_state2.peripherals.expansion_cards,
-                                        |guard| {
-                                            if !guard.is_empty() {
-                                                *guard = Arc::new(smallvec::SmallVec::new());
-                                                mark_view_dirty(&bg_state2);
-                                            }
-                                        },
-                                    );
                                 }
                             }
                         }

@@ -147,7 +147,7 @@ pub enum Message {
     CheckForUpdates,
     UpdateCheckDone(Result<Option<String>, String>),
     ThemeChanged(crate::style::ThemeId),
-    ToggleExpansionCardDebug,
+    TogglePortsDebug,
     StartupLaunchToggled(bool),
     StartupLaunchSet(bool, Result<(), String>),
     StartupLaunchQueried(bool),
@@ -194,7 +194,7 @@ pub struct App {
     /// User dismissed the save-failure banner; keep it hidden until a new
     /// save attempt is made.
     pub config_save_dismissed: bool,
-    pub expansion_card_debug: bool,
+    pub ports_debug: bool,
     pub startup_launch_enabled: bool,
     pub startup_launch_touched: bool,
     pub startup_launch_error: Option<String>,
@@ -350,7 +350,6 @@ impl App {
             },
             peripherals: PeripheralState {
                 kblight: Arc::new(RwLock::new(Arc::new(None))),
-                expansion_cards: Arc::new(RwLock::new(Arc::new(smallvec::SmallVec::new()))),
                 pd_ports: Arc::new(RwLock::new(Arc::new(smallvec::SmallVec::new()))),
                 pd_ports_history: Arc::new(RwLock::new(Arc::new(VecDeque::new()))),
                 pd_usb_c_seen: Arc::new(RwLock::new(Arc::new(Vec::new()))),
@@ -420,7 +419,7 @@ impl App {
             init_complete: false,
             config_save_failed: false,
             config_save_dismissed: false,
-            expansion_card_debug: false,
+            ports_debug: false,
             startup_launch_enabled: false,
             startup_launch_touched: false,
             startup_launch_error: None,

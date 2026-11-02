@@ -278,12 +278,6 @@ pub fn detect_platform() -> PlatformFamily {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ExpansionCard {
-    pub name: String,
-    pub active_firmware: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct UsbCPort {
     pub port: u32,
     pub pd_contract: bool,
@@ -303,7 +297,7 @@ fn is_low_power_display_source(watts: Option<f32>) -> bool {
     matches!(watts, Some(w) if w > 0.0 && w <= HDMI_SOURCE_WATTS_MAX)
 }
 
-fn classify_display_source(watts: Option<f32>, _prefer_named: bool) -> &'static str {
+fn classify_display_source(watts: Option<f32>) -> &'static str {
     match watts {
         Some(w) if w <= DISPLAY_CARD_WATTS_THRESHOLD => "DisplayPort Expansion Card",
         Some(_) => "HDMI Expansion Card",
@@ -351,7 +345,6 @@ pub fn classify_pd_port<'a>(
     port: &UsbCPort,
     history: impl IntoIterator<Item = &'a [UsbCPort]>,
     stable_threshold: usize,
-    display_card_installed: bool,
     ever_seen_sink: bool,
 ) -> &'static str {
     const MAX_HIST: usize = 3;
@@ -368,14 +361,13 @@ pub fn classify_pd_port<'a>(
 
     if tracing::enabled!(tracing::Level::DEBUG) {
         tracing::debug!(
-            "[classify] Port {}: role={:?}, pd_contract={}, dp_alt={}, watts={:?}, hist_len={}, display_card={}",
+            "[classify] Port {}: role={:?}, pd_contract={}, dp_alt={}, watts={:?}, hist_len={}",
             port.port,
             port.power_role,
             port.pd_contract,
             port.dp_alt_mode,
             port.negotiated_watts,
             hist_len,
-            display_card_installed
         );
     }
 
@@ -387,7 +379,7 @@ pub fn classify_pd_port<'a>(
         return "USB-C Expansion Card";
     }
     if port.dp_alt_mode {
-        let result = classify_display_source(port.negotiated_watts, true);
+        let result = classify_display_source(port.negotiated_watts);
         tracing::debug!(
             "[classify] Port {} → {} (dp_alt, watts={:?})",
             port.port,
@@ -398,8 +390,10 @@ pub fn classify_pd_port<'a>(
     }
     if port.pd_contract && role_is(port, "Source") {
         // HDMI/DP can omit DP-alt but still draw ~3-5W Source; charging starts at 7.5W.
-        if display_card_installed || is_low_power_display_source(port.negotiated_watts) {
-            let result = classify_display_source(port.negotiated_watts, display_card_installed);
+        // (The old display-card-installed override is gone with the card
+        // enumeration: watts alone decide now.)
+        if is_low_power_display_source(port.negotiated_watts) {
+            let result = classify_display_source(port.negotiated_watts);
             tracing::debug!(
                 "[classify] Port {} → {} (Source+PD, no dp_alt, watts={:?})",
                 port.port,
@@ -483,7 +477,6 @@ pub trait EcHw: Send + Sync {
     fn fp_led_level_set(&self, level: &str) -> Result<(), String>;
     fn charge_limit_set(&self, min_pct: u8, max_pct: u8) -> Result<(), String>;
     fn pd_ports(&self) -> SmallVec<[UsbCPort; 4]>;
-    fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]>;
     /// Liveness ping: cheap EC echo used as a tiebreaker before tearing
     /// down the client after repeated read failures.
     fn hello(&self) -> Result<(), String>;
@@ -948,12 +941,6 @@ impl EcHw for EcClient {
         ports
     }
 
-    fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]> {
-        // framework_lib does not expose expansion-card enumeration; keep the
-        // trait contract empty until a real EC source is available.
-        SmallVec::new()
-    }
-
     fn smart_battery(&self) -> Result<SmartBatteryData, String> {
         use framework_lib::smart_battery::SmartBattery;
         let raw = SmartBattery::new()
@@ -1071,7 +1058,7 @@ pub(crate) mod tests {
     fn hdmi_source_without_dp_alt_is_hdmi() {
         let p = port("Source", true, false, Some(3.4));
         assert_eq!(
-            classify_pd_port(&p, std::iter::empty(), 2, false, false),
+            classify_pd_port(&p, std::iter::empty(), 2, false),
             "HDMI Expansion Card"
         );
     }
@@ -1080,7 +1067,7 @@ pub(crate) mod tests {
     fn displayport_low_watt_source() {
         let p = port("Source", true, true, Some(2.5));
         assert_eq!(
-            classify_pd_port(&p, std::iter::empty(), 2, false, false),
+            classify_pd_port(&p, std::iter::empty(), 2, false),
             "DisplayPort Expansion Card"
         );
     }
@@ -1089,7 +1076,7 @@ pub(crate) mod tests {
     fn usbc_default_source_stays_usbc() {
         let p = port("Source", true, false, Some(7.5));
         assert_eq!(
-            classify_pd_port(&p, std::iter::empty(), 2, false, false),
+            classify_pd_port(&p, std::iter::empty(), 2, false),
             "USB-C Expansion Card"
         );
     }
@@ -1098,7 +1085,7 @@ pub(crate) mod tests {
     fn sink_pd_is_usbc() {
         let p = port("Sink", true, false, Some(65.0));
         assert_eq!(
-            classify_pd_port(&p, std::iter::empty(), 2, false, false),
+            classify_pd_port(&p, std::iter::empty(), 2, false),
             "USB-C Expansion Card"
         );
     }
@@ -1109,7 +1096,7 @@ pub(crate) mod tests {
         let p = port("Source", false, false, Some(7.5));
         let hist = [vec![port("Sink", false, false, None)]];
         assert_eq!(
-            classify_pd_port(&p, hist.iter().map(|v| v.as_slice()), 2, false, true),
+            classify_pd_port(&p, hist.iter().map(|v| v.as_slice()), 2, true),
             "USB-C Expansion Card"
         );
     }
@@ -1122,7 +1109,7 @@ pub(crate) mod tests {
             vec![port("Source", false, false, Some(7.5))],
         ];
         assert_eq!(
-            classify_pd_port(&p, hist.iter().map(|v| v.as_slice()), 2, false, false),
+            classify_pd_port(&p, hist.iter().map(|v| v.as_slice()), 2, false),
             "USB-A Expansion Card"
         );
     }
@@ -1253,11 +1240,6 @@ pub(crate) mod tests {
 
         fn pd_ports(&self) -> SmallVec<[UsbCPort; 4]> {
             self.record("pd_ports".to_string());
-            SmallVec::new()
-        }
-
-        fn expansion_cards(&self) -> SmallVec<[ExpansionCard; 4]> {
-            self.record("expansion_cards".to_string());
             SmallVec::new()
         }
 
