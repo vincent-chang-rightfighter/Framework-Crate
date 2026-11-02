@@ -28,13 +28,13 @@ Download the `.exe`, then run it as administrator. PawnIO is optional and only n
 
 ## Features
 
-- **Fan Control** — Auto (firmware), manual (0–100% duty, optional per-fan), and curve mode with draggable points on a canvas (default 5 points, hysteresis, and rate limiting; live sensor markers shown on the curve)
-- **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity
+- **Fan Control** — Auto (firmware), manual (0–100% duty, optional per-fan; at or above 95°C duty is floored at 90%), and curve mode with draggable points on a canvas (default 5 points, hysteresis, and rate limiting; live sensor markers shown on the curve)
+- **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity. Details shows charger voltage/input on AC plus smart-battery data (per-cell voltages, pack temperature, safety alerts) when readable
 - **Live Telemetry** — Real-time temperature chart (selectable 15/30/60s window, default 30s), per-sensor display with colored indicators, and fan RPM in the header
-- **Misc Panel** — Keyboard backlight slider, fingerprint LED level, and USB-C / HDMI / DP port classification from PD state (expansion-card firmware enumeration is not implemented yet)
-- **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download); original factory limits are saved on the first run while on AC for `Reset`. Writes go to MSR 0x610 only: the official IntelMCHBAR module is read-only, so the MMIO mirror is displayed but never written. Writes are capped per model (Laptop 12 → 40W, 13 → 70W, 16 → 100W, Desktop → 120W), require ≥5W when enabled, and require PL1 ≤ PL2. AMD and other vendors are not supported.
-- **About Page** — Hardware info (CPU, RAM, display, BIOS), software settings (poll rate, refresh interval, launch at startup), GitHub link, one-click copy buttons for the manual-download URLs, and third-party license notices
-- **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit), icon restored automatically if Explorer restarts
+- **Misc Panel** — Camera/mic privacy switch states, keyboard backlight slider, fingerprint LED level, and USB-C / HDMI / DP port classification inferred from PD state
+- **CPU Power** — Intel CPUs only. Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download); live turbo readout (current/limit GHz) when readable; original factory limits are saved on the first run while on AC for `Reset`. Writes go to MSR 0x610 only: the official IntelMCHBAR module is read-only, so the MMIO mirror is displayed but never written. Writes are capped per model (Laptop 12 → 40W, 13 → 70W, 16 → 100W, Desktop → 120W), require ≥5W when enabled, and require PL1 ≤ PL2. AMD and other vendors are not supported.
+- **About Page** — Hardware info (CPU, RAM, display, BIOS, board revision), PD controller firmware versions, software settings (poll rate, refresh interval, launch at startup), GitHub link, one-click copy buttons for the manual-download URLs, and third-party license notices
+- **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit) and hover tooltip with the current temperature, icon restored automatically if Explorer restarts
 - **Launch at Startup** — Registers a per-user logon task so the tray app comes back after a reboot. The task document is generated in-process and handed to `schtasks /Create /XML`; the settings that matter (unlimited execution limit, battery conditions cleared, restart on failure) are asserted by tests without needing elevation
 - **File Logging** — Warnings and errors are written to `%APPDATA%/framework-crate/app.log` with size-based rotation, because a logon-launched process has no console to print them to
 
