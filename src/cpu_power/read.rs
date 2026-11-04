@@ -3,11 +3,9 @@
 use tracing::debug;
 
 use super::ffi::{exec_ioctl, open_handle};
-use super::limits::{
-    CpuPowerInfo, CpuPowerUnavailable, PowerRegister, decode_power_limit, decode_time_window,
-    decode_time_window_bounds,
-};
+use super::limits::{decode_power_limit, decode_time_window, decode_time_window_bounds};
 use super::modules::{load_intel_mchbar_blob, load_intel_msr_blob};
+use super::types::{CpuPowerInfo, CpuPowerUnavailable, PowerRegister};
 
 /// Records the first cause of failure, so a later, more generic one cannot
 /// mask the root cause.

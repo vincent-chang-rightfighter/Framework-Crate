@@ -4,6 +4,7 @@ mod limits;
 mod modules;
 mod read;
 mod sync;
+mod types;
 
 pub use bios::{BiosDefaults, publish_ac_snapshot, read_ac_present};
 pub use ffi::{
@@ -11,7 +12,6 @@ pub use ffi::{
     update_pawnio, update_pawnio_modules,
 };
 pub use limits::{
-    CpuPowerInfo, CpuPowerUnavailable, LIMIT_MAX_TIME_S, PowerLimitParams,
     pl_limits_differ_from_bios, validate_limit_params, validate_limit_values, write_bios_defaults,
     write_msr_pl1_pl2_public,
 };
@@ -19,6 +19,7 @@ pub use modules::{
     download_and_extract_modules, modules_downloaded, open_modules_dir, pawnio_modules_version,
     redetect_modules,
 };
+pub use types::{CpuPowerInfo, CpuPowerUnavailable, LIMIT_MAX_TIME_S, PowerLimitParams};
 
 use bios::{
     PersistedBios, bios_defaults_valid, load_persisted_bios_defaults, persist_bios_defaults,

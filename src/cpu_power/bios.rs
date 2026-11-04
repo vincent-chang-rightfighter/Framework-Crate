@@ -93,9 +93,8 @@ pub(super) fn bios_defaults_valid(d: &BiosDefaults) -> bool {
     // The MMIO mirror is read-only and never written by this app; only reject
     // clearly malformed values instead of quarantining an otherwise valid MSR
     // snapshot because the factory mirror exceeded the model cap.
-    use super::limits::{
-        LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS, LIMIT_MIN_ENABLED_WATTS, platform_max_watts,
-    };
+    use super::limits::platform_max_watts;
+    use super::types::{LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS, LIMIT_MIN_ENABLED_WATTS};
     let model_max = platform_max_watts();
     let msr_watts = [d.pl1_watts, d.pl2_watts];
     let msr_times = [d.pl1_time_s, d.pl2_time_s];
