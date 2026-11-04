@@ -1,0 +1,47 @@
+name: CodeQL
+
+# Static analysis for Rust. Pinned by SHA like ci.yml: unpinned installs
+# drift with upstream and can break the pipeline without a local change.
+# Runs on push/PR plus a weekly schedule so new CodeQL queries also cover
+# code that has not changed recently.
+on:
+  push:
+    branches: [ master ]
+    paths-ignore:
+      - '**/*.md'
+      - 'images/**'
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'images/**'
+      - 'docs/**'
+  schedule:
+    - cron: '0 3 * * 1'
+
+jobs:
+  analyze:
+    permissions:
+      # Required for code scanning alerts.
+      security-events: write
+      actions: read
+      contents: read
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@a3d1b77a1ba1550fbb5c74db1dc3a11f4a481126 # v3
+        with:
+          languages: rust
+          # Default suite is security-only; quality adds lints like
+          # dead code and shadowing without new infrastructure.
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@a3d1b77a1ba1550fbb5c74db1dc3a11f4a481126 # v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@a3d1b77a1ba1550fbb5c74db1dc3a11f4a481126 # v3
