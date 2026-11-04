@@ -622,10 +622,7 @@ mod tests {
             Some("4.8 / 5.2 GHz".to_string())
         );
         assert_eq!(turbo_text(Some(4.8), None), Some("4.8 GHz".to_string()));
-        assert_eq!(
-            turbo_text(None, Some(5.2)),
-            Some("max 5.2 GHz".to_string())
-        );
+        assert_eq!(turbo_text(None, Some(5.2)), Some("max 5.2 GHz".to_string()));
     }
 
     #[test]

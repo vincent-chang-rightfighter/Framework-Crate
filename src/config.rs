@@ -725,12 +725,7 @@ fn check_nested_unknown(table: &toml::Table) -> Result<(), String> {
         &mut unknown,
     );
     let battery = table.get("battery");
-    check(
-        battery,
-        "battery",
-        &["charge_limit_max_pct"],
-        &mut unknown,
-    );
+    check(battery, "battery", &["charge_limit_max_pct"], &mut unknown);
     check(
         battery
             .and_then(|v| v.as_table())
@@ -1399,23 +1394,17 @@ mod tests {
 
     #[test]
     fn import_strict_rejects_nested_unknown_field() {
-        let err = crate::config::import_strict(
-            "version = 2\n[fan]\nmode = \"curve\"\nbogus = 1\n",
-        )
-        .unwrap_err();
+        let err = crate::config::import_strict("version = 2\n[fan]\nmode = \"curve\"\nbogus = 1\n")
+            .unwrap_err();
         assert!(err.contains("fan.bogus"), "{err}");
-        let err = crate::config::import_strict(
-            "version = 2\n[fan.curve]\nevil = 1\n",
-        )
-        .unwrap_err();
+        let err = crate::config::import_strict("version = 2\n[fan.curve]\nevil = 1\n").unwrap_err();
         assert!(err.contains("fan.curve.evil"), "{err}");
     }
 
     #[test]
     fn import_strict_migrates_older_version() {
         // Old backup (version 0): must migrate through validate(), not reject.
-        let cfg =
-            crate::config::import_strict("version = 0\n[fan]\nmode = \"curve\"\n").unwrap();
+        let cfg = crate::config::import_strict("version = 0\n[fan]\nmode = \"curve\"\n").unwrap();
         assert_eq!(cfg.version, crate::types::CONFIG_VERSION);
         assert_eq!(cfg.fan.mode, FanControlMode::Curve);
         // 4-point legacy curve migrates to 5 editable points.

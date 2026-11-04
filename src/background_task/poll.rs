@@ -322,7 +322,8 @@ pub(super) fn phase_resume(state: &AppState, poll: &mut PollState) -> Phase {
 
 /// Battery read with AC-transition detection and staleness expiry.
 /// UI-only: never resets the EC client and never skips the round.
-pub(super) async fn phase_battery(state: &AppState, ec: &Arc<dyn cli::EcHw>, poll: &mut PollState) {    // Battery polling also drives the AC→battery power-limit
+pub(super) async fn phase_battery(state: &AppState, ec: &Arc<dyn cli::EcHw>, poll: &mut PollState) {
+    // Battery polling also drives the AC→battery power-limit
     // reset, so it must keep running while idle.
     let ec_clone = Arc::clone(ec);
     match crate::ec_serial::exec("power", crate::util::EC_IO_TIMEOUT, ec_clone, move |ec| {
@@ -937,7 +938,8 @@ mod tests {
     }
 
     #[test]
-    fn poll_state_reset_fan_state_clears_ramps() {        use crate::app::AppState;
+    fn poll_state_reset_fan_state_clears_ramps() {
+        use crate::app::AppState;
         use crate::types::FanControlMode;
         let state = AppState {
             system: Default::default(),

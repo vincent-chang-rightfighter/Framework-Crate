@@ -98,12 +98,11 @@ impl App {
                         // the import cannot race it (last-writer-wins on
                         // calibration_tables). The cancel queues an immediate
                         // firmware-handover restore; batch it below.
-                        let wizard_restore: Option<Task<Message>> =
-                            if self.calibration.is_some() {
-                                self.calibration_cancel()
-                            } else {
-                                None
-                            };
+                        let wizard_restore: Option<Task<Message>> = if self.calibration.is_some() {
+                            self.calibration_cancel()
+                        } else {
+                            None
+                        };
                         self.apply_imported_config(&imported.config);
                         // A same-chassis warning is informational, not an
                         // error: fold it into the success line so it is

@@ -266,12 +266,7 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
             // beyond fan_count_now, and their stale duties must not leak
             // into the unified seed / quit-handover baseline.
             if wrote_any {
-                let max_applied = ramp
-                    .iter()
-                    .take(fan_count_now)
-                    .copied()
-                    .max()
-                    .unwrap_or(0);
+                let max_applied = ramp.iter().take(fan_count_now).copied().max().unwrap_or(0);
                 ctx.state
                     .fan
                     .last_applied_duty

@@ -456,8 +456,14 @@ mod tests {
         tm.last_tip = Some("Framework Crate · 62°C".to_string());
         tm.last_tip_at = Some(std::time::Instant::now());
         tm.reset();
-        assert!(tm.last_tip.is_none(), "stale text must not suppress updates");
-        assert!(tm.last_tip_at.is_none(), "stale timestamp must not hide first tip");
+        assert!(
+            tm.last_tip.is_none(),
+            "stale text must not suppress updates"
+        );
+        assert!(
+            tm.last_tip_at.is_none(),
+            "stale timestamp must not hide first tip"
+        );
     }
 
     #[test]

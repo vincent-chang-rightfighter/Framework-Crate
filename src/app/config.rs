@@ -410,8 +410,10 @@ impl App {
     /// lose to its finish.
     pub(crate) fn apply_imported_config(&mut self, cfg: &Config) {
         let cfg = cfg.clone();
-        let old_tables =
-            read_lock(&self.state.lifecycle.config).fan.calibration_tables.clone();
+        let old_tables = read_lock(&self.state.lifecycle.config)
+            .fan
+            .calibration_tables
+            .clone();
         self.mutate_config(|c| *c = cfg);
         let applied = read_lock(&self.state.lifecycle.config).clone();
         self.state
