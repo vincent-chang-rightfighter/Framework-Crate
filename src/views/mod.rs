@@ -44,6 +44,14 @@ pub(crate) struct ViewSnapshot {
     pub per_fan_curve_points: Arc<Vec<Vec<[u32; 2]>>>,
     /// Per-fan runtime curves with lock endpoints, index-aligned with fans.
     pub per_fan_curve_full_points: Arc<crate::sub_state::PerFanCurveFullPoints>,
+    /// Calibration wizard live progress line; `None` when idle.
+    pub calibration_progress: Option<Arc<String>>,
+    /// Last wizard outcome (completed summary or abort reason).
+    pub calibration_status: Option<Arc<String>>,
+    /// Whether a stored calibration table exists (enables Clear).
+    pub has_calibration_table: bool,
+    /// True while the wizard owns EC fan writes (disables Start).
+    pub calibration_busy: bool,
     pub ports_debug: bool,
     pub cpu_power: Arc<crate::cpu_power::CpuPowerInfo>,
     pub sync_enabled: bool,
@@ -89,9 +97,15 @@ impl ViewSnapshot {
         let per_fan_duty = Arc::clone(&read_lock(&app.state.fan.per_fan_duty));
         let per_fan_curve_full_points =
             Arc::clone(&read_lock(&app.state.fan.per_fan_curve_full_points));
+        let (calibration_busy, calibration_progress) = match app.calibration.as_ref() {
+            Some(run) => (true, Some(Arc::new(run.progress_line()))),
+            None => (false, None),
+        };
+        let calibration_status = app.calibration_status.as_ref().map(|s| Arc::new(s.clone()));
         let cpu_power = app.state.cpu_power.snapshot();
         let sync_enabled = app.state.cpu_power.sync_enabled.load(Ordering::Acquire);
         let config = Arc::clone(&read_lock(&app.state.lifecycle.config));
+        let has_calibration_table = config.fan.calibration_tables.iter().any(|t| !t.is_empty());
         let per_fan_curve_points: Arc<Vec<Vec<[u32; 2]>>> = config
             .fan
             .curve
@@ -165,6 +179,10 @@ impl ViewSnapshot {
             per_fan_duty,
             per_fan_curve_points,
             per_fan_curve_full_points,
+            calibration_progress,
+            calibration_status,
+            has_calibration_table,
+            calibration_busy,
             ports_debug: app.ports_debug,
             cpu_power,
             sync_enabled,

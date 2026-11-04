@@ -30,7 +30,7 @@ Download the `.exe`, then run it as administrator. PawnIO is optional and only n
 
 > Note: the Turbo readout, tray tooltip, Privacy switches, board revision, and PD-only Ports display are slated for the unreleased 0.9.4; the 0.9.3 download page matches its tag.
 
-- **Fan Control** — Auto (firmware), manual (0–100% duty, optional per-fan; at or above 95°C duty is floored at 90%), and curve mode with draggable points on a canvas (default 5 points, hysteresis, and rate limiting; live sensor markers shown on the curve; optional per-fan curves on multi-fan machines via the Unified switch)
+- **Fan Control** — Auto (firmware), manual (0–100% duty, optional per-fan; at or above 95°C duty is floored at 90%), and curve mode with draggable points on a canvas (default 5 points, hysteresis, and rate limiting; live sensor markers shown on the curve; optional per-fan curves on multi-fan machines via the Unified switch; calibration wizard measures per-fan RPM tables for accurate ramp seeding)
 - **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity. Details shows charger voltage/input on AC plus smart-battery data (per-cell voltages, pack temperature, safety alerts) when readable
 - **Live Telemetry** — Real-time temperature chart (selectable 15/30/60s window, default 30s), per-sensor display with colored indicators, and fan RPM in the header
 - **Misc Panel** — Camera/mic privacy switch states, keyboard backlight slider, fingerprint LED level, and USB-C / HDMI / DP port classification inferred from PD state
@@ -193,6 +193,7 @@ On the first run while on AC with PawnIO available, the original factory PL1/PL2
 mode = "curve"  # "disabled" | "manual" | "curve"
 unified_duty = true
 per_fan_duty = []
+calibration_tables = []  # wizard-measured [[duty_pct, rpm]] per fan; empty = live max-RPM estimate
 
 [fan.manual]
 duty_pct = 50

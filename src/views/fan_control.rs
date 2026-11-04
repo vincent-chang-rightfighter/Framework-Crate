@@ -65,6 +65,11 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
         let is_disabled = current_mode == FanControlMode::Disabled;
         let is_manual = current_mode == FanControlMode::Manual;
         let is_curve = current_mode == FanControlMode::Curve;
+        let settings_label = if snap.show_curve_settings {
+            "[-] Settings"
+        } else {
+            "[+] Settings"
+        };
         row![
             button(text("Auto").size(FONT_BODY))
                 .on_press(Message::FanModeChanged(FanControlMode::Disabled))
@@ -75,8 +80,13 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
             button(text("Curve").size(FONT_BODY))
                 .on_press(Message::FanModeChanged(FanControlMode::Curve))
                 .style(move |theme, status| mode_style(theme, status, is_curve)),
+            space::horizontal(),
+            button(text(settings_label).size(FONT_BODY))
+                .on_press(Message::ToggleCurveSettings)
+                .style(btn_style),
         ]
         .spacing(8)
+        .width(Length::Fill)
     };
 
     content = content.push(mode_row);
@@ -126,6 +136,11 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                         .style(slider_style),
                 );
             }
+            // Shared settings panel; the items differ per mode (Manual shows
+            // the floor note, Curve its tunables), both end with calibration.
+            if snap.show_curve_settings {
+                content = content.push(manual_settings_view(snap, pal));
+            }
         }
         FanControlMode::Curve => {
             // The unified toggle is shared with Manual (same atomic, same
@@ -148,26 +163,6 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
             if let Some(ref curve) = config.fan.curve {
                 let hyst = curve.curve.hysteresis_c;
                 let rate = curve.curve.rate_limit_pct_per_step;
-
-                let settings_label = if snap.show_curve_settings {
-                    "[-] Settings"
-                } else {
-                    "[+] Settings"
-                };
-                content = content.push(
-                    row![
-                        text("Curve").size(FONT_SECTION).style(move |_theme| {
-                            iced::widget::text::Style {
-                                color: Some(pal.header),
-                            }
-                        }),
-                        space::horizontal(),
-                        button(text(settings_label).size(FONT_SMALL))
-                            .on_press(Message::ToggleCurveSettings)
-                            .style(btn_style),
-                    ]
-                    .align_y(iced::Alignment::Center),
-                );
 
                 let settings_panel: Element<'_, Message> = if snap.show_curve_settings {
                     let mut settings_content = column![].spacing(4).padding(4);
@@ -274,16 +269,8 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                             );
                         }
                     }
-
-                    container(settings_content)
-                        .width(Length::Fill)
-                        .padding(8)
-                        .style(move |_theme| iced::widget::container::Style {
-                            background: Some(pal.settings_bg.into()),
-                            border: iced::Border::default().rounded(4).color(pal.dark).width(1),
-                            ..Default::default()
-                        })
-                        .into()
+                    settings_content = settings_content.push(calibration_view(snap, pal));
+                    settings_frame(settings_content.into(), pal)
                 } else {
                     iced::widget::Space::new().into()
                 };
@@ -324,6 +311,90 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
     }
 
     content.into()
+}
+
+/// Shared calibration block used by both mode settings panels: measures
+/// per-fan RPM at fixed duties so ramp seeds use the real fan instead of
+/// the max-RPM guess.
+fn calibration_view(snap: &ViewSnapshot, pal: Palette) -> Element<'_, Message> {
+    let mut cal = column![
+        text("Calibration").size(FONT_BODY),
+        text("Measures each fan's RPM at fixed duties to seed ramps accurately.")
+            .size(FONT_SMALL)
+            .style(move |_theme| iced::widget::text::Style {
+                color: Some(pal.gray),
+            }),
+    ]
+    .spacing(4);
+    if snap.calibration_busy {
+        if let Some(ref progress) = snap.calibration_progress {
+            cal = cal.push(text(progress.as_str()).size(FONT_BODY));
+        }
+        cal = cal.push(
+            row![
+                button(text("Cancel").size(FONT_BODY))
+                    .on_press(Message::CalibrationCancel)
+                    .style(btn_style),
+                text("Drives all fans 100→0 in 5 steps (~1 min); aborts on heat or cancel.")
+                    .size(FONT_SMALL)
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.gray),
+                    }),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        );
+    } else {
+        if let Some(ref status) = snap.calibration_status {
+            cal = cal.push(text(status.as_str()).size(FONT_BODY));
+        }
+        let mut row = row![
+            button(text("Calibrate").size(FONT_BODY))
+                .on_press(Message::CalibrationStart)
+                .style(btn_style),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        if snap.has_calibration_table {
+            row = row.push(
+                button(text("Clear").size(FONT_BODY))
+                    .on_press(Message::CalibrationClearTable)
+                    .style(btn_style),
+            );
+        }
+        cal = cal.push(row);
+    }
+    cal.into()
+}
+
+/// Bordered settings container shared by both mode panels.
+fn settings_frame(content: Element<'_, Message>, pal: Palette) -> Element<'_, Message> {
+    container(content)
+        .width(Length::Fill)
+        .padding(8)
+        .style(move |_theme| iced::widget::container::Style {
+            background: Some(pal.settings_bg.into()),
+            border: iced::Border::default().rounded(4).color(pal.dark).width(1),
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Manual-mode settings: static floor note plus the shared calibration block.
+fn manual_settings_view(snap: &ViewSnapshot, pal: Palette) -> Element<'_, Message> {
+    settings_frame(
+        column![
+            text("At 95°C or above (non-battery), low duties are lifted to 90%.")
+                .size(FONT_SMALL)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.gray),
+                }),
+            calibration_view(snap, pal),
+        ]
+        .spacing(4)
+        .into(),
+        pal,
+    )
 }
 
 /// Point labels plus the draggable canvas for one curve: the unified

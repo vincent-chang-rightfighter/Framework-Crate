@@ -675,6 +675,11 @@ pub(super) async fn phase_fan(
     ec: &Arc<dyn cli::EcHw>,
     poll: &mut PollState,
 ) -> Phase {
+    // Calibration wizard owns EC writes while active; skip this round's
+    // fan drive (thermal/battery phases already ran above).
+    if state.fan.calibration_active.load(Ordering::Acquire) {
+        return Phase::Continue;
+    }
     // Read needed fields then drop lock to avoid holding across EC I/O.
     let (manual_duty, curve_hysteresis, curve_rate_limit, curve_rate_limit_down, curve_sensors) = {
         let config = read_lock(&state.lifecycle.config);

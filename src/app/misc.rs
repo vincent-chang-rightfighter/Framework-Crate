@@ -410,6 +410,10 @@ impl App {
                 self.mark_dirty();
                 Some(Task::none())
             }
+            Message::CalibrationStart => self.calibration_start(),
+            Message::CalibrationCancel => self.calibration_cancel(),
+            Message::CalibrationClearTable => self.calibration_clear_table(),
+            Message::CalibrationStepDone(result) => self.calibration_step_done(result),
             Message::OpenUrl(url) => {
                 let url: &str = url;
                 // Whitelist: only this repo's GitHub pages may be opened.

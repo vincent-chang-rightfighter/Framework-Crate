@@ -353,22 +353,39 @@ fn ensure_per_fan_curve_points(state: &AppState, fan_count: usize) {
 }
 
 fn estimate_duty_from_thermal(state: &AppState) -> Option<u32> {
-    let thermal_snap = read_lock(&state.thermal.data);
-    if let Some(ref t) = *thermal_snap {
-        t.fans.iter().map(|f| f.rpm).max().map(|rpm| {
-            let max_rpm = state.fan.fan_max_rpm.load(Ordering::Acquire) as u32;
-            if rpm == 0 {
-                // Seed stopped fans at 0.
-                0
-            } else if max_rpm == 0 {
-                10
-            } else {
-                // Use u64 to avoid overflow.
-                ((rpm as u64 * 100) / max_rpm as u64).clamp(10, 100) as u32
-            }
-        })
+    // The max-RPM fan drives the seed; prefer its calibration table when
+    // the wizard measured one, else the max-RPM heuristic below. Reads run
+    // in separate scopes (never nested): a seed tolerates a stale sample.
+    let (idx, rpm) = {
+        let thermal_snap = read_lock(&state.thermal.data);
+        let t = thermal_snap.as_ref().as_ref()?;
+        t.fans
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (i, f.rpm))
+            .max_by_key(|&(_, r)| r)?
+    };
+    if rpm == 0 {
+        // Seed stopped fans at 0.
+        return Some(0);
+    }
+    let table_duty = {
+        let config = read_lock(&state.lifecycle.config);
+        config
+            .fan
+            .calibration_tables
+            .get(idx)
+            .and_then(|table| crate::app::calibration::duty_for_rpm(table, rpm))
+    };
+    if let Some(duty) = table_duty {
+        return Some(duty);
+    }
+    let max_rpm = state.fan.fan_max_rpm.load(Ordering::Acquire) as u32;
+    if max_rpm == 0 {
+        Some(10)
     } else {
-        None
+        // Use u64 to avoid overflow.
+        Some(((rpm as u64 * 100) / max_rpm as u64).clamp(10, 100) as u32)
     }
 }
 

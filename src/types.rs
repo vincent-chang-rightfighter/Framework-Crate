@@ -148,6 +148,33 @@ impl Config {
             *duty = (*duty).clamp(DUTY_PCT_MIN, DUTY_PCT_MAX);
         }
         self.fan.per_fan_duty.truncate(MAX_PER_FAN_ENTRIES);
+        // Calibration tables are measurements, not control points: sort by
+        // duty, dedupe keeping the highest rpm, clamp the domain. No lock
+        // endpoints, no monotonic enforcement, no inherit (a short table
+        // just means that fan stays on the heuristic).
+        const MAX_CALIBRATION_STEPS: usize = 16;
+        const MAX_CALIBRATION_RPM: u32 = 30_000;
+        self.fan.calibration_tables.truncate(MAX_PER_FAN_ENTRIES);
+        for table in &mut self.fan.calibration_tables {
+            table.truncate(MAX_CALIBRATION_STEPS);
+            for pair in table.iter_mut() {
+                pair[0] = pair[0].clamp(DUTY_PCT_MIN, DUTY_PCT_MAX);
+                pair[1] = pair[1].min(MAX_CALIBRATION_RPM);
+            }
+            table.sort_by_key(|p| p[0]);
+            // Dedupe equal duties keeping the max rpm (tables are tiny).
+            let mut cleaned: Vec<[u32; 2]> = Vec::with_capacity(table.len());
+            for pair in table.drain(..) {
+                if let Some(last) = cleaned.last_mut()
+                    && last[0] == pair[0]
+                {
+                    last[1] = last[1].max(pair[1]);
+                } else {
+                    cleaned.push(pair);
+                }
+            }
+            *table = cleaned;
+        }
 
         if let Some(ref mut limit) = self.battery.charge_limit_max_pct {
             limit.value = limit.value.clamp(
@@ -206,6 +233,11 @@ pub struct FanControlConfig {
     pub unified_duty: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub per_fan_duty: Vec<u32>,
+    /// Calibration tables ([duty_pct, rpm] pairs) per fan from the wizard.
+    /// Empty (or short) entries mean uncalibrated: the estimator falls back
+    /// to the max-RPM heuristic for that fan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calibration_tables: Vec<Vec<[u32; 2]>>,
 }
 
 impl Default for FanControlConfig {
@@ -216,6 +248,7 @@ impl Default for FanControlConfig {
             curve: None,
             unified_duty: true,
             per_fan_duty: Vec::new(),
+            calibration_tables: Vec::new(),
         }
     }
 }

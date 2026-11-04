@@ -27,6 +27,9 @@ pub struct FanState {
     pub unified_duty: Arc<AtomicBool>,
     pub per_fan_duty: Arc<RwLock<Arc<Vec<u32>>>>,
     pub last_fan_count: Arc<AtomicU64>,
+    /// Set while the calibration wizard owns EC fan writes; the background
+    /// fan arm yields rounds until it clears.
+    pub calibration_active: Arc<AtomicBool>,
     /// Per-fan runtime curves (lock endpoints included), index-aligned with
     /// fans. Recomputed with the unified curve on edits; grown (never
     /// truncated) as fans appear. Only read when more than one fan exists
@@ -46,6 +49,7 @@ impl Default for FanState {
             unified_duty: Arc::new(AtomicBool::new(true)),
             per_fan_duty: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             last_fan_count: Arc::new(AtomicU64::new(0)),
+            calibration_active: Arc::new(AtomicBool::new(false)),
             per_fan_curve_full_points: Arc::new(RwLock::new(Arc::new(Vec::new()))),
         }
     }

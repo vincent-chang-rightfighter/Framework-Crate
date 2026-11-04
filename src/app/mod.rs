@@ -19,6 +19,7 @@ use crate::types::{Config, FanControlMode};
 use crate::util::{read_lock, with_write_lock};
 use crate::views;
 
+pub(crate) mod calibration;
 mod config;
 mod cpu_power;
 mod misc;
@@ -144,6 +145,10 @@ pub enum Message {
     QuitDutyChanged(u32),
     QuitCanceled,
     CollectDebugInfo,
+    CalibrationStart,
+    CalibrationCancel,
+    CalibrationClearTable,
+    CalibrationStepDone(Result<(), String>),
     ExportConfig,
     ExportConfigDone(Result<Option<String>, String>),
     ImportConfig,
@@ -260,6 +265,12 @@ pub struct App {
     pub config_io_busy: bool,
     pub config_io_status: Option<String>,
     pub config_io_error: Option<String>,
+    /// Active calibration wizard run; `None` when idle. Owns EC fan writes
+    /// while present (the background arm yields, see `calibration_active`).
+    pub(crate) calibration: Option<calibration::CalibrationRun>,
+    /// Last wizard outcome (completed table summary or abort reason) shown
+    /// until the next run. Separate from the live progress line.
+    pub calibration_status: Option<String>,
     pub pl1_edit: String,
     pub pl2_edit: String,
     pub pl1_time_edit: String,
@@ -363,6 +374,7 @@ impl App {
                 ))),
                 fan_count: Arc::new(AtomicU64::new(0)),
                 unified_duty: Arc::new(AtomicBool::new(loaded_config.fan.unified_duty)),
+                calibration_active: Arc::new(AtomicBool::new(false)),
                 per_fan_duty: Arc::new(RwLock::new(Arc::new(
                     loaded_config.fan.per_fan_duty.clone(),
                 ))),
@@ -495,6 +507,8 @@ impl App {
             config_io_busy: false,
             config_io_status: None,
             config_io_error: None,
+            calibration: None,
+            calibration_status: None,
             pl1_edit: String::new(),
             pl2_edit: String::new(),
             pl1_time_edit: String::new(),

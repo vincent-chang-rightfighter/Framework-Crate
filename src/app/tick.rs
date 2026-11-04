@@ -18,6 +18,12 @@ impl App {
             return tick_task(self.tick_interval_ms - elapsed);
         }
         self.last_tick = Instant::now();
+        // Calibration wizard owns EC writes while active; dispatch its step
+        // writes ahead of everything else (all other tick duties retry, so
+        // yielding one tick to it is harmless).
+        if let Some(task) = self.poll_calibration() {
+            return Task::batch([task, tick_task(self.tick_interval_ms)]);
+        }
         // Debounce curve_full_points recomputation 100ms after last edit.
         if self.pending_curve_update && self.last_curve_edit_ts.elapsed().as_millis() >= 100 {
             self.pending_curve_update = false;
