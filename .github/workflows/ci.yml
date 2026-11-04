@@ -159,6 +159,60 @@ jobs:
             Add-Content -Path release_notes.md -Value $line -Encoding utf8
           }
 
+      - name: VirusTotal scan
+        # Uploads the release binary and waits for the multi-engine scan to
+        # finish, so the note added to the release page points at a completed
+        # report. Never blocks a release (continue-on-error + bounded wait),
+        # and the key is only exposed to this tag-gated job (repository
+        # secret). Once a signing step exists it must run BEFORE the
+        # checksums step so this hash matches the signed binary.
+        continue-on-error: true
+        shell: pwsh
+        env:
+          VT_API_KEY: ${{ secrets.VIRUSTOTAL_API_KEY }}
+        run: |
+          if (-not $env:VT_API_KEY) {
+            Write-Output "VIRUSTOTAL_API_KEY not configured; skipping upload."
+            exit 0
+          }
+          $hash = (Get-FileHash dist\framework-crate.exe -Algorithm SHA256).Hash.ToLower()
+          $link = "https://www.virustotal.com/gui/file/$hash"
+          function Get-VtJson([string]$url, [string]$method) {
+            if ($method -eq "POST") {
+              $raw = curl.exe -sS -X POST --form "file=@dist/framework-crate.exe" --header "x-apikey: $env:VT_API_KEY" $url
+            } else {
+              $raw = curl.exe -sS --header "x-apikey: $env:VT_API_KEY" $url
+            }
+            if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
+            try { return ($raw | ConvertFrom-Json) } catch { return $null }
+          }
+          $upload = Get-VtJson "https://www.virustotal.com/api/v3/files" "POST"
+          if (-not $upload) {
+            Write-Output "VirusTotal upload failed; publishing without a report link."
+            exit 0
+          }
+          $analysisId = $upload.data.id
+          $status = $upload.data.attributes.status
+          $analysis = $upload
+          # Free API allows 4 requests/minute: poll every 30s, up to 12 min.
+          for ($i = 0; $i -lt 24 -and $status -ne "completed"; $i++) {
+            Start-Sleep -Seconds 30
+            $analysis = Get-VtJson "https://www.virustotal.com/api/v3/analyses/$analysisId" "GET"
+            if (-not $analysis) { break }
+            $status = $analysis.data.attributes.status
+            Write-Output "VirusTotal analysis status: $status"
+          }
+          $verdict = ""
+          if ($analysis -and $analysis.data.attributes.stats) {
+            $s = $analysis.data.attributes.stats
+            $total = ($s.harmless + $s.malicious + $s.suspicious + $s.undetected + $s.timeout)
+            $verdict = " — $($s.malicious) malicious, $($s.suspicious) suspicious of $total engines"
+          }
+          if ($status -ne "completed") {
+            Write-Output "VirusTotal analysis did not complete in time; publishing the link anyway."
+          }
+          Add-Content -Path release_notes.md -Value "`n**VirusTotal**: $link$verdict" -Encoding utf8
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
