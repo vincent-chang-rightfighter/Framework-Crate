@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Changelog — Framework Crate</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="icon.png" type="image/png">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.png">
+</head>
+<body>
+<header class="site"><div class="wrap nav-row">
+<a class="brand" href="index.html"><svg class="brand-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 15C13.6569 15 15 13.6569 15 12C15 10.3431 13.6569 9 12 9C10.3431 9 9 10.3431 9 12C9 13.6569 10.3431 15 12 15Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M19.6224 10.3954L18.5247 7.7448L20 6L18 4L16.2647 5.48295L13.5578 4.36974L12.9353 2H10.981L10.3491 4.40113L7.70441 5.51596L6 4L4 6L5.45337 7.78885L4.3725 10.4463L2 11V13L4.40111 13.6555L5.51575 16.2997L4 18L6 20L7.79116 18.5403L10.397 19.6123L11 22H13L13.6045 19.6132L16.2551 18.5155C16.6969 18.8313 18 20 18 20L20 18L18.5159 16.2494L19.6139 13.598L21.9999 12.9772L22 11L19.6224 10.3954Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Framework Crate</a>
+<nav><a class="pill" href="index.html">Home</a><a class="pill" href="downloads.html">Downloads</a><a class="pill active" href="changelog.html">Changelog</a><a class="pill" href="contribute.html">Contribute</a><a class="pill" href="privacy.html">Privacy</a><a class="pill" href="license.html">License</a><a class="pill" href="security.html">Security</a><a class="pill" href="limitations.html">Limits</a><a class="pill" href="https://github.com/vincent-chang-rightfighter/Framework-Crate">GitHub</a></nav>
+</div></header>
+<div class="wrap">
+
+<p class="muted">Every release, newest first — notes as published on GitHub.</p>
+<div class="log-layout">
+<div id="changelog-list"><p class="muted">Loading release notes…</p></div>
+<aside class="log-nav" id="log-nav" hidden><strong>Versions</strong><div id="log-nav-links"></div></aside>
+</div>
+<p class="muted small"><a href="https://github.com/vincent-chang-rightfighter/Framework-Crate/releases">All releases on GitHub</a></p>
+
+<footer>
+<p>Framework Crate by Vincent Chang · MIT License · © <span id="year">2026</span> · <a href="privacy.html">Privacy</a> · <a href="license.html">License</a> · <a href="security.html">Security</a> · <a href="limitations.html">Limitations</a> · <a href="https://github.com/vincent-chang-rightfighter/Framework-Crate">GitHub</a></p>
+</footer>
+</div>
+<script>
+(function () {
+  document.getElementById("year").textContent = new Date().getFullYear();
+  function tidy(s) {
+    return (s || "").replace(/\r\n?/g, "\n")
+      .split("\n")
+      .map(function (l) { return l.replace(/[ \t]+$/, ""); })
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/\n\n(?=[-*]\s)/g, "\n")
+      .trim();
+  }
+  function stripInline(s) {
+    return s.replace(/\*\*(.+?)\*\*/g, "$1").replace(/`(.+?)`/g, "$1").replace(/\[(.+?)\]\((.+?)\)/g, "$1");
+  }
+  function renderNotes(el, text) {
+    el.innerHTML = "";
+    var ul = null;
+    function flush() { if (ul) { el.appendChild(ul); ul = null; } }
+    tidy(text).split("\n").forEach(function (raw) {
+      var line = raw.trim();
+      if (!line) { flush(); return; }
+      var h = line.match(/^#{1,6}\s+(.*)$/);
+      if (h) {
+        flush();
+        var hd = document.createElement("div");
+        hd.className = "md-h";
+        hd.textContent = stripInline(h[1]);
+        el.appendChild(hd);
+        return;
+      }
+      if (/^[-*]\s+/.test(line)) {
+        if (!ul) ul = document.createElement("ul");
+        var li = document.createElement("li");
+        li.textContent = stripInline(line.replace(/^[-*]\s+/, ""));
+        ul.appendChild(li);
+        return;
+      }
+      flush();
+      var p = document.createElement("p");
+      p.textContent = stripInline(line);
+      el.appendChild(p);
+    });
+    flush();
+  }
+  function dlWord(n) { return n === 1 ? "download" : "downloads"; }
+  fetch("https://api.github.com/repos/vincent-chang-rightfighter/Framework-Crate/releases?per_page=100")
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function (releases) {
+      if (!releases.length) throw new Error("no releases");
+      var list = document.getElementById("changelog-list");
+      list.innerHTML = "";
+      var nav = document.getElementById("log-nav-links");
+      nav.innerHTML = "";
+      document.getElementById("log-nav").hidden = false;
+      releases.forEach(function (rel, idx) {
+        var anchor = "log-" + idx;
+        var item = document.createElement("div");
+        item.className = "rel";
+        item.id = anchor;
+        var h = document.createElement("h3");
+        var link = document.createElement("a");
+        link.href = rel.html_url;
+        link.textContent = rel.tag_name + (rel.name && rel.name !== rel.tag_name ? " — " + rel.name : "");
+        h.appendChild(link);
+        var date = document.createElement("div");
+        date.className = "muted small";
+        var dls = (rel.assets || []).filter(function (a) { return /\.exe$/i.test(a.name || ""); })
+          .reduce(function (n, a) { return n + (a.download_count || 0); }, 0);
+        date.textContent = (rel.published_at || "").slice(0, 10) +
+          (rel.prerelease ? " · pre-release" : "") + " · " + dls.toLocaleString("en-US") + " " + dlWord(dls);
+        item.appendChild(h);
+        item.appendChild(date);
+        if (tidy(rel.body)) {
+          var notes = document.createElement("div");
+          notes.className = "notes";
+          renderNotes(notes, rel.body);
+          item.appendChild(notes);
+        }
+        list.appendChild(item);
+        var navLink = document.createElement("a");
+        navLink.href = "#" + anchor;
+        navLink.textContent = rel.tag_name;
+        nav.appendChild(navLink);
+      });
+    })
+    .catch(function () {
+      document.getElementById("changelog-list").innerHTML =
+        "<p class='muted'>Could not load release notes (offline or API rate-limited). See all releases on GitHub.</p>";
+    });
+})();
+</script>
+</body>
+</html>

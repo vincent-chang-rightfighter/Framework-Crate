@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Downloads — Framework Crate</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="icon.png" type="image/png">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.png">
+</head>
+<body>
+<header class="site"><div class="wrap nav-row">
+<a class="brand" href="index.html"><svg class="brand-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 15C13.6569 15 15 13.6569 15 12C15 10.3431 13.6569 9 12 9C10.3431 9 9 10.3431 9 12C9 13.6569 10.3431 15 12 15Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M19.6224 10.3954L18.5247 7.7448L20 6L18 4L16.2647 5.48295L13.5578 4.36974L12.9353 2H10.981L10.3491 4.40113L7.70441 5.51596L6 4L4 6L5.45337 7.78885L4.3725 10.4463L2 11V13L4.40111 13.6555L5.51575 16.2997L4 18L6 20L7.79116 18.5403L10.397 19.6123L11 22H13L13.6045 19.6132L16.2551 18.5155C16.6969 18.8313 18 20 18 20L20 18L18.5159 16.2494L19.6139 13.598L21.9999 12.9772L22 11L19.6224 10.3954Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Framework Crate</a>
+<nav><a class="pill" href="index.html">Home</a><a class="pill active" href="downloads.html">Downloads</a><a class="pill" href="changelog.html">Changelog</a><a class="pill" href="contribute.html">Contribute</a><a class="pill" href="privacy.html">Privacy</a><a class="pill" href="license.html">License</a><a class="pill" href="security.html">Security</a><a class="pill" href="limitations.html">Limits</a><a class="pill" href="https://github.com/vincent-chang-rightfighter/Framework-Crate">GitHub</a></nav>
+</div></header>
+<div class="wrap">
+
+<p class="muted">Prebuilt <code>framework-crate.exe</code> binaries for Windows. Run as administrator.</p>
+
+<div class="card">
+<div class="dl-grid">
+<div>
+<p><a id="dl-btn" class="btn btn-big btn-block" href="https://github.com/vincent-chang-rightfighter/Framework-Crate/releases">Download</a></p>
+<p><strong id="dl-file-name">framework-crate.exe</strong></p>
+<p class="muted small" id="dl-file-meta">Loading latest release info…</p>
+</div>
+<div>
+<p><strong>What's new in <span id="dl-ver-name">the latest release</span></strong></p>
+<div id="dl-notes" class="notes muted">Loading…</div>
+<p class="muted small"><a href="changelog.html">Full changelog</a></p>
+</div>
+</div>
+<div id="dl-sha" class="dl-sha-wrap" hidden>
+<p class="dl-sha-row"><span class="muted small dl-sha-label">SHA-256:</span>
+<code id="dl-sha-text" class="dl-sha">…</code>
+<button id="dl-sha-copy" type="button" style="display:none">Copy</button></p>
+</div>
+</div>
+
+<h2>Previous releases</h2>
+<div id="rel-list"><p class="muted">Loading release history…</p></div>
+
+<footer>
+<p>Framework Crate by Vincent Chang · MIT License · © <span id="year">2026</span> · <a href="privacy.html">Privacy</a> · <a href="license.html">License</a> · <a href="security.html">Security</a> · <a href="limitations.html">Limitations</a> · <a href="https://github.com/vincent-chang-rightfighter/Framework-Crate">GitHub</a></p>
+</footer>
+</div>
+<script>
+(function () {
+  var repo = "vincent-chang-rightfighter/Framework-Crate";
+  document.getElementById("year").textContent = new Date().getFullYear();
+  function fmtSize(b) {
+    if (b == null) return "";
+    return " · " + (b / 1048576).toFixed(2) + " MB";
+  }
+  // Keep paragraph breaks, drop trailing spaces and runs of blank lines.
+  function tidy(s) {
+    return (s || "").replace(/\r\n?/g, "\n")
+      .split("\n")
+      .map(function (l) { return l.replace(/[ \t]+$/, ""); })
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/\n\n(?=[-*]\s)/g, "\n")
+      .trim();
+  }
+  function stripInline(s) {
+    return s.replace(/\*\*(.+?)\*\*/g, "$1").replace(/`(.+?)`/g, "$1").replace(/\[(.+?)\]\((.+?)\)/g, "$1");
+  }
+  // Minimal markdown: headings, bullets, paragraphs. Keeps newlines sane
+  // without pulling in a parser.
+  function renderNotes(el, text) {
+    el.innerHTML = "";
+    var ul = null;
+    var lines = tidy(text).split("\n");
+    function flush() { if (ul) { el.appendChild(ul); ul = null; } }
+    lines.forEach(function (raw) {
+      var line = raw.trim();
+      if (!line) { flush(); return; }
+      var h = line.match(/^#{1,6}\s+(.*)$/);
+      if (h) {
+        flush();
+        var hd = document.createElement("div");
+        hd.className = "md-h";
+        hd.textContent = stripInline(h[1]);
+        el.appendChild(hd);
+        return;
+      }
+      if (/^[-*]\s+/.test(line)) {
+        if (!ul) ul = document.createElement("ul");
+        var li = document.createElement("li");
+        li.textContent = stripInline(line.replace(/^[-*]\s+/, ""));
+        ul.appendChild(li);
+        return;
+      }
+      flush();
+      var p = document.createElement("p");
+      p.textContent = stripInline(line);
+      el.appendChild(p);
+    });
+    flush();
+  }
+  function dlWord(n) { return n === 1 ? "download" : "downloads"; }
+  function fail(msg) {
+    document.getElementById("dl-file-meta").textContent = msg ||
+      "Could not load live release info (offline or API rate-limited). See all releases on GitHub.";
+  }
+  var relP = fetch("https://api.github.com/repos/" + repo + "/releases?per_page=100").then(function (r) {
+    if (!r.ok) throw new Error(r.status);
+    return r.json();
+  });
+  relP.then(function (releases) {
+    if (!releases.length) throw new Error("no releases");
+    var latest = releases[0];
+    var isExe = function (a) { return /\.exe$/i.test(a.name || ""); };
+    var exe = (latest.assets || []).filter(isExe)[0];
+    var btn = document.getElementById("dl-btn");
+    btn.textContent = "Download " + latest.tag_name;
+    btn.href = exe ? exe.browser_download_url : latest.html_url;
+    document.getElementById("dl-file-name").textContent = exe ? exe.name : "framework-crate.exe";
+    var exeDls = (exe && exe.download_count) || 0;
+    var fm = document.getElementById("dl-file-meta");
+    fm.innerHTML = "";
+    function addMetaLine(txt) {
+      var d = document.createElement("div");
+      d.textContent = txt;
+      fm.appendChild(d);
+    }
+    addMetaLine("Release: " + latest.published_at.slice(0, 10));
+    if (exe) addMetaLine("Size: " + fmtSize(exe.size).replace(/^ · /, ""));
+    addMetaLine("Downloads: " + exeDls.toLocaleString("en-US"));
+    document.getElementById("dl-ver-name").textContent = latest.tag_name;
+    renderNotes(document.getElementById("dl-notes"), latest.body || "No release notes provided.");
+    var sums = (latest.assets || []).filter(function (a) { return /sha256/i.test(a.name); })[0];
+    var shaBox = document.getElementById("dl-sha");
+    var shaEl = document.getElementById("dl-sha-text");
+    var copyBtn = document.getElementById("dl-sha-copy");
+    function shaFallback() {
+      shaEl.innerHTML = "";
+      var link = document.createElement("a");
+      link.href = sums ? sums.browser_download_url : latest.html_url;
+      link.textContent = "Open SHA256SUMS in the release";
+      shaEl.appendChild(link);
+      shaBox.hidden = false;
+    }
+    if (sums) {
+      fetch(sums.browser_download_url)
+        .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+        .then(function (t) {
+          var m = t.match(/([0-9a-fA-F]{64})\s+framework-crate\.exe/);
+          if (m) {
+            shaEl.textContent = m[1].toLowerCase();
+            copyBtn.style.display = "";
+            shaBox.hidden = false;
+          } else {
+            shaFallback();
+          }
+        })
+        .catch(shaFallback);
+    }
+    copyBtn.addEventListener("click", function () {
+      var t = shaEl.textContent;
+      if (navigator.clipboard && /^[0-9a-f]{64}$/.test(t)) navigator.clipboard.writeText(t);
+    });
+    var list = document.getElementById("rel-list");
+    list.innerHTML = "";
+    var older = releases.slice(1);
+    if (!older.length) {
+      list.innerHTML = "<p class='muted'>No older releases yet.</p>";
+    }
+    older.forEach(function (rel, idx) {
+      var item = document.createElement("details");
+      item.className = "rel";
+      item.id = "rel-" + idx;
+      var summary = document.createElement("summary");
+      var title = document.createElement("span");
+      title.textContent = rel.tag_name + (rel.name && rel.name !== rel.tag_name ? " — " + rel.name : "");
+      var dls = (rel.assets || []).filter(isExe)
+        .reduce(function (n, a) { return n + (a.download_count || 0); }, 0);
+      var meta2 = document.createElement("span");
+      meta2.className = "muted";
+      meta2.textContent = " · " + (rel.published_at || "").slice(0, 10) +
+        (rel.prerelease ? " · pre-release" : "") + " · " + dls.toLocaleString("en-US") + " " + dlWord(dls);
+      summary.appendChild(title);
+      summary.appendChild(meta2);
+      item.appendChild(summary);
+      var body = document.createElement("div");
+      body.className = "rel-body";
+      var files = document.createElement("ul");
+      files.className = "tight";
+      (rel.assets || []).forEach(function (a) {
+        var li = document.createElement("li");
+        var link = document.createElement("a");
+        link.href = a.browser_download_url;
+        link.textContent = a.name;
+        li.appendChild(link);
+        var ad = a.download_count || 0;
+        li.appendChild(document.createTextNode(
+          " · " + fmtSize(a.size).replace(/^ · /, "") + " · " + ad.toLocaleString("en-US") + " " + dlWord(ad)));
+        files.appendChild(li);
+      });
+      body.appendChild(files);
+      var shaBox = document.createElement("div");
+      shaBox.className = "muted small";
+      shaBox.textContent = "SHA-256: loading…";
+      body.appendChild(shaBox);
+      if (tidy(rel.body)) {
+        var noteDiv = document.createElement("div");
+        noteDiv.className = "notes";
+        renderNotes(noteDiv, rel.body);
+        body.appendChild(noteDiv);
+      }
+      item.appendChild(body);
+      var shaLoaded = false;
+      item.addEventListener("toggle", function () {
+        if (!item.open || shaLoaded) return;
+        shaLoaded = true;
+        var sums = (rel.assets || []).filter(function (a) { return /sha256/i.test(a.name); })[0];
+        if (!sums) { shaBox.textContent = "SHA-256: see SHA256SUMS in the release"; return; }
+        fetch(sums.browser_download_url)
+          .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+          .then(function (t) {
+            var lines = t.trim().split("\n").filter(function (l) { return /[0-9a-fA-F]{64}/.test(l); });
+            if (!lines.length) throw new Error("empty");
+            shaBox.innerHTML = "";
+            shaBox.appendChild(document.createTextNode("SHA-256:"));
+            lines.forEach(function (l) {
+              var m = l.match(/([0-9a-fA-F]{64})\s+(\S+)/);
+              var line = document.createElement("div");
+              var code = document.createElement("code");
+              code.textContent = m ? m[1].toLowerCase() + "  " + m[2] : l.trim();
+              line.appendChild(code);
+              var copy = document.createElement("button");
+              copy.type = "button";
+              copy.textContent = "Copy";
+              copy.style.marginLeft = "8px";
+              copy.addEventListener("click", function (ev) {
+                ev.preventDefault();
+                if (navigator.clipboard && m) navigator.clipboard.writeText(m[1].toLowerCase());
+              });
+              line.appendChild(copy);
+              shaBox.appendChild(line);
+            });
+          })
+          .catch(function () {
+            shaBox.innerHTML = "";
+            var link = document.createElement("a");
+            link.href = sums.browser_download_url;
+            link.textContent = "Open SHA256SUMS in the release";
+            shaBox.appendChild(document.createTextNode("SHA-256: "));
+            shaBox.appendChild(link);
+          });
+      });
+      list.appendChild(item);
+    });
+  }).catch(function () { fail(); });
+})();
+</script>
+</body>
+</html>

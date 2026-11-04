@@ -3,136 +3,80 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Framework Crate — Fan control for Framework laptops</title>
+<title>Framework Crate — Control center for Framework laptops</title>
 <link rel="stylesheet" href="style.css">
+<link rel="icon" href="icon.png" type="image/png">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.png">
 </head>
 <body>
-<header class="site"><div class="wrap">
-<a class="brand" href="index.html">Framework Crate</a>
-<nav><a class="active" href="index.html">Home</a><a href="privacy.html">Privacy Policy</a><a href="license.html">License</a><a href="security.html">Security</a><a href="limitations.html">Limitations</a></nav>
+<header class="site"><div class="wrap nav-row">
+<a class="brand" href="index.html"><svg class="brand-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 15C13.6569 15 15 13.6569 15 12C15 10.3431 13.6569 9 12 9C10.3431 9 9 10.3431 9 12C9 13.6569 10.3431 15 12 15Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M19.6224 10.3954L18.5247 7.7448L20 6L18 4L16.2647 5.48295L13.5578 4.36974L12.9353 2H10.981L10.3491 4.40113L7.70441 5.51596L6 4L4 6L5.45337 7.78885L4.3725 10.4463L2 11V13L4.40111 13.6555L5.51575 16.2997L4 18L6 20L7.79116 18.5403L10.397 19.6123L11 22H13L13.6045 19.6132L16.2551 18.5155C16.6969 18.8313 18 20 18 20L20 18L18.5159 16.2494L19.6139 13.598L21.9999 12.9772L22 11L19.6224 10.3954Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Framework Crate</a>
+<nav><a class="pill active" href="index.html">Home</a><a class="pill" href="downloads.html">Downloads</a><a class="pill" href="changelog.html">Changelog</a><a class="pill" href="contribute.html">Contribute</a><a class="pill" href="privacy.html">Privacy</a><a class="pill" href="license.html">License</a><a class="pill" href="security.html">Security</a><a class="pill" href="limitations.html">Limits</a><a class="pill" href="https://github.com/vincent-chang-rightfighter/Framework-Crate">GitHub</a></nav>
 </div></header>
 <div class="wrap">
 
-<h1>Framework Crate</h1>
-<p>A native Windows desktop GUI for Framework laptop fan control, battery charge limits, and live hardware telemetry. Built with Rust and Iced, using <code>framework_lib</code> for direct EC hardware access.</p>
-
-<p><a class="btn" href="https://github.com/vincent-chang-rightfighter/Framework-Crate/releases">Download</a>
-<a class="btn" href="https://github.com/vincent-chang-rightfighter/Framework-Crate">Source code</a></p>
-<p class="muted">Prebuilt <code>framework-crate.exe</code> binaries are attached to each GitHub Release. Run as administrator.</p>
-
-<div class="card" id="release-card">
-<p class="muted" id="release-status">Loading latest release info…</p>
-<div id="release-body" hidden>
-<p><strong>Latest release: <a id="release-tag" href="https://github.com/vincent-chang-rightfighter/Framework-Crate/releases"></a></strong>
-<span class="muted" id="release-date"></span></p>
-<table id="release-assets">
-<tr><th>File</th><th>Size</th><th>Downloads</th></tr>
-</table>
-<p>Total downloads (all releases): <strong id="release-total">…</strong></p>
-<p>SHA-256 (<code>framework-crate.exe</code>):<br><code id="release-sha">…</code>
-<button id="release-sha-copy" type="button">Copy</button></p>
+<section class="hero">
+<div class="hero-text">
+<h1>Control center <span class="grad">for Framework laptops</span></h1>
+<p>Fan control, battery limits, and live telemetry for Framework laptops.<br>A native Windows app built in Rust.</p>
+<div class="hero-actions">
+<a class="btn btn-big" href="downloads.html">Download</a>
+<a class="btn btn-big btn-ghost" href="https://github.com/vincent-chang-rightfighter/Framework-Crate">Source code</a>
+</div>
+<div class="stats">
+<div><span class="stat-num">Free</span><span class="stat-label">Open source</span></div>
+<div><span class="stat-num" id="stat-dl">…</span><span class="stat-label">Total downloads</span></div>
+<div><a id="stat-stars-link" href="https://github.com/vincent-chang-rightfighter/Framework-Crate"><span class="stat-num" id="stat-stars">…</span><span class="stat-label">GitHub stars</span></a></div>
 </div>
 </div>
+<div class="hero-shot"><img src="https://raw.githubusercontent.com/vincent-chang-rightfighter/Framework-Crate/master/images/Framework-Crate-v0.9.0-1.png" alt="Framework Crate main view"></div>
+</section>
 <script>
 (function () {
   var repo = "vincent-chang-rightfighter/Framework-Crate";
-  function fmtSize(b) {
-    if (b == null) return "-";
-    return (b / 1048576).toFixed(2) + " MB";
-  }
-  function fail() {
-    document.getElementById("release-status").textContent =
-      "Could not load live release info (offline or API rate-limited). See all releases on GitHub.";
-  }
-  fetch("https://api.github.com/repos/" + repo + "/releases?per_page=100")
-    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
-    .then(function (releases) {
-      if (!releases.length) throw new Error("no releases");
-      var latest = releases[0];
-      var total = 0;
-      releases.forEach(function (rel) {
-        (rel.assets || []).forEach(function (a) { total += a.download_count || 0; });
+  var relP = fetch("https://api.github.com/repos/" + repo + "/releases?per_page=100").then(function (r) {
+    if (!r.ok) throw new Error(r.status);
+    return r.json();
+  });
+  var repoP = fetch("https://api.github.com/repos/" + repo).then(function (r) {
+    if (!r.ok) throw new Error(r.status);
+    return r.json();
+  }).catch(function () { return null; });
+  Promise.all([relP, repoP]).then(function (vals) {
+    var releases = vals[0], info = vals[1];
+    if (!releases.length) throw new Error("no releases");
+    var total = 0;
+    releases.forEach(function (rel) {
+      (rel.assets || []).forEach(function (a) {
+        if (/\.exe$/i.test(a.name || "")) total += a.download_count || 0;
       });
-      document.getElementById("release-tag").textContent = latest.tag_name;
-      document.getElementById("release-tag").href = latest.html_url;
-      document.getElementById("release-date").textContent =
-        "· published " + latest.published_at.slice(0, 10);
-      var tbl = document.getElementById("release-assets");
-      (latest.assets || []).forEach(function (a) {
-        if (/\.txt$|\.md$/i.test(a.name) && !/sha256/i.test(a.name)) return;
-        var tr = document.createElement("tr");
-        var tdN = document.createElement("td");
-        var link = document.createElement("a");
-        link.href = a.browser_download_url;
-        link.textContent = a.name;
-        tdN.appendChild(link);
-        var tdS = document.createElement("td");
-        tdS.textContent = fmtSize(a.size);
-        var tdD = document.createElement("td");
-        tdD.textContent = (a.download_count || 0).toLocaleString("en-US");
-        tr.appendChild(tdN); tr.appendChild(tdS); tr.appendChild(tdD);
-        tbl.appendChild(tr);
-      });
-      document.getElementById("release-total").textContent = total.toLocaleString("en-US");
-      var sums = (latest.assets || []).filter(function (a) { return /sha256/i.test(a.name); })[0];
-      var shaEl = document.getElementById("release-sha");
-      if (sums) {
-        fetch(sums.browser_download_url)
-          .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
-          .then(function (t) {
-            var m = t.match(/([0-9a-fA-F]{64})\s+framework-crate\.exe/);
-            shaEl.textContent = m ? m[1].toLowerCase() : t.trim().split("\n")[0];
-          })
-          .catch(function () { shaEl.textContent = "see SHA256SUMS in the release"; });
-      } else {
-        shaEl.textContent = "see SHA256SUMS in the release";
-      }
-      document.getElementById("release-sha-copy").addEventListener("click", function () {
-        var t = shaEl.textContent;
-        if (navigator.clipboard && t.length === 64) navigator.clipboard.writeText(t);
-      });
-      document.getElementById("release-status").hidden = true;
-      document.getElementById("release-body").hidden = false;
-    })
-    .catch(fail);
+    });
+    document.getElementById("stat-dl").textContent = total.toLocaleString("en-US");
+    if (info && typeof info.stargazers_count === "number") {
+      document.getElementById("stat-stars").textContent = info.stargazers_count;
+    }
+  }).catch(function () {
+    document.getElementById("stat-dl").textContent = "—";
+    document.getElementById("stat-stars").textContent = "—";
+  });
+  document.getElementById("year").textContent = new Date().getFullYear();
 })();
 </script>
 
-<h2>Features</h2>
+<h2>Key features</h2>
 <ul class="tight">
-<li><strong>Fan Control</strong> — Auto (firmware), manual duty 0–100% (optional per-fan; at or above 95 °C duty is floored at 90%), and curve mode with draggable points on a canvas (default 5 points, hysteresis and rate limiting, live sensor markers; optional per-fan curves on multi-fan machines via the Unified switch; calibration wizard measures per-fan RPM tables for accurate ramp seeding).</li>
-<li><strong>Battery Management</strong> — Maximum charge limit 25–100% with enable/disable toggle; the saved limit is applied on startup. Health from last-full / design capacity. Details shows charger voltage/input on AC plus smart-battery data (per-cell voltages, pack temperature, safety alerts) when readable.</li>
-<li><strong>Live telemetry</strong> — Real-time temperature chart (15/30/60 s window), per-sensor display with colored indicators, fan RPM in the header.</li>
-<li><strong>CPU Power</strong> (Intel only, optional PawnIO) — PL1/PL2 read/write with live turbo readout. Original factory limits are saved on the first AC run for Reset. Writes go to MSR 0x610 only (MMIO mirror is read-only); per-model caps apply (Laptop 12 → 40 W, 13 → 70 W, 16 → 100 W, Desktop → 120 W).</li>
-<li><strong>Misc</strong> — Camera/mic privacy switch states, keyboard backlight slider, fingerprint LED level, USB-C / HDMI / DP port classification inferred from PD state.</li>
-<li><strong>System tray &amp; startup</strong> — Minimize to tray with temperature tooltip (auto-restored if Explorer restarts); per-user logon task with battery conditions cleared and restart on failure.</li>
-<li><strong>Settings backup</strong> — Export settings to a file (machine-stamped) and import them back; strict validation rejects unknown fields and version mismatches, and a different chassis size is refused outright.</li>
-<li><strong>About page</strong> — Hardware info, PD controller firmware, poll settings, manual-download helpers, and third-party license notices.</li>
+<li><strong>Curve editor</strong> — draggable points, hysteresis, per-fan curves, RPM calibration.</li>
+<li><strong>CPU power</strong> — PL1/PL2 read/write, turbo readout, factory reset.</li>
+<li><strong>Battery care</strong> — charge limit, health, smart-battery details.</li>
+<li><strong>Telemetry</strong> — temperature chart, sensor readouts, privacy switches, port labels.</li>
 </ul>
+<p class="muted">Framework Laptop with Intel Core Ultra Series 1, Windows 10/11, administrator rights. No accounts, no telemetry.</p>
 
-<h2>Requirements</h2>
-<ul class="tight">
-<li>Framework Laptop, Intel Core Ultra Series 1 (Meteor Lake) — the only tested platform</li>
-<li>Windows 10/11, administrator privileges (EC access, CPU power writes, startup task)</li>
-<li>PawnIO is optional and only needed for the CPU Power card; everything else works with the Framework EC driver alone</li>
-</ul>
-<p class="muted">Settings live in <code>%APPDATA%\framework-crate\config.toml</code>; factory power defaults in <code>bios_defaults.toml</code>; warnings/errors in <code>app.log</code> (rotated).</p>
-
-<h2>Screenshots</h2>
-<div class="shots">
-<img src="https://raw.githubusercontent.com/vincent-chang-rightfighter/Framework-Crate/master/images/Framework-Crate-v0.9.0-1.png" alt="Framework Crate main view">
-<img src="https://raw.githubusercontent.com/vincent-chang-rightfighter/Framework-Crate/master/images/Framework-Crate-v0.9.0-2.png" alt="Framework Crate fan curve settings">
+<footer>
+<p>Framework Crate by Vincent Chang · MIT License · © <span id="year">2026</span> · <a href="privacy.html">Privacy</a> · <a href="license.html">License</a> · <a href="security.html">Security</a> · <a href="limitations.html">Limitations</a> · <a href="https://github.com/vincent-chang-rightfighter/Framework-Crate">GitHub</a></p>
+</footer>
 </div>
-
-<h2>Legal</h2>
-<div class="card">
-<p>This app runs fully offline and collects no personal data. Details: <a href="privacy.html">Privacy Policy</a>.</p>
-<p>Framework Crate is MIT-licensed open source; bundled components carry their own licenses. Details: <a href="license.html">License</a>.</p>
-<p>Found a security issue? Please report it privately — see <a href="security.html">Security</a>.</p>
-<p>Check fit before installing: <a href="limitations.html">Known Limitations</a>.</p>
-</div>
-
-<footer>Framework Crate by Vincent Chang · <a href="https://github.com/vincent-chang-rightfighter/Framework-Crate">GitHub</a></footer>
-</div>
+<script>document.getElementById("year").textContent = new Date().getFullYear();</script>
 </body>
 </html>
