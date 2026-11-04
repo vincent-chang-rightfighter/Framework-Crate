@@ -28,6 +28,7 @@
 <li><strong>CPU Power</strong> (Intel only, optional PawnIO) — PL1/PL2 read/write with live turbo readout. Original factory limits are saved on the first AC run for Reset. Writes go to MSR 0x610 only (MMIO mirror is read-only); per-model caps apply (Laptop 12 → 40 W, 13 → 70 W, 16 → 100 W, Desktop → 120 W).</li>
 <li><strong>Misc</strong> — Camera/mic privacy switch states, keyboard backlight slider, fingerprint LED level, USB-C / HDMI / DP port classification inferred from PD state.</li>
 <li><strong>System tray &amp; startup</strong> — Minimize to tray with temperature tooltip (auto-restored if Explorer restarts); per-user logon task with battery conditions cleared and restart on failure.</li>
+<li><strong>Settings backup</strong> — Export settings to a file (machine-stamped) and import them back; strict validation rejects unknown fields and version mismatches, and a different chassis size is refused outright.</li>
 <li><strong>About page</strong> — Hardware info, PD controller firmware, poll settings, manual-download helpers, and third-party license notices.</li>
 </ul>
 
