@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Framework Crate — Fan control for Framework laptops</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="wrap">
+<a class="brand" href="index.html">Framework Crate</a>
+<nav><a class="active" href="index.html">Home</a><a href="privacy.html">Privacy Policy</a><a href="license.html">License</a></nav>
+</div></header>
+<div class="wrap">
+
+<h1>Framework Crate</h1>
+<p>A native Windows desktop GUI for Framework laptop fan control, battery charge limits, and live hardware telemetry. Built with Rust and Iced, using <code>framework_lib</code> for direct EC hardware access.</p>
+
+<p><a class="btn" href="https://github.com/vincent-chang-rightfighter/Framework-Crate/releases">Download</a>
+<a class="btn" href="https://github.com/vincent-chang-rightfighter/Framework-Crate">Source code</a></p>
+<p class="muted">Prebuilt <code>framework-crate.exe</code> binaries are attached to each GitHub Release. Run as administrator.</p>
+
+<h2>Features</h2>
+<ul class="tight">
+<li><strong>Fan Control</strong> — Auto (firmware), manual duty, and curve mode with draggable points; optional per-fan curves and a calibration wizard that measures per-fan RPM tables.</li>
+<li><strong>Battery</strong> — Charge limit with toggle, health estimate, and Details (charger input, smart-battery data).</li>
+<li><strong>Live telemetry</strong> — Temperature chart, per-sensor display, fan RPM in the header.</li>
+<li><strong>CPU Power</strong> (Intel only, optional PawnIO) — PL1/PL2 read/write, turbo readout, BIOS-default reset.</li>
+<li><strong>Misc</strong> — Camera/mic privacy switch states, keyboard backlight, fingerprint LED, PD-inferred port labels.</li>
+<li><strong>System tray</strong> — Minimize to tray, temperature tooltip, launch at startup.</li>
+</ul>
+
+<h2>Requirements</h2>
+<ul class="tight">
+<li>Framework Laptop, Intel Core Ultra Series 1 (Meteor Lake)</li>
+<li>Windows 10/11, administrator privileges (EC access)</li>
+</ul>
+
+<h2>Screenshots</h2>
+<div class="shots">
+<img src="https://raw.githubusercontent.com/vincent-chang-rightfighter/Framework-Crate/master/images/Framework-Crate-v0.9.0-1.png" alt="Framework Crate main view">
+<img src="https://raw.githubusercontent.com/vincent-chang-rightfighter/Framework-Crate/master/images/Framework-Crate-v0.9.0-2.png" alt="Framework Crate fan curve settings">
+</div>
+
+<h2>Legal</h2>
+<div class="card">
+<p>This app runs fully offline and collects no personal data. Details: <a href="privacy.html">Privacy Policy</a>.</p>
+<p>Framework Crate is MIT-licensed open source; bundled components carry their own licenses. Details: <a href="license.html">License</a>.</p>
+</div>
+
+<footer>Framework Crate by Vincent Chang · <a href="https://github.com/vincent-chang-rightfighter/Framework-Crate">GitHub</a></footer>
+</div>
+</body>
+</html>

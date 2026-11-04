@@ -1,0 +1,88 @@
+/* Framework Crate project site — shared stylesheet. */
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #5c5c5c;
+  --accent: #b3541e;
+  --card: #f5f3ef;
+  --border: #ddd6cb;
+  --code-bg: #efece6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16130f;
+    --fg: #ece7dd;
+    --muted: #a8a094;
+    --accent: #e08a3c;
+    --card: #211d17;
+    --border: #3a342a;
+    --code-bg: #26211a;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Segoe UI", system-ui, -apple-system, Arial, sans-serif;
+  line-height: 1.65;
+}
+.wrap { max-width: 860px; margin: 0 auto; padding: 0 20px 64px; }
+header.site {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 28px;
+}
+header.site .wrap {
+  padding-top: 22px;
+  padding-bottom: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 22px;
+}
+.brand { font-size: 1.35rem; font-weight: 700; text-decoration: none; color: var(--fg); }
+nav a {
+  margin-right: 18px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.95rem;
+}
+nav a:hover, nav a.active { color: var(--accent); }
+h1 { font-size: 1.9rem; margin: 0.4em 0 0.5em; }
+h2 { font-size: 1.3rem; margin-top: 2em; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+p.muted, .muted { color: var(--muted); font-size: 0.92rem; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin: 14px 0;
+}
+ul.tight li { margin-bottom: 6px; }
+a { color: var(--accent); }
+code, pre { font-family: Consolas, "Courier New", monospace; }
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+.btn {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff !important;
+  padding: 10px 22px;
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: 600;
+  margin: 6px 10px 6px 0;
+}
+table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 0.93rem; }
+th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
+th { background: var(--card); }
+.shots { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0; }
+.shots img { width: 100%; max-width: 410px; border: 1px solid var(--border); border-radius: 6px; }
+footer { margin-top: 48px; font-size: 0.85rem; color: var(--muted); }

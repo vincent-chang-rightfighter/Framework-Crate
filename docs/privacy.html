@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — Framework Crate</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="wrap">
+<a class="brand" href="index.html">Framework Crate</a>
+<nav><a href="index.html">Home</a><a class="active" href="privacy.html">Privacy Policy</a><a href="license.html">License</a></nav>
+</div></header>
+<div class="wrap">
+
+<h1>Privacy Policy</h1>
+<p class="muted">Effective: November 2026. Applies to the Framework Crate Windows desktop app.</p>
+
+<div class="card"><strong>Short version:</strong> Framework Crate works fully offline. It collects no personal data, creates no accounts, runs no analytics or tracking, and sends nothing anywhere unless you explicitly press a button that needs the network.</div>
+
+<h2>Data stored on your device</h2>
+<p>Everything the app needs lives on your own PC, under <code>%APPDATA%\framework-crate</code>:</p>
+<ul class="tight">
+<li><strong>Settings</strong> (<code>config.toml</code>) — your fan curves, charge limit, telemetry and theme choices.</li>
+<li><strong>BIOS power defaults</strong> (<code>bios_defaults.toml</code>) — a snapshot of factory CPU power limits used by Reset.</li>
+<li><strong>Log file</strong> (<code>app.log</code>, size-rotated) — local warnings/errors for diagnosing issues.</li>
+</ul>
+<p>Hardware readings (temperatures, fan RPM, battery and PD state) are processed in memory to drive the UI and fan control. They are never uploaded.</p>
+
+<h2>Network use (only on your explicit action)</h2>
+<ul class="tight">
+<li><strong>Check for updates</strong> (About page button) — queries the GitHub API (<code>api.github.com</code>) for this repository's latest release tag. Notification only; nothing is downloaded.</li>
+<li><strong>PawnIO install / module download</strong> (CPU Power page buttons) — downloads signed components from the official PawnIO sources (winget, <code>github.com/namazso/PawnIO.Modules</code>) over HTTPS. Optional; the rest of the app works without it.</li>
+</ul>
+<p>The app performs no background network polling and contacts no other servers.</p>
+
+<h2>Permissions</h2>
+<p>The app requests administrator privileges because the embedded-controller driver and CPU power registers require them. Elevated rights are used solely for local hardware access.</p>
+
+<h2>Children</h2>
+<p>The app collects no data from anyone, including children under 13.</p>
+
+<h2>Changes</h2>
+<p>Material changes to this policy will be published on this page with a revised effective date.</p>
+
+<h2>Contact</h2>
+<p>Questions: open an issue at <a href="https://github.com/vincent-chang-rightfighter/Framework-Crate/issues">GitHub Issues</a>.</p>
+
+<footer><a href="index.html">← Back to Framework Crate</a></footer>
+</div>
+</body>
+</html>
