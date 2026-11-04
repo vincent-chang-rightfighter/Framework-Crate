@@ -7,7 +7,7 @@ use tracing::warn;
 
 impl App {
     /// Handles the remaining one-off UI/dispatch messages not covered by the
-    /// config / cpu_power / tray / quit handlers.
+    /// config / cpu_power / tray / quit / config_io handlers.
     pub(crate) fn handle_misc_message(&mut self, message: &Message) -> Option<Task<Message>> {
         match message {
             Message::InitComplete => {
@@ -308,112 +308,6 @@ impl App {
                 }
                 Some(Task::none())
             }
-            Message::ExportConfig => {
-                // One dialog at a time; the modal Win32 dialog blocks its
-                // thread, so it must never run on the iced/tokio worker.
-                if self.config_io_busy {
-                    return Some(Task::none());
-                }
-                self.config_io_busy = true;
-                self.config_io_status = Some("Exporting settings…".to_string());
-                self.config_io_error = None;
-                let cfg = read_lock(&self.state.lifecycle.config).clone();
-                self.mark_dirty();
-                Some(Task::perform(
-                    async move {
-                        let res = crate::util::spawn_blocking_with_timeout(
-                            std::time::Duration::from_secs(300),
-                            move || {
-                                let dest = match crate::file_dialog::pick_export_dest() {
-                                    Ok(Some(p)) => p,
-                                    Ok(None) => return Ok(None),
-                                    Err(e) => return Err(e),
-                                };
-                                crate::config::export_to_path(&cfg, &dest)
-                                    .map(|()| Some(dest.display().to_string()))
-                            },
-                        )
-                        .await
-                        .unwrap_or_else(Err);
-                        Message::ExportConfigDone(res)
-                    },
-                    |msg| msg,
-                ))
-            }
-            Message::ExportConfigDone(result) => {
-                self.config_io_busy = false;
-                match result {
-                    Ok(Some(path)) => {
-                        self.config_io_status = Some(format!("Exported to {path}"));
-                    }
-                    // Cancelled: drop the in-flight line, nothing to report.
-                    Ok(None) => self.config_io_status = None,
-                    Err(e) => {
-                        warn!("Settings export failed: {}", e);
-                        self.config_io_error = Some(e.clone());
-                        self.config_io_status = None;
-                    }
-                }
-                self.mark_dirty();
-                Some(Task::none())
-            }
-            Message::ImportConfig => {
-                if self.config_io_busy {
-                    return Some(Task::none());
-                }
-                self.config_io_busy = true;
-                self.config_io_status = Some("Importing settings…".to_string());
-                self.config_io_error = None;
-                self.mark_dirty();
-                Some(Task::perform(
-                    async move {
-                        let res = crate::util::spawn_blocking_with_timeout(
-                            std::time::Duration::from_secs(300),
-                            move || {
-                                let src = match crate::file_dialog::pick_import_source() {
-                                    Ok(Some(p)) => p,
-                                    Ok(None) => return Ok(None),
-                                    Err(e) => return Err(e),
-                                };
-                                crate::config::import_file(&src).map(|s| Some(Box::new(s)))
-                            },
-                        )
-                        .await
-                        .unwrap_or_else(Err);
-                        Message::ImportConfigDone(res)
-                    },
-                    |msg| msg,
-                ))
-            }
-            Message::ImportConfigDone(result) => {
-                self.config_io_busy = false;
-                match result {
-                    Ok(Some(imported)) => {
-                        let imported = imported.clone();
-                        self.apply_imported_config(&imported.config);
-                        // A same-chassis warning is informational, not an
-                        // error: fold it into the success line so it is
-                        // seen but never blocks the apply.
-                        self.config_io_status = Some(match imported.warning {
-                            Some(w) => format!("Settings imported ({w})"),
-                            None => "Settings imported".to_string(),
-                        });
-                    }
-                    // Cancelled: drop the in-flight line, nothing to report.
-                    Ok(None) => self.config_io_status = None,
-                    Err(e) => {
-                        warn!("Settings import failed: {}", e);
-                        self.config_io_error = Some(e.clone());
-                        self.config_io_status = None;
-                    }
-                }
-                self.mark_dirty();
-                Some(Task::none())
-            }
-            Message::CalibrationStart => self.calibration_start(),
-            Message::CalibrationCancel => self.calibration_cancel(),
-            Message::CalibrationClearTable => self.calibration_clear_table(),
-            Message::CalibrationStepDone(result) => self.calibration_step_done(result),
             Message::OpenUrl(url) => {
                 let url: &str = url;
                 // Whitelist: only this repo's GitHub pages may be opened.
@@ -429,9 +323,8 @@ impl App {
                 unsafe {
                     use windows_sys::Win32::UI::Shell::ShellExecuteW;
                     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-                    let url_wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
-                    let open_wide: Vec<u16> =
-                        "open".encode_utf16().chain(std::iter::once(0)).collect();
+                    let url_wide: Vec<u16> = crate::system_info::to_wide(url);
+                    let open_wide: Vec<u16> = crate::system_info::to_wide("open");
                     let result = ShellExecuteW(
                         std::ptr::null_mut(),
                         open_wide.as_ptr(),

@@ -21,6 +21,7 @@ use crate::views;
 
 pub(crate) mod calibration;
 mod config;
+mod config_io;
 mod cpu_power;
 mod misc;
 mod quit;
@@ -680,6 +681,9 @@ impl App {
             return task;
         }
         if let Some(task) = self.handle_quit_message(&message) {
+            return task;
+        }
+        if let Some(task) = self.handle_config_io_message(&message) {
             return task;
         }
         if let Some(task) = self.handle_misc_message(&message) {
