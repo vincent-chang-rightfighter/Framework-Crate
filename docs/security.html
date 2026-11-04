@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security — Framework Crate</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="wrap">
+<a class="brand" href="index.html">Framework Crate</a>
+<nav><a href="index.html">Home</a><a href="privacy.html">Privacy Policy</a><a href="license.html">License</a><a class="active" href="security.html">Security</a></nav>
+</div></header>
+<div class="wrap">
+
+<h1>Security</h1>
+
+<h2>Supported versions</h2>
+<p>Only the latest <a href="https://github.com/vincent-chang-rightfighter/Framework-Crate/releases">GitHub Release</a> receives security fixes. Please update before reporting.</p>
+
+<h2>Reporting a vulnerability</h2>
+<div class="card">
+<p><strong>Do not open a public issue for a suspected vulnerability.</strong> Use GitHub → Security tab → <strong>Report a vulnerability</strong> (private) on the <a href="https://github.com/vincent-chang-rightfighter/Framework-Crate">Framework-Crate repository</a>.</p>
+</div>
+<p>Please include: app version, Windows version, machine model, steps to reproduce, and expected vs. actual behavior. The local log at <code>%APPDATA%\framework-crate\app.log</code> helps if it contains no personal data.</p>
+
+<h2>Scope</h2>
+<ul class="tight">
+<li><strong>In scope:</strong> EC fan/thermal writes, MSR power-limit writes, PawnIO install/download verification, config and log file integrity, startup-task behavior, dependency supply-chain issues.</li>
+<li><strong>Out of scope:</strong> physical-access attacks, social engineering, Windows or third-party driver flaws, and denial of service requiring admin rights you already granted the app.</li>
+</ul>
+
+<h2>What to expect</h2>
+<p>Acknowledgement within 7 days, then a fix or mitigation plan and a release note. No bug bounty — this is an independent, unpaid project.</p>
+<p class="muted">Full policy: <a href="https://github.com/vincent-chang-rightfighter/Framework-Crate/blob/master/SECURITY.md">SECURITY.md</a> · Privacy: <a href="privacy.html">Privacy Policy</a></p>
+
+<footer><a href="index.html">← Back to Framework Crate</a></footer>
+</div>
+</body>
+</html>
