@@ -1,0 +1,540 @@
+// Config load/save with atomic writes.
+//
+// Split from config.rs: debounced/versioned saves, atomic replace, and
+// corrupt-file backup live here, plus the shared save statics.
+use crate::types::Config;
+
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use super::acl::{harden_file_acl, warn_if_world_writable};
+use super::paths::config_path;
+
+/// Serializes config writes so only one writer persists at a time.
+static CONFIG_SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Per-save unique suffix to avoid temp file collisions between concurrent writers.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Newest persisted config version; prevents stale debounced saves from overwriting newer shutdown saves.
+static LAST_SAVED_VERSION: AtomicU64 = AtomicU64::new(0);
+
+/// Builds unique temp extension from timestamp, PID, and counter for cross-process uniqueness.
+fn unique_tmp_extension() -> String {
+    let counter = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let timestamp = crate::util::current_time_ms();
+    let pid = std::process::id();
+    format!("toml.{}.{}.{}.tmp", timestamp, pid, counter)
+}
+
+/// Backs up corrupt config bytes before next save overwrites them.
+fn backup_corrupt_config(path: &std::path::Path, content: &[u8]) {
+    use std::io::Write;
+    let backup = path.with_extension("toml.corrupt");
+    if backup.exists() {
+        tracing::warn!(
+            "{} is corrupt; keeping existing backup {}",
+            path.display(),
+            backup.display()
+        );
+        return;
+    }
+    let result = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&backup)
+        .and_then(|mut f| f.write_all(content));
+    match result {
+        Ok(()) => tracing::warn!(
+            "Backed up corrupt config to {} before falling back to defaults",
+            backup.display()
+        ),
+        Err(be) => tracing::warn!(
+            "Failed to back up corrupt config {}: {}",
+            path.display(),
+            be
+        ),
+    }
+}
+
+pub fn load() -> Result<Config, String> {
+    let path = config_path()?;
+    tracing::debug!("Loading config from: {}", path.display());
+    if path.exists() {
+        warn_if_world_writable(&path);
+        let bytes = match crate::util::read_validated_file_bytes(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Err(format!("Failed to read {}: {}", path.display(), e));
+            }
+        };
+        let content = match String::from_utf8(bytes) {
+            Ok(content) => content,
+            Err(e) => {
+                backup_corrupt_config(&path, e.as_bytes());
+                return Err(format!("Failed to read {}: {}", path.display(), e));
+            }
+        };
+        let mut config: Config = match toml::from_str(&content) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                // Load falls back to defaults and next save overwrites; preserve corrupt file.
+                backup_corrupt_config(&path, content.as_bytes());
+                return Err(format!("Failed to parse {}: {}", path.display(), e));
+            }
+        };
+        config.validate();
+        return Ok(config);
+    }
+    Ok(Config::default())
+}
+
+/// Skips write if newer version already persisted; check is under lock to avoid shutdown race.
+pub fn save_versioned(config: &Config, ver: u64, sync: bool) -> Result<(), String> {
+    let _guard = match CONFIG_SAVE_LOCK.lock() {
+        Ok(g) => g,
+        Err(p) => {
+            tracing::warn!("CONFIG_SAVE_LOCK poisoned, recovering");
+            p.into_inner()
+        }
+    };
+    let newest = LAST_SAVED_VERSION.load(Ordering::SeqCst);
+    if ver < newest {
+        tracing::debug!(
+            "Skipping config save v{} (v{} already on disk)",
+            ver,
+            newest
+        );
+        return Ok(());
+    }
+    let result = save_impl(config, sync);
+    if result.is_ok() {
+        LAST_SAVED_VERSION.store(ver, Ordering::SeqCst);
+    }
+    result
+}
+
+/// Renders the on-disk config file content (comment header + pretty TOML).
+/// Shared by the internal save path and settings export so both files
+/// stay byte-identical in shape.
+pub(super) fn render_config_toml(config: &Config) -> Result<String, String> {
+    // Clone to avoid mutating caller's Config during validate/sort.
+    let mut config = config.clone();
+    config.validate();
+    if let Some(ref mut curve) = config.fan.curve {
+        curve.curve.points.sort_by_key(|p| p[0]);
+    }
+    let body = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "# Framework Crate configuration\n\
+         # Edit values below; the app validates on load.\n\
+         #\n\
+         # [fan]\n\
+         # mode = \"disabled\" | \"manual\" | \"curve\"\n\
+         # [fan.manual]\n\
+         # duty_pct = 0..100\n\
+         # [fan.curve]\n\
+         # poll_ms = 500..5000            (fan curve step interval)\n\
+         # hysteresis_c = 0..10            (temperature hysteresis)\n\
+         # rate_limit_pct_per_step = 1..100\n\
+         # rate_limit_down_pct_per_step = 1..100   (optional; defaults to rate_limit_pct_per_step)\n\
+         # points = [[temp, duty], ...]\n\
+         #\n\
+         # [telemetry]\n\
+         # poll_ms = 200..2000             (sensor read interval)\n\
+         # ui_refresh_ms = 50..1000        (UI refresh interval)\n\
+         # selected_sensors = [\"Sensor Name\", ...]\n\
+         # chart_window_seconds = 15 | 30 | 60  (temperature chart window)\n\
+         #\n\
+         # [battery]\n\
+         # [battery.charge_limit_max_pct]\n\
+         # enabled = true/false\n\
+         # value = 25..100\n\
+         #\n\
+         {}\n",
+        body
+    ))
+}
+
+fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
+    let path = config_path()?;
+    tracing::debug!("Saving config to: {}", path.display());
+    let tmp_path = path.with_extension(unique_tmp_extension());
+    let content = render_config_toml(config)?;
+    use std::io::Write;
+    let result = (|| {
+        // create_new (O_EXCL) + symlink reject: a pre-planted symlink at the
+        // tmp path must not redirect our write to an arbitrary file.
+        if let Ok(meta) = std::fs::symlink_metadata(&tmp_path)
+            && meta.file_type().is_symlink()
+        {
+            return Err(format!(
+                "refusing to write through symlink: {}",
+                tmp_path.display()
+            ));
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("create tmp failed: {}", e))?;
+        f.write_all(content.as_bytes())
+            .map_err(|e| format!("write tmp failed: {}", e))?;
+        if sync {
+            f.sync_all()
+                .map_err(|e| format!("sync tmp failed: {}", e))?;
+        }
+        drop(f);
+        atomic_replace(&tmp_path, &path, sync)
+    })();
+    if result.is_ok() {
+        harden_file_acl(&path);
+    }
+    if result.is_err()
+        && let Err(e) = std::fs::remove_file(&tmp_path)
+    {
+        tracing::debug!("Failed to remove tmp config {}: {}", tmp_path.display(), e);
+    }
+    result
+}
+
+pub(crate) fn atomic_replace(
+    tmp: &std::path::Path,
+    dest: &std::path::Path,
+    sync: bool,
+) -> Result<(), String> {
+    // Windows rename fails if dest exists; use MoveFileExW for atomic replace.
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+        let tmp_wide: Vec<u16> = OsStr::new(tmp)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let dest_wide: Vec<u16> = OsStr::new(dest)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        // SAFETY: Paths are null-terminated UTF-16; tmp and dest share directory so replace is atomic. Use WRITE_THROUGH only when sync is required.
+        let flags = if sync {
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+        } else {
+            MOVEFILE_REPLACE_EXISTING
+        };
+        let success = unsafe { MoveFileExW(tmp_wide.as_ptr(), dest_wide.as_ptr(), flags) };
+        if success != 0 {
+            return Ok(());
+        }
+        // Fallback: try rename first (atomically replaces on Windows when dest exists).
+        // If rename fails (e.g. cross-device), backup dest then delete-then-rename.
+        // Refuse to follow symlinks: a planted dest/bak symlink would make
+        // copy/remove write outside the config dir.
+        for p in [dest, tmp] {
+            if let Ok(meta) = std::fs::symlink_metadata(p)
+                && meta.file_type().is_symlink()
+            {
+                return Err(format!(
+                    "refusing to write through symlink: {}",
+                    p.display()
+                ));
+            }
+        }
+        let bak = dest.with_extension(format!(
+            "toml.bak-{}-{}-{}",
+            crate::util::current_time_ms(),
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        match std::fs::rename(tmp, dest) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // rename failed; backup dest, delete, then retry rename.
+                if dest.exists() {
+                    use std::io::Write;
+                    match crate::util::read_validated_file_bytes(dest) {
+                        Ok(bytes) => {
+                            match std::fs::OpenOptions::new()
+                                .create_new(true)
+                                .write(true)
+                                .open(&bak)
+                            {
+                                Ok(mut f) => {
+                                    if let Err(e) = f.write_all(&bytes) {
+                                        tracing::warn!(
+                                            "Failed to write config backup {:?}: {}",
+                                            bak,
+                                            e
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to create config backup {:?}: {}",
+                                        bak,
+                                        e
+                                    )
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Refusing to back up config {:?}: {}", dest, e)
+                        }
+                    }
+                    let _ = std::fs::remove_file(dest);
+                }
+                match std::fs::rename(tmp, dest) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        if bak.exists()
+                            && let Ok(bytes) = crate::util::read_validated_file_bytes(&bak)
+                        {
+                            use std::io::Write;
+                            match std::fs::OpenOptions::new()
+                                .create_new(true)
+                                .write(true)
+                                .open(dest)
+                            {
+                                Ok(mut f) => {
+                                    if let Err(restore_err) = f.write_all(&bytes) {
+                                        tracing::warn!(
+                                            "Failed to restore config backup {:?} → {:?}: {}",
+                                            bak,
+                                            dest,
+                                            restore_err
+                                        );
+                                    }
+                                }
+                                Err(restore_err) => tracing::warn!(
+                                    "Failed to restore config backup {:?} → {:?}: {}",
+                                    bak,
+                                    dest,
+                                    restore_err
+                                ),
+                            }
+                        }
+                        Err(format!("rename failed: {}", e))
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CONFIG_DIR_TEST_LOCK;
+    use crate::types::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn tmp_config() -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        (dir, path)
+    }
+
+    #[test]
+    fn atomic_replace_creates_dest() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("src.toml");
+        let dest = dir.path().join("dest.toml");
+        std::fs::write(&tmp, "content").unwrap();
+        atomic_replace(&tmp, &dest, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "content");
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn atomic_replace_overwrites_existing_dest() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("src.toml");
+        let dest = dir.path().join("dest.toml");
+        std::fs::write(&dest, "old").unwrap();
+        std::fs::write(&tmp, "new").unwrap();
+        atomic_replace(&tmp, &dest, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn atomic_replace_tmp_missing_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("nope.toml");
+        let dest = dir.path().join("dest.toml");
+        assert!(atomic_replace(&tmp, &dest, true).is_err());
+    }
+
+    #[test]
+    fn atomic_replace_preserves_bak_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("src.toml");
+        let dest = dir.path().join("config.toml");
+        std::fs::write(&dest, "old").unwrap();
+        std::fs::write(&tmp, "new").unwrap();
+        atomic_replace(&tmp, &dest, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
+        // NOTE: .bak only in fallback path; atomic MoveFileExW creates none.
+    }
+
+    #[test]
+    fn atomic_replace_no_bak_when_dest_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("src.toml");
+        let dest = dir.path().join("config.toml");
+        std::fs::write(&tmp, "new").unwrap();
+        atomic_replace(&tmp, &dest, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
+        // No .bak when dest was absent.
+        assert!(!dest.with_extension("toml.bak").exists());
+    }
+
+    #[test]
+    fn save_and_load_roundtrip() {
+        let (_dir, path) = tmp_config();
+        let mut cfg = Config::default();
+        cfg.fan.mode = FanControlMode::Manual;
+        cfg.fan.manual = Some(ManualConfig { duty_pct: 75 });
+        cfg.telemetry.poll_ms = 1000;
+        cfg.battery.charge_limit_max_pct = Some(SettingU8 {
+            enabled: true,
+            value: 80,
+        });
+
+        // Serialize with header as save does.
+        let body = toml::to_string_pretty(&cfg).unwrap();
+        let content = format!("# Framework Crate configuration\n{}\n", body);
+        std::fs::write(&path, &content).unwrap();
+
+        // TOML ignores # comments so direct parse matches load logic.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let loaded: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(loaded.fan.mode, FanControlMode::Manual);
+        assert_eq!(loaded.fan.manual.as_ref().unwrap().duty_pct, 75);
+        assert_eq!(loaded.telemetry.poll_ms, 1000);
+        let blim = loaded.battery.charge_limit_max_pct.unwrap();
+        assert!(blim.enabled);
+        assert_eq!(blim.value, 80);
+    }
+
+    #[test]
+    fn save_sorts_curve_points() {
+        let mut cfg = Config::default();
+        cfg.fan.mode = FanControlMode::Curve;
+        cfg.fan.curve = Some(GlobalCurveConfig {
+            curve: CurveConfig {
+                sensors: vec![],
+                points: vec![[80, 100], [50, 20], [65, 60]],
+                hysteresis_c: 2,
+                rate_limit_pct_per_step: 10,
+                rate_limit_down_pct_per_step: None,
+            },
+            poll_ms: 1000,
+            per_fan_points: Vec::new(),
+        });
+
+        let mut cfg2 = cfg.clone();
+        cfg2.validate();
+        if let Some(ref mut curve) = cfg2.fan.curve {
+            curve.curve.points.sort_by_key(|p| p[0]);
+        }
+        let body = toml::to_string_pretty(&cfg2).unwrap();
+        let loaded: Config = toml::from_str(&body).unwrap();
+        let pts = &loaded.fan.curve.unwrap().curve.points;
+        assert_eq!(pts[0][0], 50);
+        assert_eq!(pts[1][0], 65);
+        assert_eq!(pts[2][0], 80);
+    }
+
+    #[test]
+    fn load_nonexistent_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_config.toml");
+        if !path.exists() {
+            let cfg = Config::default();
+            assert_eq!(cfg.fan.mode, FanControlMode::Disabled);
+        }
+    }
+
+    #[test]
+    fn config_parser_survives_random_ascii() {
+        let mut seed = 0x0BAD_F00D_DEAD_BEEFu64;
+        for _ in 0..500 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let len = (seed as usize) % 120;
+            let text: String = (0..len)
+                .map(|i| {
+                    let v = seed.rotate_left((i % 63) as u32) as u8;
+                    (b' ' + (v % 95)) as char
+                })
+                .collect();
+            let _ = toml::from_str::<Config>(&text);
+        }
+    }
+
+    #[test]
+    fn load_corrupted_toml_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "this is not valid toml = [").unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let result: Result<Config, _> = toml::from_str(&raw);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn save_versioned_skips_stale_version() {
+        let _env_guard = CONFIG_DIR_TEST_LOCK.lock().unwrap();
+        // An older (lower) version must not overwrite a newer one already on
+        // disk: this guards shutdown saves against being clobbered by a stale
+        // debounced save and vice versa.
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("FRAMEWORK_CONTROL_CONFIG_DIR");
+        unsafe {
+            std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", dir.path());
+        }
+
+        // Versions are process-global and other tests may have advanced the
+        // counter; start above the current value so this test is order-safe.
+        let base = LAST_SAVED_VERSION
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(10);
+
+        let mut old = Config::default();
+        old.fan.mode = FanControlMode::Manual;
+        old.fan.manual = Some(ManualConfig { duty_pct: 30 });
+        crate::config::save_versioned(&old, base, true).unwrap();
+
+        let mut new = Config::default();
+        new.fan.mode = FanControlMode::Manual;
+        new.fan.manual = Some(ManualConfig { duty_pct: 70 });
+        crate::config::save_versioned(&new, base + 100, true).unwrap();
+
+        // Stale write (lower version than the on-disk newest) must be skipped.
+        let mut stale = Config::default();
+        stale.fan.mode = FanControlMode::Manual;
+        stale.fan.manual = Some(ManualConfig { duty_pct: 10 });
+        crate::config::save_versioned(&stale, base + 50, true).unwrap();
+
+        let path = crate::config::config_path().unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let loaded: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(loaded.fan.manual.as_ref().unwrap().duty_pct, 70);
+
+        unsafe {
+            if let Some(v) = prev {
+                std::env::set_var("FRAMEWORK_CONTROL_CONFIG_DIR", v);
+            } else {
+                std::env::remove_var("FRAMEWORK_CONTROL_CONFIG_DIR");
+            }
+        }
+    }
+}
