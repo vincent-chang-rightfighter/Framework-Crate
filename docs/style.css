@@ -85,4 +85,15 @@ th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
 th { background: var(--card); }
 .shots { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0; }
 .shots img { width: 100%; max-width: 410px; border: 1px solid var(--border); border-radius: 6px; }
+button {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--fg);
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent); color: var(--accent); }
 footer { margin-top: 48px; font-size: 0.85rem; color: var(--muted); }
