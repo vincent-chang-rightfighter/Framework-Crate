@@ -4,7 +4,12 @@ use crate::views::ViewSnapshot;
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length};
 
+/// Max Misc scroll height: 300px fits the window autosize budget
+/// (`AUTO_MAX_HEIGHT` 1100 + chrome); ports-debug rows are taller, so the
+/// debug toggle raises the cap to 500px instead of clipping.
 const MISC_SECTION_MAX_HEIGHT: f32 = 300.0;
+/// Debug-mode cap (see above): PD rows print one line per port plus history.
+const MISC_SECTION_MAX_HEIGHT_DEBUG: f32 = 500.0;
 pub(crate) fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
     let pal = snap.palette;
     let mut content =
@@ -69,7 +74,7 @@ pub(crate) fn view_misc(snap: &ViewSnapshot) -> Element<'_, Message> {
 
     let right_pad = iced::Padding::ZERO.right(14.0);
     let max_h = if snap.ports_debug {
-        500.0
+        MISC_SECTION_MAX_HEIGHT_DEBUG
     } else {
         MISC_SECTION_MAX_HEIGHT
     };
@@ -120,6 +125,16 @@ pub(crate) fn kblight_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     content.into()
 }
 
+/// Labels for the privacy-switches row. Polarity contract (pinned by test):
+/// `true` means the device is enabled/connected per framework_lib's
+/// `get_privacy_info`, so `true` renders On and `false` renders Off.
+pub(crate) fn privacy_labels(mic: bool, camera: bool) -> (&'static str, &'static str) {
+    (
+        if mic { "Mic On" } else { "Mic Off" },
+        if camera { "Camera On" } else { "Camera Off" },
+    )
+}
+
 pub(crate) fn privacy_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     let pal = snap.palette;
     let mut content = column![].spacing(2);
@@ -131,12 +146,7 @@ pub(crate) fn privacy_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             }),
     );
     if let Some(switches) = snap.privacy.as_ref().as_ref() {
-        let mic = if switches.mic { "Mic On" } else { "Mic Off" };
-        let cam = if switches.camera {
-            "Camera On"
-        } else {
-            "Camera Off"
-        };
+        let (mic, cam) = privacy_labels(switches.mic, switches.camera);
         content = content.push(
             row![
                 text(mic).size(FONT_BODY).style(move |_theme| {
@@ -260,4 +270,18 @@ pub(crate) fn ports_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     }
 
     content.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::privacy_labels;
+
+    #[test]
+    fn privacy_labels_match_upstream_polarity() {
+        // framework_lib get_privacy_info: true = device enabled/connected.
+        assert_eq!(privacy_labels(true, true), ("Mic On", "Camera On"));
+        assert_eq!(privacy_labels(true, false), ("Mic On", "Camera Off"));
+        assert_eq!(privacy_labels(false, true), ("Mic Off", "Camera On"));
+        assert_eq!(privacy_labels(false, false), ("Mic Off", "Camera Off"));
+    }
 }

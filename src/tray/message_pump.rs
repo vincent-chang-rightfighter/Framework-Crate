@@ -400,7 +400,7 @@ fn message_pump_loop(
 
 fn create_hidden_window() -> *mut core::ffi::c_void {
     unsafe {
-        let class_name: Vec<u16> = "FrameworkControlTray\0".encode_utf16().collect();
+        let class_name: Vec<u16> = crate::system_info::to_wide("FrameworkControlTray");
         let h_instance = GetModuleHandleW(std::ptr::null());
 
         let wc = WNDCLASSW {

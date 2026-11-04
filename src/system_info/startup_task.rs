@@ -455,7 +455,6 @@ fn task_dir() -> std::io::Result<std::path::PathBuf> {
 
 /// Creates an Administrators-owned directory with an admin/SYSTEM-only DACL.
 fn create_admin_directory(path: &std::path::Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::GENERIC_ALL;
     use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
     use windows_sys::Win32::Security::{
@@ -529,11 +528,7 @@ fn create_admin_directory(path: &std::path::Path) -> std::io::Result<()> {
         lpSecurityDescriptor: sd_ptr,
         bInheritHandle: 0,
     };
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide: Vec<u16> = super::to_wide_path(path);
     let created = unsafe { CreateDirectoryW(wide.as_ptr(), &sa) };
     if created != 0 {
         if !task_file_owner_is_administrators(path)? {
@@ -664,7 +659,6 @@ fn enable_restore_privilege() -> std::io::Result<()> {
 }
 
 fn task_file_owner_is_administrators(path: &std::path::Path) -> std::io::Result<bool> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
@@ -683,11 +677,7 @@ fn task_file_owner_is_administrators(path: &std::path::Path) -> std::io::Result<
     {
         return Err(std::io::Error::last_os_error());
     }
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide: Vec<u16> = super::to_wide_path(path);
     let mut owner: PSID = std::ptr::null_mut();
     let mut sd: PSID = std::ptr::null_mut();
     let rc = unsafe {
@@ -719,7 +709,6 @@ fn task_file_owner_is_administrators(path: &std::path::Path) -> std::io::Result<
 
 fn create_admin_only_task_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use windows_sys::Win32::Foundation::{GENERIC_ALL, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
@@ -775,11 +764,7 @@ fn create_admin_only_task_file(path: &std::path::Path, bytes: &[u8]) -> std::io:
         }
     }
 
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide: Vec<u16> = super::to_wide_path(path);
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),

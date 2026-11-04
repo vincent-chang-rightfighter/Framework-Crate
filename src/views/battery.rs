@@ -57,6 +57,12 @@ pub(crate) fn charge_limit_display(limit: Option<crate::types::SettingU8>) -> (b
     }
 }
 
+/// Ship-mode footnote predicate: only render the Cutoff row when the EC
+/// reports cutoff engaged. `None`/disabled stays hidden (pinned by test).
+pub(crate) fn cutoff_engaged(battery: &crate::cli::ec_wrapper::BatteryData) -> bool {
+    battery.cutoff == Some(true)
+}
+
 pub(crate) fn view_battery_info(
     battery: &crate::cli::ec_wrapper::BatteryData,
 ) -> Element<'_, Message> {
@@ -110,7 +116,7 @@ pub(crate) fn view_battery_info(
         ]);
     }
     // Ship mode is exceptional: only render when engaged.
-    if battery.cutoff == Some(true) {
+    if cutoff_engaged(battery) {
         rows = rows.push(row![
             text("Cutoff:").size(FONT_BODY),
             space::horizontal(),

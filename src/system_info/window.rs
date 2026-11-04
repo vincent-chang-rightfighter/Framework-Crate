@@ -49,7 +49,12 @@ const OFFSCREEN: i32 = -32000;
 /// WINDOWPLACEMENT is 44 bytes; SetWindowPlacement requires exact length.
 const _: () = assert!(std::mem::size_of::<WINDOWPLACEMENT>() == 44);
 
-/// Saved placement for restoring parked window.
+/// Saved placement for restoring a parked window. Single-window assumption:
+/// the app owns exactly one main window, so one global slot is enough. A
+/// crash between hide and restore loses the slot and restore falls back to
+/// `ShowWindow` (see `restore_window_from_tray`); double-hide while parked is
+/// guarded by the `left > -10000` check in `hide_window_to_tray`, which keeps
+/// the off-screen position from overwriting the good one.
 static SAVED_PLACEMENT: std::sync::Mutex<Option<WINDOWPLACEMENT>> = std::sync::Mutex::new(None);
 
 /// Hides window by parking off-screen to keep WM_PAINT and swapchain valid.
@@ -273,9 +278,15 @@ pub fn find_main_window_by_pid() -> Option<isize> {
 const TRAY_WINDOW_CLASS: &str = "FrameworkControlTray";
 
 /// Message ID for second instance to request restore of parked window.
+/// Cached like [`taskbar_created_msg`]: `RegisterWindowMessageW` is process-
+/// wide and idempotent for the same string, but the wndproc hot path must
+/// not pay a syscall + UTF-16 encode on every message.
 pub fn show_request_message_id() -> u32 {
-    let wide = to_wide("FrameworkCrateShow");
-    unsafe { RegisterWindowMessageW(wide.as_ptr()) }
+    static MSG: OnceLock<u32> = OnceLock::new();
+    *MSG.get_or_init(|| {
+        let wide = to_wide("FrameworkCrateShow");
+        unsafe { RegisterWindowMessageW(wide.as_ptr()) }
+    })
 }
 
 /// Finds running instance's hidden tray window.
@@ -416,6 +427,17 @@ pub fn load_icon_from_bytes(data: &[u8]) -> Option<isize> {
     }
 }
 
+/// Copies a tooltip into a fixed `szTip` buffer, truncating at 127 UTF-16
+/// units and keeping it NUL-terminated. Shared by add/modify so the two
+/// call sites cannot drift apart.
+fn fill_tip(sz_tip: &mut [u16; 128], tip: &str) {
+    let tip_wide = to_wide(tip);
+    let copy_len = tip_wide.len().min(127);
+    sz_tip[..copy_len].copy_from_slice(&tip_wide[..copy_len]);
+    // Keep buffer NUL-terminated when tip exceeds limit.
+    sz_tip[copy_len] = 0;
+}
+
 /// Adds tray icon; SAFETY hwnd and HICON must be valid.
 pub fn shell_notify_add(hwnd: isize, icon: isize, tip: &str, callback_msg: u32) -> bool {
     let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
@@ -425,11 +447,7 @@ pub fn shell_notify_add(hwnd: isize, icon: isize, tip: &str, callback_msg: u32) 
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = callback_msg;
     nid.hIcon = icon as *mut core::ffi::c_void;
-    let tip_wide = to_wide(tip);
-    let copy_len = tip_wide.len().min(127);
-    nid.szTip[..copy_len].copy_from_slice(&tip_wide[..copy_len]);
-    // Keep buffer NUL-terminated when tip exceeds limit.
-    nid.szTip[copy_len] = 0;
+    fill_tip(&mut nid.szTip, tip);
     // SAFETY: Shell_NotifyIconW with valid NID.
     unsafe { Shell_NotifyIconW(NIM_ADD, &nid) != 0 }
 }
@@ -451,11 +469,7 @@ pub fn shell_notify_modify_tip(hwnd: isize, tip: &str) -> bool {
     nid.hWnd = hwnd as *mut core::ffi::c_void;
     nid.uID = 1;
     nid.uFlags = NIF_TIP;
-    let tip_wide = to_wide(tip);
-    let copy_len = tip_wide.len().min(127);
-    nid.szTip[..copy_len].copy_from_slice(&tip_wide[..copy_len]);
-    // Keep buffer NUL-terminated when tip exceeds limit.
-    nid.szTip[copy_len] = 0;
+    fill_tip(&mut nid.szTip, tip);
     // SAFETY: Shell_NotifyIconW with valid NID.
     unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) != 0 }
 }

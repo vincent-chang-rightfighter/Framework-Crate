@@ -5,6 +5,19 @@ use crate::util::read_lock;
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length};
 
+/// Board revision is SMBIOS firmware data: immutable for the process, but
+/// the About page rebuilds on every dirty frame, so parse once instead of
+/// walking SMBIOS tables per frame. `ConfigDigit0` implements only `Debug`
+/// (no `Display`), so `{:?}` below is the intended formatter, not a shortcut.
+fn board_revision() -> Option<&'static str> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            framework_lib::smbios::get_baseboard_version().map(|rev| format!("{rev:?}"))
+        })
+        .as_deref()
+}
+
 /// About page reads `App` live; modal and infrequent so it bypasses snapshot cache.
 /// Section header matching the CPU Power card style. Takes the resolved
 /// palette instead of a ThemeId so one view build computes it once.
@@ -40,9 +53,10 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
             hw_content = hw_content.push(text("No device info available").size(FONT_BODY));
         }
     }
-    // Board revision is SMBIOS, not EC: no fetch state, read directly.
-    if let Some(rev) = framework_lib::smbios::get_baseboard_version() {
-        hw_content = hw_content.push(info_row("Board", &format!("{:?}", rev)));
+    // Board revision is SMBIOS firmware data: immutable, cached at first
+    // read (see board_revision()) instead of re-parsed per frame.
+    if let Some(rev) = board_revision() {
+        hw_content = hw_content.push(info_row("Board", rev));
     }
     let cpu = &app.system_info.cpu;
     let mem = &app.system_info.mem;

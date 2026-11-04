@@ -599,12 +599,33 @@ mod tests {
 
     #[test]
     fn view_battery_info_with_cutoff_engaged() {
+        // Ship mode is exceptional: the Cutoff row renders only when engaged.
+        use crate::views::battery::cutoff_engaged;
         let mut bat = default_battery_info();
         bat.cutoff = Some(true);
+        assert!(cutoff_engaged(&bat));
         let _el = view_battery_info(&bat);
         let mut bat = default_battery_info();
         bat.cutoff = Some(false);
+        assert!(!cutoff_engaged(&bat));
         let _el = view_battery_info(&bat);
+        let bat = default_battery_info();
+        assert!(!cutoff_engaged(&bat));
+    }
+
+    #[test]
+    fn turbo_text_covers_all_four_branches() {
+        use crate::views::cpu_power::turbo_text;
+        assert_eq!(turbo_text(None, None), None);
+        assert_eq!(
+            turbo_text(Some(4.8), Some(5.2)),
+            Some("4.8 / 5.2 GHz".to_string())
+        );
+        assert_eq!(turbo_text(Some(4.8), None), Some("4.8 GHz".to_string()));
+        assert_eq!(
+            turbo_text(None, Some(5.2)),
+            Some("max 5.2 GHz".to_string())
+        );
     }
 
     #[test]

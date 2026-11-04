@@ -3,6 +3,18 @@ use crate::style::*;
 use crate::views::ViewSnapshot;
 use iced::widget::{button, column, container, row, space, text, text_input};
 use iced::{Element, Length};
+
+/// Turbo readout text: current/limit, whichever was readable. `None` hides
+/// the row. Pure so the four branches stay pinned by test.
+pub(crate) fn turbo_text(now_ghz: Option<f64>, limit_ghz: Option<f64>) -> Option<String> {
+    match (now_ghz, limit_ghz) {
+        (None, None) => None,
+        (Some(n), Some(l)) => Some(format!("{n:.1} / {l:.1} GHz")),
+        (Some(n), None) => Some(format!("{n:.1} GHz")),
+        (None, Some(l)) => Some(format!("max {l:.1} GHz")),
+    }
+}
+
 pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     let mut content = column![].spacing(2);
     let pal = snap.palette;
@@ -192,13 +204,7 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
         .spacing(4),
     );
     // Turbo telemetry is display-only: current/limit, whichever was readable.
-    let turbo_text = match (info.turbo_now_ghz, info.turbo_limit_ghz) {
-        (None, None) => None,
-        (Some(n), Some(l)) => Some(format!("{:.1} / {:.1} GHz", n, l)),
-        (Some(n), None) => Some(format!("{:.1} GHz", n)),
-        (None, Some(l)) => Some(format!("max {:.1} GHz", l)),
-    };
-    if let Some(t) = turbo_text {
+    if let Some(t) = turbo_text(info.turbo_now_ghz, info.turbo_limit_ghz) {
         content = content.push(
             row![
                 text("  Turbo:".to_string()).size(FONT_BODY),
