@@ -130,32 +130,26 @@
     addMetaLine("Downloads: " + exeDls.toLocaleString("en-US"));
     document.getElementById("dl-ver-name").textContent = latest.tag_name;
     renderNotes(document.getElementById("dl-notes"), latest.body || "No release notes provided.");
-    var sums = (latest.assets || []).filter(function (a) { return /sha256/i.test(a.name); })[0];
     var shaBox = document.getElementById("dl-sha");
     var shaEl = document.getElementById("dl-sha-text");
     var copyBtn = document.getElementById("dl-sha-copy");
-    function shaFallback() {
+    // GitHub's API exposes the asset digest, so no cross-origin fetch of
+    // SHA256SUMS is needed (release-file hosts do not send CORS headers).
+    var digest = exe && /^sha256:[0-9a-f]{64}$/i.test(exe.digest || "")
+      ? exe.digest.slice(7).toLowerCase()
+      : "";
+    if (digest) {
+      shaEl.textContent = digest;
+      copyBtn.style.display = "";
+      shaBox.hidden = false;
+    } else {
+      var sums = (latest.assets || []).filter(function (a) { return /sha256/i.test(a.name); })[0];
       shaEl.innerHTML = "";
       var link = document.createElement("a");
       link.href = sums ? sums.browser_download_url : latest.html_url;
       link.textContent = "Open SHA256SUMS in the release";
       shaEl.appendChild(link);
       shaBox.hidden = false;
-    }
-    if (sums) {
-      fetch(sums.browser_download_url)
-        .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
-        .then(function (t) {
-          var m = t.match(/([0-9a-fA-F]{64})\s+framework-crate\.exe/);
-          if (m) {
-            shaEl.textContent = m[1].toLowerCase();
-            copyBtn.style.display = "";
-            shaBox.hidden = false;
-          } else {
-            shaFallback();
-          }
-        })
-        .catch(shaFallback);
     }
     copyBtn.addEventListener("click", function () {
       var t = shaEl.textContent;
@@ -214,41 +208,40 @@
       item.addEventListener("toggle", function () {
         if (!item.open || shaLoaded) return;
         shaLoaded = true;
-        var sums = (rel.assets || []).filter(function (a) { return /sha256/i.test(a.name); })[0];
-        if (!sums) { shaBox.textContent = "SHA-256: see SHA256SUMS in the release"; return; }
-        fetch(sums.browser_download_url)
-          .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
-          .then(function (t) {
-            var lines = t.trim().split("\n").filter(function (l) { return /[0-9a-fA-F]{64}/.test(l); });
-            if (!lines.length) throw new Error("empty");
-            shaBox.innerHTML = "";
-            shaBox.appendChild(document.createTextNode("SHA-256:"));
-            lines.forEach(function (l) {
-              var m = l.match(/([0-9a-fA-F]{64})\s+(\S+)/);
-              var line = document.createElement("div");
-              var code = document.createElement("code");
-              code.textContent = m ? m[1].toLowerCase() + "  " + m[2] : l.trim();
-              line.appendChild(code);
-              var copy = document.createElement("button");
-              copy.type = "button";
-              copy.textContent = "Copy";
-              copy.style.marginLeft = "8px";
-              copy.addEventListener("click", function (ev) {
-                ev.preventDefault();
-                if (navigator.clipboard && m) navigator.clipboard.writeText(m[1].toLowerCase());
-              });
-              line.appendChild(copy);
-              shaBox.appendChild(line);
-            });
-          })
-          .catch(function () {
-            shaBox.innerHTML = "";
+        var relExe = (rel.assets || []).filter(isExe)[0];
+        var digest = relExe && /^sha256:[0-9a-f]{64}$/i.test(relExe.digest || "")
+          ? relExe.digest.slice(7).toLowerCase()
+          : "";
+        if (!digest) {
+          var sums = (rel.assets || []).filter(function (a) { return /sha256/i.test(a.name); })[0];
+          shaBox.innerHTML = "";
+          shaBox.appendChild(document.createTextNode("SHA-256: "));
+          if (sums) {
             var link = document.createElement("a");
             link.href = sums.browser_download_url;
             link.textContent = "Open SHA256SUMS in the release";
-            shaBox.appendChild(document.createTextNode("SHA-256: "));
             shaBox.appendChild(link);
-          });
+          } else {
+            shaBox.appendChild(document.createTextNode("not published"));
+          }
+          return;
+        }
+        shaBox.innerHTML = "";
+        shaBox.appendChild(document.createTextNode("SHA-256:"));
+        var line = document.createElement("div");
+        var code = document.createElement("code");
+        code.textContent = digest;
+        line.appendChild(code);
+        var copy = document.createElement("button");
+        copy.type = "button";
+        copy.textContent = "Copy";
+        copy.style.marginLeft = "8px";
+        copy.addEventListener("click", function (ev) {
+          ev.preventDefault();
+          if (navigator.clipboard) navigator.clipboard.writeText(digest);
+        });
+        line.appendChild(copy);
+        shaBox.appendChild(line);
       });
       list.appendChild(item);
     });
