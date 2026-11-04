@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Known Limitations — Framework Crate</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site"><div class="wrap">
+<a class="brand" href="index.html">Framework Crate</a>
+<nav><a href="index.html">Home</a><a href="privacy.html">Privacy Policy</a><a href="license.html">License</a><a href="security.html">Security</a><a class="active" href="limitations.html">Limitations</a></nav>
+</div></header>
+<div class="wrap">
+
+<h1>Known Limitations</h1>
+<p class="muted">What the app cannot do today, so you can judge fit before installing.</p>
+
+<ul class="tight">
+<li><strong>AMD CPU Power is Intel-only.</strong> On AMD and other CPUs the CPU Power card shows Not Supported and no power-limit access is attempted.</li>
+<li><strong>MMIO mirror is read-only.</strong> The official Intel MCHBAR module exposes reads only, so Apply/Sync writes MSR 0x610 alone. If firmware holds the MMIO mirror below your MSR value, the enforced limit may not move.</li>
+<li><strong>Tested platform is narrow.</strong> Only Intel Core Ultra Series 1 (Meteor Lake) Framework laptops are tested; the Framework EC kernel driver must be installed.</li>
+<li><strong>Per-fan curves lack multi-fan verification.</strong> Covered by mocked unit tests only — no Framework 16 / Desktop hardware was available. Single-fan machines use the exact pre-existing code path.</li>
+<li><strong>Crash keeps the last state.</strong> Orderly quit restores firmware fan control and flushes the charge limit, but a crash or kill bypasses that path: the EC keeps the last written fan duty until sleep, reboot, or the next launch.</li>
+<li><strong>Logoff handover is unreliable.</strong> On some Windows 11 elevated setups the session-end broadcast never reaches the tray window, so manual/curve duty can persist after sign-out. Use <strong>Restore Auto &amp; Exit</strong> before logging off when the fan is under manual/curve control.</li>
+<li><strong>HDMI/DP cards without DP-alt may be mislabeled.</strong> Port type is inferred from PD state; cards that omit DP-alt mode while drawing ~3–5 W can show the wrong label. Expansion Card Debug Mode on the About page shows the raw role/watts.</li>
+</ul>
+
+<footer><a href="index.html">← Back to Framework Crate</a></footer>
+</div>
+</body>
+</html>

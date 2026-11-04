@@ -9,7 +9,7 @@
 <body>
 <header class="site"><div class="wrap">
 <a class="brand" href="index.html">Framework Crate</a>
-<nav><a class="active" href="index.html">Home</a><a href="privacy.html">Privacy Policy</a><a href="license.html">License</a><a href="security.html">Security</a></nav>
+<nav><a class="active" href="index.html">Home</a><a href="privacy.html">Privacy Policy</a><a href="license.html">License</a><a href="security.html">Security</a><a href="limitations.html">Limitations</a></nav>
 </div></header>
 <div class="wrap">
 
@@ -22,19 +22,22 @@
 
 <h2>Features</h2>
 <ul class="tight">
-<li><strong>Fan Control</strong> — Auto (firmware), manual duty, and curve mode with draggable points; optional per-fan curves and a calibration wizard that measures per-fan RPM tables.</li>
-<li><strong>Battery</strong> — Charge limit with toggle, health estimate, and Details (charger input, smart-battery data).</li>
-<li><strong>Live telemetry</strong> — Temperature chart, per-sensor display, fan RPM in the header.</li>
-<li><strong>CPU Power</strong> (Intel only, optional PawnIO) — PL1/PL2 read/write, turbo readout, BIOS-default reset.</li>
-<li><strong>Misc</strong> — Camera/mic privacy switch states, keyboard backlight, fingerprint LED, PD-inferred port labels.</li>
-<li><strong>System tray</strong> — Minimize to tray, temperature tooltip, launch at startup.</li>
+<li><strong>Fan Control</strong> — Auto (firmware), manual duty 0–100% (optional per-fan; at or above 95 °C duty is floored at 90%), and curve mode with draggable points on a canvas (default 5 points, hysteresis and rate limiting, live sensor markers; optional per-fan curves on multi-fan machines via the Unified switch; calibration wizard measures per-fan RPM tables for accurate ramp seeding).</li>
+<li><strong>Battery Management</strong> — Maximum charge limit 25–100% with enable/disable toggle; the saved limit is applied on startup. Health from last-full / design capacity. Details shows charger voltage/input on AC plus smart-battery data (per-cell voltages, pack temperature, safety alerts) when readable.</li>
+<li><strong>Live telemetry</strong> — Real-time temperature chart (15/30/60 s window), per-sensor display with colored indicators, fan RPM in the header.</li>
+<li><strong>CPU Power</strong> (Intel only, optional PawnIO) — PL1/PL2 read/write with live turbo readout. Original factory limits are saved on the first AC run for Reset. Writes go to MSR 0x610 only (MMIO mirror is read-only); per-model caps apply (Laptop 12 → 40 W, 13 → 70 W, 16 → 100 W, Desktop → 120 W).</li>
+<li><strong>Misc</strong> — Camera/mic privacy switch states, keyboard backlight slider, fingerprint LED level, USB-C / HDMI / DP port classification inferred from PD state.</li>
+<li><strong>System tray &amp; startup</strong> — Minimize to tray with temperature tooltip (auto-restored if Explorer restarts); per-user logon task with battery conditions cleared and restart on failure.</li>
+<li><strong>About page</strong> — Hardware info, PD controller firmware, poll settings, manual-download helpers, and third-party license notices.</li>
 </ul>
 
 <h2>Requirements</h2>
 <ul class="tight">
-<li>Framework Laptop, Intel Core Ultra Series 1 (Meteor Lake)</li>
-<li>Windows 10/11, administrator privileges (EC access)</li>
+<li>Framework Laptop, Intel Core Ultra Series 1 (Meteor Lake) — the only tested platform</li>
+<li>Windows 10/11, administrator privileges (EC access, CPU power writes, startup task)</li>
+<li>PawnIO is optional and only needed for the CPU Power card; everything else works with the Framework EC driver alone</li>
 </ul>
+<p class="muted">Settings live in <code>%APPDATA%\framework-crate\config.toml</code>; factory power defaults in <code>bios_defaults.toml</code>; warnings/errors in <code>app.log</code> (rotated).</p>
 
 <h2>Screenshots</h2>
 <div class="shots">
@@ -47,6 +50,7 @@
 <p>This app runs fully offline and collects no personal data. Details: <a href="privacy.html">Privacy Policy</a>.</p>
 <p>Framework Crate is MIT-licensed open source; bundled components carry their own licenses. Details: <a href="license.html">License</a>.</p>
 <p>Found a security issue? Please report it privately — see <a href="security.html">Security</a>.</p>
+<p>Check fit before installing: <a href="limitations.html">Known Limitations</a>.</p>
 </div>
 
 <footer>Framework Crate by Vincent Chang · <a href="https://github.com/vincent-chang-rightfighter/Framework-Crate">GitHub</a></footer>
