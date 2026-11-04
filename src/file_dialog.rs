@@ -25,7 +25,7 @@ pub fn pick_import_source() -> Result<Option<PathBuf>, String> {
 fn show_dialog(save: bool) -> Result<Option<PathBuf>, String> {
     use windows_sys::Win32::UI::Controls::Dialogs::{
         CommDlgExtendedError, GetOpenFileNameW, GetSaveFileNameW, OFN_DONTADDTORECENT,
-        OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST,
+        OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST,
         OPENFILENAMEW,
     };
 
@@ -58,8 +58,12 @@ fn show_dialog(save: bool) -> Result<Option<PathBuf>, String> {
     ofn.lpstrTitle = title.as_ptr();
     // NOCHANGEDIR: the config-dir fallback resolves "." against the
     // process CWD, so the dialog must never move it behind our back.
+    // Note: no OVERWRITEPROMPT by design. Export uses exclusive create
+    // (create_new) and refuses to truncate an existing file for safety, so
+    // the dialog must not promise an overwrite it cannot deliver. Users
+    // pick a new name; the AlreadyExists error tells them so.
     ofn.Flags = if save {
-        OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT | OFN_OVERWRITEPROMPT
+        OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT
     } else {
         OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST
     };

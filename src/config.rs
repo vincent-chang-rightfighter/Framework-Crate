@@ -629,9 +629,10 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "exported_from",
 ];
 
-/// Strict import: unknown top-level fields and version mismatch are hard
-/// errors (nothing applies). Values still go through `validate()` for the
-/// same clamping the startup load applies.
+/// Strict import: unknown top-level and nested fields are hard errors
+/// (nothing applies). Older versions migrate through `validate()` like the
+/// startup load; newer versions reject. Values still go through `validate()`
+/// for the same clamping the startup load applies.
 pub fn import_strict(content: &str) -> Result<Config, String> {
     let table: toml::Table = toml::from_str(content).map_err(|e| format!("invalid TOML: {}", e))?;
     let mut unknown: Vec<&str> = table
@@ -643,8 +644,17 @@ pub fn import_strict(content: &str) -> Result<Config, String> {
     if !unknown.is_empty() {
         return Err(format!("unknown setting(s): {}", unknown.join(", ")));
     }
+    // Nested strictness: `#[serde(default)]` would silently drop typos like
+    // `[fan] bogus = 1`. (`deny_unknown_fields` on the structs is avoided:
+    // it does not compose with the `#[serde(flatten)]` on the curve config
+    // and would also harden the startup load path, which must stay lenient.)
+    check_nested_unknown(&table)?;
     match table.get("version") {
         Some(toml::Value::Integer(v)) if *v == crate::types::CONFIG_VERSION as i64 => {}
+        Some(toml::Value::Integer(v)) if *v < crate::types::CONFIG_VERSION as i64 => {
+            // Older backup: allow through; `validate()` below runs the same
+            // load-time migration (e.g. 4→5 curve points) and re-stamps.
+        }
         Some(toml::Value::Integer(v)) => {
             return Err(format!(
                 "unsupported settings version {} (want {})",
@@ -665,18 +675,101 @@ pub fn import_strict(content: &str) -> Result<Config, String> {
     Ok(config)
 }
 
-/// Reads a settings file from an arbitrary path and strict-imports it.
-/// The machine check runs after the structural one: a different chassis
-/// size rejects, anything softer (same size, missing key, unreadable
-/// local identity) comes back as a warning alongside the config.
-pub fn import_file(path: &std::path::Path) -> Result<ImportedSettings, String> {
-    let len = std::fs::metadata(path)
-        .map_err(|e| format!("cannot stat import file: {}", e))?
-        .len();
-    if len > MAX_IMPORT_BYTES {
-        return Err(format!("import file too large ({} bytes)", len));
+/// Rejects unknown keys inside the common nested tables (`[fan]`,
+/// `[fan.manual]`, `[fan.curve]`, `[battery]`, …) with dotted paths.
+fn check_nested_unknown(table: &toml::Table) -> Result<(), String> {
+    // Explicit per-table walk (keeps dotted paths in errors).
+    let mut unknown: Vec<String> = Vec::new();
+    let check = |tbl: Option<&toml::Value>, path: &str, known: &[&str], out: &mut Vec<String>| {
+        if let Some(toml::Value::Table(t)) = tbl {
+            for k in t.keys() {
+                if !known.contains(&k.as_str()) {
+                    out.push(format!("{path}.{k}"));
+                }
+            }
+        }
+    };
+    let fan = table.get("fan");
+    check(
+        fan,
+        "fan",
+        &[
+            "mode",
+            "manual",
+            "curve",
+            "unified_duty",
+            "per_fan_duty",
+            "calibration_tables",
+        ],
+        &mut unknown,
+    );
+    let fan_tbl = fan.and_then(|v| v.as_table());
+    check(
+        fan_tbl.and_then(|t| t.get("manual")),
+        "fan.manual",
+        &["duty_pct"],
+        &mut unknown,
+    );
+    check(
+        fan_tbl.and_then(|t| t.get("curve")),
+        "fan.curve",
+        &[
+            "sensors",
+            "points",
+            "hysteresis_c",
+            "rate_limit_pct_per_step",
+            "rate_limit_down_pct_per_step",
+            "poll_ms",
+            "per_fan_points",
+        ],
+        &mut unknown,
+    );
+    let battery = table.get("battery");
+    check(
+        battery,
+        "battery",
+        &["charge_limit_max_pct"],
+        &mut unknown,
+    );
+    check(
+        battery
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get("charge_limit_max_pct")),
+        "battery.charge_limit_max_pct",
+        &["enabled", "value"],
+        &mut unknown,
+    );
+    check(
+        table.get("telemetry"),
+        "telemetry",
+        &[
+            "poll_ms",
+            "ui_refresh_ms",
+            "selected_sensors",
+            "chart_window_seconds",
+        ],
+        &mut unknown,
+    );
+    unknown.sort();
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("unknown setting(s): {}", unknown.join(", ")))
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read import file: {}", e))?;
+}
+
+/// Reads a settings file from an arbitrary path and strict-imports it.
+/// Uses the hardened reader (reparse/dir/hardlink refusal + size cap) so a
+/// planted symlink cannot redirect the read; the machine check runs after
+/// the structural one: a different chassis size rejects, anything softer
+/// (same size, missing key, unreadable local identity) comes back as a
+/// warning alongside the config.
+pub fn import_file(path: &std::path::Path) -> Result<ImportedSettings, String> {
+    let bytes = crate::util::read_validated_file_bytes(path)
+        .map_err(|e| format!("cannot read import file: {}", e))?;
+    if bytes.len() as u64 > MAX_IMPORT_BYTES {
+        return Err(format!("import file too large ({} bytes)", bytes.len()));
+    }
     let content =
         String::from_utf8(bytes).map_err(|e| format!("import file is not UTF-8: {}", e))?;
     let config = import_strict(&content)?;
@@ -824,12 +917,23 @@ pub fn export_to_path(config: &Config, dest: &std::path::Path) -> Result<(), Str
         }
         content = stamped;
     }
-    if let Ok(meta) = std::fs::symlink_metadata(dest)
-        && meta.file_type().is_symlink()
-    {
+    if dir_has_reparse_point(dest) {
         return Err(format!(
             "refusing to write through symlink: {}",
             dest.display()
+        ));
+    }
+    // TOCTOU hardening: a planted junction/mount-point parent would redirect
+    // the exclusive create below outside the chosen directory. The check and
+    // the create are not atomic, but this closes the casual case; the dest
+    // itself is still created with create_new (O_EXCL).
+    if let Some(parent) = dest.parent()
+        && !parent.as_os_str().is_empty()
+        && dir_has_reparse_point(parent)
+    {
+        return Err(format!(
+            "refusing to write under a symlinked directory: {}",
+            parent.display()
         ));
     }
     use std::io::Write;
@@ -838,7 +942,16 @@ pub fn export_to_path(config: &Config, dest: &std::path::Path) -> Result<(), Str
         .write(true)
         .open(dest)
         .and_then(|mut f| f.write_all(content.as_bytes()))
-        .map_err(|e| format!("export failed: {}", e))
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "file already exists (overwrite disabled for safety): {}",
+                    dest.display()
+                )
+            } else {
+                format!("export failed: {}", e)
+            }
+        })
 }
 
 fn save_impl(config: &Config, sync: bool) -> Result<(), String> {
@@ -1285,6 +1398,35 @@ mod tests {
     }
 
     #[test]
+    fn import_strict_rejects_nested_unknown_field() {
+        let err = crate::config::import_strict(
+            "version = 2\n[fan]\nmode = \"curve\"\nbogus = 1\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("fan.bogus"), "{err}");
+        let err = crate::config::import_strict(
+            "version = 2\n[fan.curve]\nevil = 1\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("fan.curve.evil"), "{err}");
+    }
+
+    #[test]
+    fn import_strict_migrates_older_version() {
+        // Old backup (version 0): must migrate through validate(), not reject.
+        let cfg =
+            crate::config::import_strict("version = 0\n[fan]\nmode = \"curve\"\n").unwrap();
+        assert_eq!(cfg.version, crate::types::CONFIG_VERSION);
+        assert_eq!(cfg.fan.mode, FanControlMode::Curve);
+        // 4-point legacy curve migrates to 5 editable points.
+        let cfg = crate::config::import_strict(
+            "version = 0\n[fan.curve]\npoints = [[30, 0], [45, 20], [60, 40], [75, 80]]\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.fan.curve.as_ref().unwrap().curve.points.len(), 7);
+    }
+
+    #[test]
     fn import_strict_rejects_missing_version() {
         let err = crate::config::import_strict("[fan]\nmode = \"curve\"\n").unwrap_err();
         assert!(err.contains("missing settings version"), "{err}");
@@ -1385,7 +1527,7 @@ mod tests {
         let path = dir.path().join("exists.toml");
         std::fs::write(&path, "x").unwrap();
         let err = crate::config::export_to_path(&Config::default(), &path).unwrap_err();
-        assert!(err.contains("export failed"), "{err}");
+        assert!(err.contains("already exists"), "{err}");
     }
 
     #[test]
