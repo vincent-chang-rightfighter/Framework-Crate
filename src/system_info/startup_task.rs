@@ -1148,9 +1148,11 @@ mod tests {
         }
         let id = super::current_user_id().expect("token user must resolve");
         assert!(!id.is_empty());
+        // NOTE: deliberately not interpolating {id} here: the principal is
+        // user-identifying, and even test output should not echo it.
         assert!(
             !id.to_lowercase().contains("spoofed"),
-            "principal must not trust env, got {id}"
+            "principal must not trust env"
         );
         unsafe {
             if let Some(v) = prev_user {
