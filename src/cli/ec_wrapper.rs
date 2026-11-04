@@ -74,7 +74,11 @@ pub struct SmartBatteryData {
 }
 
 /// Physical camera/microphone privacy switch state. `true` means the
-/// device is enabled/connected.
+/// device is enabled/connected — this is framework_lib's contract, not a
+/// guess: `chromium_ec::get_privacy_info` documents
+/// `[true = device enabled/connected, false = device disabled]` and returns
+/// `(microphone == 1, camera == 1)` in field order, which is exactly how
+/// `privacy_switches()` below maps the tuple. The UI renders `true` as On.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PrivacySwitches {
     pub mic: bool,
@@ -1091,6 +1095,29 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn source_pd_without_watts_stays_usbc() {
+        // Unknown (None) or zero watts must never claim a display card:
+        // only a positive low reading implies HDMI/DP.
+        for watts in [None, Some(0.0)] {
+            let p = port("Source", true, false, watts);
+            assert_eq!(
+                classify_pd_port(&p, std::iter::empty(), 2, false),
+                "USB-C Expansion Card",
+                "{watts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dp_alt_without_watts_is_generic_display() {
+        let p = port("Source", true, true, None);
+        assert_eq!(
+            classify_pd_port(&p, std::iter::empty(), 2, false),
+            "DP/HDMI Expansion Card"
+        );
+    }
+
+    #[test]
     fn usbc_that_was_sink_is_never_usba() {
         // Sink history must prevent misclassifying as USB-A even when currently stable Source+noPD.
         let p = port("Source", false, false, Some(7.5));
@@ -1126,6 +1153,9 @@ pub(crate) mod tests {
         /// When set, `hello` fails: simulates a silent EC for the hello
         /// tiebreak tests.
         pub fail_hello: std::sync::atomic::AtomicBool,
+        /// When set, `thermal` fails: drives the unified thermal-failure
+        /// verdict through the command-error arm in phase tests.
+        pub fail_thermal: std::sync::atomic::AtomicBool,
     }
 
     impl MockEc {
@@ -1135,6 +1165,7 @@ pub(crate) mod tests {
                 fail_writes: std::sync::atomic::AtomicUsize::new(0),
                 hang: std::sync::atomic::AtomicBool::new(false),
                 fail_hello: std::sync::atomic::AtomicBool::new(false),
+                fail_thermal: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -1177,6 +1208,9 @@ pub(crate) mod tests {
     impl EcHw for MockEc {
         fn thermal(&self) -> Result<ThermalData, String> {
             self.record("thermal".to_string());
+            if self.fail_thermal.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("mock thermal failure".to_string());
+            }
             Ok(ThermalData {
                 temps: Arc::new(BTreeMap::from([("CPU".to_string(), 50)])),
                 fans: SmallVec::new(),

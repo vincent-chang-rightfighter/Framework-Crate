@@ -47,8 +47,9 @@ pub struct TrayManager {
 }
 
 /// Minimum gap between tooltip rewrites; hover text is cached by the
-/// shell, so per-tick updates would only burn syscalls.
-const TIP_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// shell, so per-tick updates would only burn syscalls. 5s keeps the
+/// temperature readout fresh without hammering Shell_NotifyIconW.
+const TIP_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Hover text for the tray icon: app name plus the hottest reading when
 /// thermal data is available.
@@ -330,6 +331,11 @@ impl TrayManager {
         self.icon_loaded = false;
         self.last_notify_at = None;
         self.just_restored_at = None;
+        // Drop throttle state with the icon: a re-init must not inherit a
+        // 5s-old timestamp and hide the first post-reinit tooltip, nor a
+        // stale text that suppresses a changed update.
+        self.last_tip = None;
+        self.last_tip_at = None;
         tracing::warn!("TrayManager state reset (thread_handle kept for join)");
     }
 
@@ -442,6 +448,16 @@ mod tests {
         // log); nothing observable except no panic.
         let mut tm = TrayManager::new();
         tm.update_tip("Framework Crate · 62°C");
+    }
+
+    #[test]
+    fn reset_clears_tooltip_throttle_state() {
+        let mut tm = TrayManager::new();
+        tm.last_tip = Some("Framework Crate · 62°C".to_string());
+        tm.last_tip_at = Some(std::time::Instant::now());
+        tm.reset();
+        assert!(tm.last_tip.is_none(), "stale text must not suppress updates");
+        assert!(tm.last_tip_at.is_none(), "stale timestamp must not hide first tip");
     }
 
     #[test]

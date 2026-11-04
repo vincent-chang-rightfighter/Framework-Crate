@@ -250,7 +250,7 @@ pub(super) async fn phase_thermal(
 /// Wall-clock jump fallback, resume handling, and fan-reset handling.
 /// Never skips the round by itself; resume work falls through to polling.
 pub(super) fn phase_resume(state: &AppState, poll: &mut PollState) -> Phase {
-    let resume_ts = state.lifecycle.last_resume_ts.load(Ordering::Acquire);
+    let mut resume_ts = state.lifecycle.last_resume_ts.load(Ordering::Acquire);
     // Skip resume handling if shutdown requested.
     if state.lifecycle.shutdown.load(Ordering::Acquire) {
         return Phase::Stop;
@@ -274,6 +274,9 @@ pub(super) fn phase_resume(state: &AppState, poll: &mut PollState) -> Phase {
                 .lifecycle
                 .last_resume_ts
                 .store(crate::util::monotonic_ms(), Ordering::Release);
+            // Reload: the pre-wall-check load above is stale, otherwise this
+            // round is skipped and the reset waits one more iteration.
+            resume_ts = state.lifecycle.last_resume_ts.load(Ordering::Acquire);
         }
         poll.last_wall_ms = wall_now;
     }
@@ -319,8 +322,7 @@ pub(super) fn phase_resume(state: &AppState, poll: &mut PollState) -> Phase {
 
 /// Battery read with AC-transition detection and staleness expiry.
 /// UI-only: never resets the EC client and never skips the round.
-pub(super) async fn phase_battery(state: &AppState, ec: &Arc<dyn cli::EcHw>, poll: &mut PollState) {
-    // Battery polling also drives the AC→battery power-limit
+pub(super) async fn phase_battery(state: &AppState, ec: &Arc<dyn cli::EcHw>, poll: &mut PollState) {    // Battery polling also drives the AC→battery power-limit
     // reset, so it must keep running while idle.
     let ec_clone = Arc::clone(ec);
     match crate::ec_serial::exec("power", crate::util::EC_IO_TIMEOUT, ec_clone, move |ec| {
@@ -366,21 +368,8 @@ pub(super) async fn phase_battery(state: &AppState, ec: &Arc<dyn cli::EcHw>, pol
             // skip the poll loop (that would skip
             // PD/expansion/fan). Fall through to the
             // staleness check and the rest of the round.
-            if poll.consecutive_battery_failures >= MAX_EC_IO_FAILURES {
-                // No sleep here: sleeping would delay the
-                // fan fail-safe below. Staleness expiry
-                // below already clears a dead battery UI.
-            }
-            let last_ok = state.battery.last_success_ms.load(Ordering::Acquire);
-            let cur = crate::util::monotonic_ms();
-            if last_ok != 0 && cur.saturating_sub(last_ok) > BATTERY_STALE_MS {
-                with_write_lock(&state.battery.info, |guard| {
-                    if guard.is_some() {
-                        *guard = Arc::new(None);
-                        mark_view_dirty(state);
-                    }
-                });
-            }
+            // No sleep here: sleeping would delay the fan fail-safe below.
+            expire_battery_if_stale(state);
         }
         Err(e) => {
             // Overload skips are backpressure, not
@@ -394,17 +383,23 @@ pub(super) async fn phase_battery(state: &AppState, ec: &Arc<dyn cli::EcHw>, pol
                 // reset; staleness expiry below handles
                 // a dead battery UI.
             }
-            let last_ok = state.battery.last_success_ms.load(Ordering::Acquire);
-            let cur = crate::util::monotonic_ms();
-            if last_ok != 0 && cur.saturating_sub(last_ok) > BATTERY_STALE_MS {
-                with_write_lock(&state.battery.info, |guard| {
-                    if guard.is_some() {
-                        *guard = Arc::new(None);
-                        mark_view_dirty(state);
-                    }
-                });
-            }
+            expire_battery_if_stale(state);
         }
+    }
+}
+
+/// Clears a dead battery UI after `BATTERY_STALE_MS` without data.
+/// Shared by both failure arms above; success arms never call it.
+fn expire_battery_if_stale(state: &AppState) {
+    let last_ok = state.battery.last_success_ms.load(Ordering::Acquire);
+    let cur = crate::util::monotonic_ms();
+    if last_ok != 0 && cur.saturating_sub(last_ok) > BATTERY_STALE_MS {
+        with_write_lock(&state.battery.info, |guard| {
+            if guard.is_some() {
+                *guard = Arc::new(None);
+                mark_view_dirty(state);
+            }
+        });
     }
 }
 
@@ -476,9 +471,9 @@ pub(super) async fn phase_scans(
             }
         }
     }
-    // Privacy switches move with a physical slider: the
-    // 30s peripheral cadence is plenty, and the round
-    // itself is the retry (no attempt budget needed).
+    // Privacy switches move with a physical slider: visible 10s /
+    // hidden 30s (same throttle gate as the PD/expansion scans above) is
+    // plenty, and the round itself is the retry (no attempt budget needed).
     let ec_clone = Arc::clone(ec);
     match crate::ec_serial::exec(
         "privacy-switches",
@@ -908,9 +903,41 @@ mod tests {
         assert!(state.lifecycle.fan_reset_pending.load(Ordering::Acquire));
     }
 
+    #[tokio::test]
+    async fn phase_thermal_routes_repeated_command_errors_through_verdict() {
+        use crate::cli::ec_wrapper::tests::MockEc;
+        use crate::types::FanControlMode;
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
+        let mock = Arc::new(MockEc::new());
+        mock.fail_thermal.store(true, Ordering::SeqCst);
+        let dyn_ec: Arc<dyn crate::cli::EcHw> = mock.clone();
+        let state = live_client_state(dyn_ec.clone());
+        let mut poll = PollState::new(&state, 0, FanControlMode::Disabled, false, 1_000);
+        // Below threshold: counted, no hello ping yet.
+        for _ in 0..MAX_EC_IO_FAILURES - 1 {
+            assert!(matches!(
+                phase_thermal(&state, &dyn_ec, &mut poll).await,
+                Phase::Continue
+            ));
+        }
+        assert_eq!(poll.consecutive_ec_failures, MAX_EC_IO_FAILURES - 1);
+        assert!(
+            !mock.ops.lock().unwrap().contains(&"hello".to_string()),
+            "no verdict ping below threshold"
+        );
+        // At threshold the unified verdict pings hello (alive here):
+        // RideThrough resets the count and keeps the client.
+        assert!(matches!(
+            phase_thermal(&state, &dyn_ec, &mut poll).await,
+            Phase::Continue
+        ));
+        assert_eq!(poll.consecutive_ec_failures, 0);
+        assert!(state.system.cli_available.load(Ordering::Acquire));
+        assert!(mock.ops.lock().unwrap().contains(&"hello".to_string()));
+    }
+
     #[test]
-    fn poll_state_reset_fan_state_clears_ramps() {
-        use crate::app::AppState;
+    fn poll_state_reset_fan_state_clears_ramps() {        use crate::app::AppState;
         use crate::types::FanControlMode;
         let state = AppState {
             system: Default::default(),
