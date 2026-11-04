@@ -21,7 +21,7 @@ pub const CURVE_TEMP_LOCK_START: u32 = 100;
 /// Max editable temperature (lock start is fixed).
 pub const CURVE_TEMP_EDIT_MAX: u32 = CURVE_TEMP_LOCK_START - 1;
 /// Config schema version; bumped when a load-time migration should run once.
-const CONFIG_VERSION: u32 = 2;
+pub(crate) const CONFIG_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Config {

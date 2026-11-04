@@ -13,6 +13,7 @@ mod cpu_power;
 mod curve_canvas;
 mod ec_serial;
 mod fan_control;
+mod file_dialog;
 mod probe;
 mod style;
 mod sub_state;

@@ -143,6 +143,10 @@ pub enum Message {
     QuitDutyChanged(u32),
     QuitCanceled,
     CollectDebugInfo,
+    ExportConfig,
+    ExportConfigDone(Result<Option<String>, String>),
+    ImportConfig,
+    ImportConfigDone(Result<Option<crate::config::ImportedSettings>, String>),
     OpenUrl(&'static str),
     CheckForUpdates,
     UpdateCheckDone(Result<Option<String>, String>),
@@ -249,6 +253,12 @@ pub struct App {
     /// UI theme preference; resolved to a palette per snapshot and to an
     /// iced theme for the renderer.
     pub theme: crate::style::ThemeId,
+    /// Settings export/import state (Settings page): in-flight flag, last
+    /// success line, and last failure. Kept separate like the PawnIO pair
+    /// so progress is not rendered red.
+    pub config_io_busy: bool,
+    pub config_io_status: Option<String>,
+    pub config_io_error: Option<String>,
     pub pl1_edit: String,
     pub pl2_edit: String,
     pub pl1_time_edit: String,
@@ -468,6 +478,9 @@ impl App {
             update_checked: false,
             theme: crate::style::ThemeId::parse(&loaded_config.theme)
                 .unwrap_or(crate::style::ThemeId::Default),
+            config_io_busy: false,
+            config_io_status: None,
+            config_io_error: None,
             pl1_edit: String::new(),
             pl2_edit: String::new(),
             pl1_time_edit: String::new(),

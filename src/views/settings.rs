@@ -152,7 +152,20 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
 
     let mut content = column![].spacing(8);
     let ec_debug = app.ports_debug;
-    let diagnostics = column![
+    let config_io_busy = app.config_io_busy;
+    let export_button = button(text("Export").size(FONT_BODY)).style(btn_style);
+    let export_button = if config_io_busy {
+        export_button
+    } else {
+        export_button.on_press(Message::ExportConfig)
+    };
+    let import_button = button(text("Import").size(FONT_BODY)).style(btn_style);
+    let import_button = if config_io_busy {
+        import_button
+    } else {
+        import_button.on_press(Message::ImportConfig)
+    };
+    let mut diagnostics = column![
         section_title(pal, "Diagnostics"),
         row![
             text("Ports Debug Mode:").size(FONT_BODY),
@@ -170,11 +183,32 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
+        row![
+            text("Settings:").size(FONT_BODY),
+            export_button,
+            import_button,
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
     ]
     .spacing(8);
     // Device and Diagnostics stay side by side as independent cards;
     // uneven bottoms are inherent to dynamic content, accepted here
     // for adjacency.
+    if let Some(ref status) = app.config_io_status {
+        diagnostics = diagnostics.push(text(status.as_str()).size(FONT_SMALL).style(|theme| {
+            iced::widget::text::Style {
+                color: Some(palette(theme).gray),
+            }
+        }));
+    }
+    if let Some(ref err) = app.config_io_error {
+        diagnostics = diagnostics.push(text(err.as_str()).size(FONT_SMALL).style(|theme| {
+            iced::widget::text::Style {
+                color: Some(palette(theme).error),
+            }
+        }));
+    }
     content = content.push(
         row![
             card(

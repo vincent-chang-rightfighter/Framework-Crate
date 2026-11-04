@@ -340,4 +340,40 @@ impl App {
             *guard = new_full;
         });
     }
+
+    /// Applies an imported config: replaces the stored config, persists it,
+    /// and re-seeds every derived copy (fan atomics, poll cadence, theme,
+    /// chart window) the same way startup and the per-field handlers do.
+    /// Hardware converges through the existing paths (fan atomics are read
+    /// every poll round; charge limit goes out via the save-task watcher).
+    pub(crate) fn apply_imported_config(&mut self, cfg: &Config) {
+        let cfg = cfg.clone();
+        self.mutate_config(|c| *c = cfg);
+        let applied = read_lock(&self.state.lifecycle.config).clone();
+        self.state
+            .fan
+            .mode
+            .store(applied.fan.mode.to_u8() as u64, Ordering::Release);
+        self.state
+            .fan
+            .unified_duty
+            .store(applied.fan.unified_duty, Ordering::Release);
+        with_write_lock(&self.state.fan.per_fan_duty, |guard| {
+            *guard = Arc::new(applied.fan.per_fan_duty.clone());
+        });
+        self.state
+            .lifecycle
+            .poll_ms
+            .store(applied.telemetry.poll_ms, Ordering::Relaxed);
+        self.tick_interval_ms = applied.telemetry.ui_refresh_ms;
+        self.last_tick = Instant::now();
+        self.chart_window_seconds = applied.telemetry.chart_window_seconds;
+        with_write_lock(&self.state.thermal.history, |hist| {
+            Arc::make_mut(hist).set_window();
+        });
+        self.theme =
+            crate::style::ThemeId::parse(&applied.theme).unwrap_or(crate::style::ThemeId::Default);
+        self.update_curve_full_points();
+        self.save_config();
+    }
 }
