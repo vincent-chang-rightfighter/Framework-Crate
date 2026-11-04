@@ -30,6 +30,14 @@
 <li><strong>Out of scope:</strong> physical-access attacks, social engineering, Windows or third-party driver flaws, and denial of service requiring admin rights you already granted the app.</li>
 </ul>
 
+<h2>Automated checks</h2>
+<ul class="tight">
+<li><strong>CodeQL</strong> static analysis runs on every push, pull request, and weekly schedule.</li>
+<li><strong>cargo audit</strong> (RustSec) runs in CI; known-unmaintained crates are allow-listed with review dates.</li>
+<li><strong>Dependabot</strong> alerts and monthly update PRs cover dependencies and GitHub Actions.</li>
+<li><strong>Secret scanning + push protection</strong> block accidental commits of tokens and keys.</li>
+</ul>
+
 <h2>What to expect</h2>
 <p>Acknowledgement within 7 days, then a fix or mitigation plan and a release note. No bug bounty — this is an independent, unpaid project.</p>
 <p class="muted">Full policy: <a href="https://github.com/vincent-chang-rightfighter/Framework-Crate/blob/master/SECURITY.md">SECURITY.md</a> · Privacy: <a href="privacy.html">Privacy Policy</a></p>

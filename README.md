@@ -110,7 +110,12 @@ src/
     quit_warning.rs    — Quit-before fan state confirmation dialog
   types.rs             — Config structs, FanControlMode, CurveConfig, validation
   style.rs             — Colors, fonts, layout constants
-  config.rs            — TOML config load/save (atomic write via tmp+rename, write-through)
+  config/            — Persisted settings, split by concern
+    mod.rs             — Re-exports; every crate::config::* path keeps working
+    paths.rs           — Config dir resolution, test override validation, reparse check
+    acl.rs             — DACL hardening (broad-group write ACE detection/removal)
+    io.rs              — Load, versioned save, atomic replace, corrupt backup
+    strict.rs          — Strict import/export, unknown-field rejection, machine check
   config_save_task.rs  — Debounced config save (100ms) and applies battery settings
   background_task.rs   — EC polling loop, fan control, expansion/PD scans
   cpu_power/           — CPU power (PL1/PL2) via PawnIO, split by concern
