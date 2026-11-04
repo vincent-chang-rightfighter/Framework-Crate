@@ -110,6 +110,7 @@ mod tests {
         let ec: Arc<dyn EcHw> = mock.clone();
         let mut ramp = None;
         let mut stepper = CurveStepper::new();
+        let mut per_fan_steppers: Vec<CurveStepper> = Vec::new();
         let mut ctx = FanCtx {
             state: &state,
             ec: &ec,
@@ -127,6 +128,7 @@ mod tests {
             manual_ramp_current: Some(42),
             manual_per_fan_ramp: &mut ramp,
             curve_stepper: &mut stepper,
+            per_fan_curve_steppers: &mut per_fan_steppers,
             last_fan_mode: Some(FanControlMode::Manual),
             last_unified_duty: None,
             just_resumed: false,

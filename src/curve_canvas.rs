@@ -22,6 +22,9 @@ pub fn view_curve(
     points: Arc<[[u32; 2]]>,
     all_pts: Arc<Vec<[u32; 2]>>,
     marks: Arc<Vec<SensorMark>>,
+    // Owning fan for per-fan editors; `None` keeps the legacy unified
+    // message so existing call sites are untouched.
+    fan: Option<usize>,
 ) -> Element<'static, crate::Message> {
     // Map sorted position to original index so drag emits correct index.
     let mut sorted_indices: Vec<usize> = (0..points.len()).collect();
@@ -31,6 +34,7 @@ pub fn view_curve(
         points,
         sorted_indices,
         marks,
+        fan,
     })
     .width(Length::Fill)
     .height(180)
@@ -42,6 +46,7 @@ struct CurveRenderer {
     points: Arc<[[u32; 2]]>,
     sorted_indices: Vec<usize>,
     marks: Arc<Vec<SensorMark>>,
+    fan: Option<usize>,
 }
 
 /// State in widget Tree; survives `view()` rebuilds.
@@ -166,8 +171,15 @@ impl iced::widget::canvas::Program<crate::Message> for CurveRenderer {
                     let duty = (raw_duty.round() as i32).clamp(0, 100) as u32;
                     // Only publish when rounded value changes to avoid redundant rebuilds.
                     if self.points[config_idx] != [temp, duty] {
+                        let fan = self.fan;
                         return Some(iced::widget::canvas::Action::publish(
-                            crate::Message::FanCurvePointMoved(config_idx, temp, duty),
+                            if let Some(fan_idx) = fan {
+                                crate::Message::FanPerFanCurvePointMoved(
+                                    fan_idx, config_idx, temp, duty,
+                                )
+                            } else {
+                                crate::Message::FanCurvePointMoved(config_idx, temp, duty)
+                            },
                         ));
                     }
                     return None;

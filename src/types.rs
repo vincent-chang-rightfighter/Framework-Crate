@@ -14,6 +14,10 @@ pub const CURVE_POLL_MS_MAX: u64 = 5000;
 const HYSTERESIS_C_MAX: u32 = 10;
 const RATE_LIMIT_MIN: u32 = 1;
 const RATE_LIMIT_MAX: u32 = 100;
+/// Bound for per-fan vecs: the fan loops iterate them every cycle, so a
+/// crafted config would spin, not just sit. Real machines have a handful
+/// of fans; 8 leaves headroom.
+const MAX_PER_FAN_ENTRIES: usize = 8;
 /// Maximum curve domain temperature (°C); extends legacy 0–100 to avoid pinning.
 pub const CURVE_TEMP_MAX: u32 = 110;
 /// Start of locked 100% zone; 100–110°C is forced 100% and not editable.
@@ -59,7 +63,6 @@ impl Config {
         // Bound vec lengths first: a crafted TOML with millions of entries
         // would otherwise spin the loops below (DoS via config file).
         const MAX_SENSORS: usize = 64;
-        const MAX_CURVE_POINTS: usize = 32;
         self.telemetry.selected_sensors.truncate(MAX_SENSORS);
         self.telemetry.poll_ms = self.telemetry.poll_ms.clamp(POLL_MS_MIN, POLL_MS_MAX);
         self.telemetry.ui_refresh_ms = self
@@ -92,11 +95,6 @@ impl Config {
             if let Some(ref mut down) = curve.curve.rate_limit_down_pct_per_step {
                 *down = (*down).clamp(RATE_LIMIT_MIN, RATE_LIMIT_MAX);
             }
-            if curve.curve.points.is_empty() {
-                // Empty points leaves editor undraggable; restore defaults.
-                curve.curve.points = default_points();
-                debug!("Curve points were empty — restored default points");
-            }
             if curve.curve.sensors.len() > 1 {
                 // Curve uses single sensor; migrate old multi-select, prefer non-battery.
                 if let Some(idx) = curve
@@ -128,72 +126,27 @@ impl Config {
                 curve.curve.sensors.clear();
                 debug!("Curve sensor was Battery — using hottest non-battery sensor");
             }
-            curve.curve.points.truncate(MAX_CURVE_POINTS);
             curve.curve.sensors.truncate(8);
-            for point in &mut curve.curve.points {
-                // Clamp to plot domain to keep points drawable.
-                point[0] = point[0].clamp(0, CURVE_TEMP_MAX);
-                point[1] = point[1].clamp(0, 100);
-            }
-            // Dedupe by temp keeping highest duty; use BTreeMap to share
-            // dedupe/sort semantics with `curve_full_points` and avoid drift.
-            let mut map: BTreeMap<u32, u32> = BTreeMap::new();
-            for &[t, d] in &curve.curve.points {
-                map.entry(t).and_modify(|e| *e = (*e).max(d)).or_insert(d);
-            }
-            let deduped: Vec<[u32; 2]> = map.into_iter().map(|(t, d)| [t, d]).collect();
-            // Locked zone: 100–110°C must be 100% fixed, remove any editable points in that range.
-            let mut filtered: Vec<[u32; 2]> = Vec::new();
-            for &[t, d] in &deduped {
-                if t < CURVE_TEMP_LOCK_START {
-                    filtered.push([t, d]);
+            let raw_points = std::mem::take(&mut curve.curve.points);
+            // Normalize through one helper so the unified curve and per-fan
+            // curves can never drift apart (dedupe/sort/migrate/monotonic).
+            curve.curve.points = normalize_curve_points(raw_points, self.version);
+            // Per-fan curves share the unified pipeline; empty slots inherit
+            // the unified curve so a new fan starts sane. Never truncated on
+            // fan removal (dock/undock keeps every fan's curve).
+            let unified = curve.curve.points.clone();
+            curve.per_fan_points.truncate(MAX_PER_FAN_ENTRIES);
+            for fan_points in &mut curve.per_fan_points {
+                if fan_points.is_empty() {
+                    *fan_points = unified.clone();
+                } else {
+                    *fan_points = normalize_curve_points(std::mem::take(fan_points), self.version);
                 }
             }
-            if filtered.is_empty() {
-                // Keep at least one editable point before lock; fallback to defaults truncated
-                let defaults = default_points();
-                for p in defaults {
-                    if p[0] < CURVE_TEMP_LOCK_START {
-                        filtered.push(p);
-                    }
-                }
-            }
-            filtered.sort_by_key(|p| p[0]);
-            // Migrate old 4-point configs to 5 editable points (5+2 locked =7 total).
-            // Version-gated so a hand-edited 4-point curve created by a newer
-            // build is not rewritten on every load.
-            if self.version < CONFIG_VERSION && filtered.len() == 4 {
-                let desired = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
-                for &[t, d] in &desired {
-                    if filtered.len() >= 5 {
-                        break;
-                    }
-                    if !filtered.iter().any(|p| p[0] == t) {
-                        filtered.push([t, d]);
-                    }
-                }
-                filtered.sort_by_key(|p| p[0]);
-            }
-            // Preserve user-authored points. Earlier versions silently
-            // downgraded 6-point curves to 5 (dropping 92C), which lost
-            // hand-edited settings on every load. Only the absolute safety
-            // cap applies now.
-            filtered.truncate(MAX_CURVE_POINTS.saturating_sub(2));
-            // Duty must never decrease as temperature rises; otherwise a
-            // rising temperature could lower fan speed.
-            enforce_monotonic_duties(&mut filtered);
-            // Append locked endpoints
-            filtered.push([CURVE_TEMP_LOCK_START, 100]);
-            filtered.push([CURVE_TEMP_MAX, 100]);
-            curve.curve.points = filtered;
         }
         for duty in &mut self.fan.per_fan_duty {
             *duty = (*duty).clamp(DUTY_PCT_MIN, DUTY_PCT_MAX);
         }
-        // Bound the vec: the manual loop iterates it every cycle (skipping
-        // past fan_count), so a crafted config would spin, not just sit.
-        // Real machines have a handful of fans; 8 leaves headroom.
-        const MAX_PER_FAN_ENTRIES: usize = 8;
         self.fan.per_fan_duty.truncate(MAX_PER_FAN_ENTRIES);
 
         if let Some(ref mut limit) = self.battery.charge_limit_max_pct {
@@ -310,6 +263,12 @@ pub struct GlobalCurveConfig {
     pub curve: CurveConfig,
     #[serde(default = "default_poll_ms")]
     pub poll_ms: u64,
+    /// Per-fan editable points, index-aligned with fans; empty entries fall
+    /// back to the unified curve. Only used when more than one fan exists
+    /// and the unified toggle is off. Never truncated on fan removal so
+    /// dock/undock cycles keep every fan's curve.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub per_fan_points: Vec<Vec<[u32; 2]>>,
 }
 
 impl Default for GlobalCurveConfig {
@@ -317,6 +276,7 @@ impl Default for GlobalCurveConfig {
         Self {
             curve: CurveConfig::default(),
             poll_ms: default_poll_ms(),
+            per_fan_points: Vec::new(),
         }
     }
 }
@@ -344,6 +304,79 @@ pub fn enforce_monotonic_duties(points: &mut [[u32; 2]]) {
         floor = floor.max(point[1]);
         point[1] = floor;
     }
+}
+
+/// Normalizes editable curve points through the full pipeline: empty
+/// restore, domain clamp, temp dedupe (max duty), locked-zone strip, sort,
+/// version-gated 4→5 migration, monotonic duties, locked endpoints.
+/// Shared by the unified curve and per-fan curves so all editors agree
+/// with the runtime curve.
+fn normalize_curve_points(raw: Vec<[u32; 2]>, version: u32) -> Vec<[u32; 2]> {
+    const MAX_CURVE_POINTS: usize = 32;
+    let mut points = if raw.is_empty() {
+        // Empty points leaves editor undraggable; restore defaults.
+        debug!("Curve points were empty — restored default points");
+        default_points()
+    } else {
+        raw
+    };
+    points.truncate(MAX_CURVE_POINTS);
+    for point in &mut points {
+        // Clamp to plot domain to keep points drawable.
+        point[0] = point[0].clamp(0, CURVE_TEMP_MAX);
+        point[1] = point[1].clamp(0, 100);
+    }
+    // Dedupe by temp keeping highest duty; use BTreeMap to share
+    // dedupe/sort semantics with `curve_full_points` and avoid drift.
+    let mut map: BTreeMap<u32, u32> = BTreeMap::new();
+    for &[t, d] in &points {
+        map.entry(t).and_modify(|e| *e = (*e).max(d)).or_insert(d);
+    }
+    let deduped: Vec<[u32; 2]> = map.into_iter().map(|(t, d)| [t, d]).collect();
+    // Locked zone: 100–110°C must be 100% fixed, remove any editable points in that range.
+    let mut filtered: Vec<[u32; 2]> = Vec::new();
+    for &[t, d] in &deduped {
+        if t < CURVE_TEMP_LOCK_START {
+            filtered.push([t, d]);
+        }
+    }
+    if filtered.is_empty() {
+        // Keep at least one editable point before lock; fallback to defaults truncated
+        let defaults = default_points();
+        for p in defaults {
+            if p[0] < CURVE_TEMP_LOCK_START {
+                filtered.push(p);
+            }
+        }
+    }
+    filtered.sort_by_key(|p| p[0]);
+    // Migrate old 4-point configs to 5 editable points (5+2 locked =7 total).
+    // Version-gated so a hand-edited 4-point curve created by a newer
+    // build is not rewritten on every load.
+    if version < CONFIG_VERSION && filtered.len() == 4 {
+        let desired = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]];
+        for &[t, d] in &desired {
+            if filtered.len() >= 5 {
+                break;
+            }
+            if !filtered.iter().any(|p| p[0] == t) {
+                filtered.push([t, d]);
+            }
+        }
+        filtered.sort_by_key(|p| p[0]);
+    }
+    // Preserve user-authored points. Earlier versions silently
+    // downgraded 6-point curves to 5 (dropping 92C), which lost
+    // hand-edited settings on every load. Only the absolute safety
+    // cap applies now.
+    filtered.truncate(MAX_CURVE_POINTS.saturating_sub(2));
+    // Duty must never decrease as temperature rises; otherwise a
+    // rising temperature could lower fan speed.
+    enforce_monotonic_duties(&mut filtered);
+    // Append locked endpoints
+    filtered.push([CURVE_TEMP_LOCK_START, 100]);
+    filtered.push([CURVE_TEMP_MAX, 100]);
+    filtered
 }
 
 pub fn curve_full_points(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
@@ -614,6 +647,7 @@ mod tests {
                 rate_limit_down_pct_per_step: None,
             },
             poll_ms: 1000,
+            per_fan_points: Vec::new(),
         });
         c.validate();
         let sensors = &c.fan.curve.as_ref().unwrap().curve.sensors;
@@ -666,6 +700,7 @@ mod tests {
         c.fan.curve = Some(GlobalCurveConfig {
             curve: CurveConfig::default(),
             poll_ms: 100,
+            per_fan_points: Vec::new(),
         });
         c.validate();
         assert_eq!(c.fan.curve.as_ref().unwrap().poll_ms, 500);
@@ -677,6 +712,7 @@ mod tests {
         c.fan.curve = Some(GlobalCurveConfig {
             curve: CurveConfig::default(),
             poll_ms: 2000,
+            per_fan_points: Vec::new(),
         });
         c.validate();
         assert_eq!(c.fan.curve.as_ref().unwrap().poll_ms, 2000);
@@ -739,6 +775,7 @@ mod tests {
                 rate_limit_down_pct_per_step: None,
             },
             poll_ms: 1000,
+            per_fan_points: Vec::new(),
         });
         c.validate();
         let pts = &c.fan.curve.as_ref().unwrap().curve.points;
@@ -771,6 +808,7 @@ mod tests {
                 rate_limit_down_pct_per_step: None,
             },
             poll_ms: 1000,
+            per_fan_points: Vec::new(),
         });
         c.validate();
         let pts = &c.fan.curve.as_ref().unwrap().curve.points;
@@ -791,6 +829,7 @@ mod tests {
                 rate_limit_down_pct_per_step: None,
             },
             poll_ms: 1000,
+            per_fan_points: Vec::new(),
         });
         c.validate();
         let pts = &c.fan.curve.as_ref().unwrap().curve.points;
@@ -799,6 +838,49 @@ mod tests {
         expected.push([CURVE_TEMP_MAX, 100]);
         assert_eq!(pts, &expected);
         assert!(!pts.is_empty());
+    }
+
+    #[test]
+    fn validate_per_fan_points_empty_slots_inherit_unified() {
+        let mut c = Config::default();
+        c.fan.curve = Some(GlobalCurveConfig {
+            curve: CurveConfig {
+                sensors: vec![],
+                points: vec![[40, 10]],
+                hysteresis_c: 2,
+                rate_limit_pct_per_step: 10,
+                rate_limit_down_pct_per_step: None,
+            },
+            poll_ms: 1000,
+            per_fan_points: vec![Vec::new(), vec![[50, 20]]],
+        });
+        c.validate();
+        let curve = c.fan.curve.as_ref().unwrap();
+        assert_eq!(curve.per_fan_points.len(), 2);
+        // Empty slot inherits the normalized unified curve.
+        assert_eq!(curve.per_fan_points[0], curve.curve.points);
+        // Provided slot normalizes through the same pipeline (locks appended).
+        assert_eq!(
+            curve.per_fan_points[1],
+            vec![
+                [50, 20],
+                [CURVE_TEMP_LOCK_START, 100],
+                [CURVE_TEMP_MAX, 100]
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_per_fan_points_truncates_vec() {
+        let mut c = Config::default();
+        c.fan.curve = Some(GlobalCurveConfig {
+            curve: CurveConfig::default(),
+            poll_ms: 1000,
+            per_fan_points: vec![Vec::new(); 100],
+        });
+        c.validate();
+        // 100 empty slots all inherit, then the vec-level bound applies.
+        assert_eq!(c.fan.curve.as_ref().unwrap().per_fan_points.len(), 8);
     }
 
     #[test]
@@ -813,6 +895,7 @@ mod tests {
                 rate_limit_down_pct_per_step: None,
             },
             poll_ms: 1000,
+            per_fan_points: Vec::new(),
         });
         c.validate();
         let sensors = &c.fan.curve.as_ref().unwrap().curve.sensors;
@@ -842,6 +925,7 @@ mod tests {
                 rate_limit_down_pct_per_step: None,
             },
             poll_ms: 1000,
+            per_fan_points: Vec::new(),
         });
         c.validate();
         // 4 editable + 2 locked, and no 85C default added.
@@ -862,6 +946,7 @@ mod tests {
                 rate_limit_down_pct_per_step: None,
             },
             poll_ms: 1000,
+            per_fan_points: Vec::new(),
         });
         c.validate();
         let pts = &c.fan.curve.as_ref().unwrap().curve.points;
@@ -884,6 +969,7 @@ mod tests {
                 rate_limit_down_pct_per_step: None,
             },
             poll_ms: 1000,
+            per_fan_points: Vec::new(),
         });
         c.validate();
         let pts = &c.fan.curve.as_ref().unwrap().curve.points;
@@ -906,6 +992,7 @@ mod tests {
                 rate_limit_down_pct_per_step: None,
             },
             poll_ms: 1000,
+            per_fan_points: Vec::new(),
         });
         c.validate();
         let pts = &c.fan.curve.as_ref().unwrap().curve.points;

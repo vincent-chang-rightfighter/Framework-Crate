@@ -8,6 +8,54 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tracing::{debug, warn};
 
+/// Shared clamp for unified and per-fan curve point drags. Dragging into
+/// the locked zone pins duty at 100; locked points are uneditable
+/// (`None`); temperature clamps between editable neighbors so points
+/// cannot cross and collapse control points.
+fn clamp_curve_point(points: &[[u32; 2]], idx: usize, temp: u32, duty: u32) -> Option<(u32, u32)> {
+    let mut duty = duty.clamp(0, 100);
+    if temp >= crate::types::CURVE_TEMP_LOCK_START {
+        duty = 100;
+    }
+    // Locked points (100,110) are not editable.
+    if let Some(&[t, _]) = points.get(idx)
+        && t >= crate::types::CURVE_TEMP_LOCK_START
+    {
+        return None;
+    }
+    // Clamp temperature between neighbors to avoid duplicate temps collapsing control points.
+    // Editable range is 0..99; 100-110 is locked 100%.
+    let orig_temp = points.get(idx).map(|p| p[0] as i64).unwrap_or(temp as i64);
+    let max_t = crate::types::CURVE_TEMP_EDIT_MAX as i64;
+    let mut others: Vec<i64> = points
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != idx)
+        .map(|(_, p)| p[0] as i64)
+        .filter(|&t| t < crate::types::CURVE_TEMP_LOCK_START as i64)
+        .collect();
+    others.sort_unstable();
+    let mut lo: i64 = -1; // nothing below ??allow down to 0
+    let mut hi: i64 = max_t + 1; // editable max is 99, locked 100 above
+    for &t in &others {
+        if t < temp as i64 {
+            lo = lo.max(t);
+        } else {
+            hi = hi.min(t);
+        }
+    }
+    let temp = if hi - lo <= 1 {
+        // No valid slot between neighbors (gap <=1) would force a
+        // duplicate that validate would silently drop; keep original.
+        orig_temp.clamp(0, max_t) as u32
+    } else {
+        let min_t = (lo + 1).max(0);
+        let max_allowed = (hi - 1).min(max_t);
+        (temp.clamp(0, crate::types::CURVE_TEMP_EDIT_MAX) as i64).clamp(min_t, max_allowed) as u32
+    };
+    Some((temp, duty))
+}
+
 impl App {
     pub(crate) fn handle_config_message(&mut self, message: &Message) -> Option<Task<Message>> {
         match *message {
@@ -68,60 +116,16 @@ impl App {
                 Some(Task::none())
             }
             Message::FanCurvePointMoved(idx, temp, duty) => {
-                let mut duty = duty.clamp(0, 100);
-                if temp >= crate::types::CURVE_TEMP_LOCK_START {
-                    duty = 100;
-                }
-                // Locked points (100,110) are not editable.
-                {
+                let points: Vec<[u32; 2]> = {
                     let cfg = read_lock(&self.state.lifecycle.config);
-                    if let Some(curve) = cfg.fan.curve.as_ref()
-                        && let Some(&[t, _]) = curve.curve.points.get(idx)
-                        && t >= crate::types::CURVE_TEMP_LOCK_START
-                    {
-                        return Some(Task::none());
-                    }
-                }
-                // Clamp temperature between neighbors to avoid duplicate temps collapsing control points.
-                // Editable range is 0..99; 100-110 is locked 100%.
-                let temp = {
-                    let cfg = read_lock(&self.state.lifecycle.config);
-                    let points = cfg
-                        .fan
+                    cfg.fan
                         .curve
                         .as_ref()
-                        .map(|c| c.curve.points.as_slice())
-                        .unwrap_or(&[]);
-                    let orig_temp = points.get(idx).map(|p| p[0] as i64).unwrap_or(temp as i64);
-                    // Locked zone points are fixed; keep original if trying to edit them (already returned).
-                    let max_t = crate::types::CURVE_TEMP_EDIT_MAX as i64;
-                    let mut others: Vec<i64> = points
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != idx)
-                        .map(|(_, p)| p[0] as i64)
-                        .filter(|&t| t < crate::types::CURVE_TEMP_LOCK_START as i64)
-                        .collect();
-                    others.sort_unstable();
-                    let mut lo: i64 = -1; // nothing below ??allow down to 0
-                    let mut hi: i64 = max_t + 1; // editable max is 99, locked 100 above
-                    for &t in &others {
-                        if t < temp as i64 {
-                            lo = lo.max(t);
-                        } else {
-                            hi = hi.min(t);
-                        }
-                    }
-                    // No valid slot between neighbors (gap <=1) would force a
-                    // duplicate that validate would silently drop; keep original.
-                    if hi - lo <= 1 {
-                        orig_temp.clamp(0, max_t) as u32
-                    } else {
-                        let min_t = (lo + 1).max(0);
-                        let max_allowed = (hi - 1).min(max_t);
-                        (temp.clamp(0, crate::types::CURVE_TEMP_EDIT_MAX) as i64)
-                            .clamp(min_t, max_allowed) as u32
-                    }
+                        .map(|c| c.curve.points.clone())
+                        .unwrap_or_default()
+                };
+                let Some((temp, duty)) = clamp_curve_point(&points, idx, temp, duty) else {
+                    return Some(Task::none());
                 };
                 self.mutate_config(|cfg| {
                     if let Some(ref mut curve) = cfg.fan.curve
@@ -132,6 +136,46 @@ impl App {
                         // monotonic curve so the editor line and labels do
                         // not disagree.
                         crate::types::enforce_monotonic_duties(&mut curve.curve.points);
+                    }
+                });
+                self.pending_curve_update = true;
+                self.last_curve_edit_ts = Instant::now();
+                self.mark_dirty();
+                self.save_config();
+                Some(Task::none())
+            }
+            Message::FanPerFanCurvePointMoved(fan_idx, idx, temp, duty) => {
+                let points: Vec<[u32; 2]> = {
+                    let cfg = read_lock(&self.state.lifecycle.config);
+                    cfg.fan
+                        .curve
+                        .as_ref()
+                        .map(|c| {
+                            c.per_fan_points
+                                .get(fan_idx)
+                                .cloned()
+                                .unwrap_or_else(|| c.curve.points.clone())
+                        })
+                        .unwrap_or_default()
+                };
+                let Some((temp, duty)) = clamp_curve_point(&points, idx, temp, duty) else {
+                    return Some(Task::none());
+                };
+                self.mutate_config(|cfg| {
+                    if let Some(ref mut curve) = cfg.fan.curve {
+                        // Grow defensively: a fan can appear mid-round before
+                        // the seeder sizes the slots.
+                        if curve.per_fan_points.len() <= fan_idx {
+                            curve
+                                .per_fan_points
+                                .resize(fan_idx + 1, curve.curve.points.clone());
+                        }
+                        if let Some(slot) = curve.per_fan_points.get_mut(fan_idx)
+                            && idx < slot.len()
+                        {
+                            slot[idx] = [temp, duty];
+                            crate::types::enforce_monotonic_duties(slot);
+                        }
                     }
                 });
                 self.pending_curve_update = true;
@@ -331,14 +375,29 @@ impl App {
             .as_ref()
             .map(|c| c.curve.points.as_slice())
             .unwrap_or(&[]);
-        if self.last_curve_points.as_slice() == pts {
-            return;
+        if self.last_curve_points.as_slice() != pts {
+            self.last_curve_points = pts.to_vec();
+            let new_full = Arc::new(crate::types::curve_full_points(pts));
+            with_write_lock(&self.state.fan.curve_full_points, |guard| {
+                *guard = new_full;
+            });
         }
-        self.last_curve_points = pts.to_vec();
-        let new_full = Arc::new(crate::types::curve_full_points(pts));
-        with_write_lock(&self.state.fan.curve_full_points, |guard| {
-            *guard = new_full;
-        });
+        let per_fan: Vec<Vec<[u32; 2]>> = cfg
+            .fan
+            .curve
+            .as_ref()
+            .map(|c| {
+                c.per_fan_points
+                    .iter()
+                    .map(|p| crate::types::curve_full_points(p))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if read_lock(&self.state.fan.per_fan_curve_full_points).as_ref() != &per_fan {
+            with_write_lock(&self.state.fan.per_fan_curve_full_points, |guard| {
+                *guard = Arc::new(per_fan);
+            });
+        }
     }
 
     /// Applies an imported config: replaces the stored config, persists it,

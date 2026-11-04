@@ -128,6 +128,23 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
             }
         }
         FanControlMode::Curve => {
+            // The unified toggle is shared with Manual (same atomic, same
+            // message): per-fan curves only exist while it is off, and only
+            // on multi-fan machines.
+            if snap.fan_count > 1 {
+                let unified = snap.unified_duty;
+                content = content.push(
+                    row![
+                        text("Unified Curve:").size(FONT_BODY),
+                        button(text(if unified { "ON" } else { "OFF" }).size(FONT_BODY))
+                            .on_press(Message::FanUnifiedDutyToggled(!unified))
+                            .style(btn_style),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+            let per_fan_mode = snap.fan_count > 1 && !snap.unified_duty;
             if let Some(ref curve) = config.fan.curve {
                 let hyst = curve.curve.hysteresis_c;
                 let rate = curve.curve.rate_limit_pct_per_step;
@@ -272,38 +289,34 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                 };
                 content = content.push(settings_panel);
 
-                // Sort by temperature so labels follow canvas left-to-right order.
-                let mut points_sorted = curve.curve.points.clone();
-                points_sorted.sort_by_key(|p| p[0]);
-                for (chunk_idx, chunk) in points_sorted.chunks(3).enumerate() {
-                    let mut r = iced::widget::Row::new().spacing(12);
-                    for (offset, point) in chunk.iter().enumerate() {
-                        let idx = chunk_idx * 3 + offset;
-                        let label = format!("P{}: {}°C -> {}%", idx + 1, point[0], point[1]);
-                        let txt = if point[0] >= crate::types::CURVE_TEMP_LOCK_START {
-                            text(label).size(FONT_BODY).style(move |_theme| {
-                                iced::widget::text::Style {
-                                    color: Some(pal.gray),
-                                }
-                            })
-                        } else {
-                            text(label).size(FONT_BODY)
+                if per_fan_mode {
+                    for (fan_idx, editable) in snap.per_fan_curve_points.iter().enumerate() {
+                        if fan_idx >= snap.fan_count as usize {
+                            // Vector retains docked fans; skip past hardware.
+                            continue;
+                        }
+                        let Some(full) = snap.per_fan_curve_full_points.get(fan_idx) else {
+                            continue;
                         };
-                        r = r.push(txt);
+                        content =
+                            content.push(text(format!("Fan {}:", fan_idx + 1)).size(FONT_BODY));
+                        content = content.push(curve_points_view(
+                            pal,
+                            editable,
+                            Arc::new(full.clone()),
+                            Arc::clone(&snap.curve_marks),
+                            Some(fan_idx),
+                        ));
                     }
-                    content = content.push(r);
+                } else {
+                    content = content.push(curve_points_view(
+                        pal,
+                        &curve.curve.points,
+                        Arc::clone(&snap.curve_full_points),
+                        Arc::clone(&snap.curve_marks),
+                        None,
+                    ));
                 }
-
-                let canvas = crate::curve_canvas::view_curve(
-                    Arc::clone(&snap.curve_points),
-                    Arc::clone(&snap.curve_full_points),
-                    Arc::clone(&snap.curve_marks),
-                );
-
-                let mut curve_area = column![].spacing(2);
-                curve_area = curve_area.push(canvas);
-
-                content = content.push(curve_area);
             } else {
                 content = content.push(text("Initializing curve...").size(FONT_BODY));
             }
@@ -311,4 +324,45 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
     }
 
     content.into()
+}
+
+/// Point labels plus the draggable canvas for one curve: the unified
+/// curve (`fan` None) or one fan's curve (`Some(idx)`). Shared so both
+/// editors render identically.
+fn curve_points_view(
+    pal: crate::style::Palette,
+    points: &[[u32; 2]],
+    full: Arc<Vec<[u32; 2]>>,
+    marks: Arc<Vec<crate::curve_canvas::SensorMark>>,
+    fan: Option<usize>,
+) -> Element<'_, Message> {
+    let mut area = column![].spacing(2);
+    // Sort by temperature so labels follow canvas left-to-right order.
+    let mut points_sorted = points.to_vec();
+    points_sorted.sort_by_key(|p| p[0]);
+    for (chunk_idx, chunk) in points_sorted.chunks(3).enumerate() {
+        let mut r = iced::widget::Row::new().spacing(12);
+        for (offset, point) in chunk.iter().enumerate() {
+            let idx = chunk_idx * 3 + offset;
+            let label = format!("P{}: {}°C -> {}%", idx + 1, point[0], point[1]);
+            let txt = if point[0] >= crate::types::CURVE_TEMP_LOCK_START {
+                text(label)
+                    .size(FONT_BODY)
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.gray),
+                    })
+            } else {
+                text(label).size(FONT_BODY)
+            };
+            r = r.push(txt);
+        }
+        area = area.push(r);
+    }
+    area = area.push(crate::curve_canvas::view_curve(
+        Arc::from(points),
+        full,
+        marks,
+        fan,
+    ));
+    area.into()
 }

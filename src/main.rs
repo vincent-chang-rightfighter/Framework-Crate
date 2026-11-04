@@ -795,6 +795,7 @@ mod tests {
                 manual: None,
                 curve: Some(types::GlobalCurveConfig {
                     poll_ms: 1000,
+                    per_fan_points: Vec::new(),
                     curve: types::CurveConfig {
                         sensors: vec![],
                         points: vec![[30, 10], [50, 50], [70, 90]],

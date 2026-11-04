@@ -34,6 +34,9 @@ pub(super) struct PollState {
     manual_ramp_current: Option<u32>,
     manual_per_fan_ramp: Option<Vec<u32>>,
     curve_stepper: CurveStepper,
+    /// One stepper per fan for non-unified curves; grown (never truncated)
+    /// as fans appear, mirroring `manual_per_fan_ramp`.
+    per_fan_curve_steppers: Vec<CurveStepper>,
     just_resumed: bool,
     consecutive_ec_failures: u32,
     consecutive_battery_failures: u32,
@@ -80,6 +83,7 @@ impl PollState {
             } else {
                 CurveStepper::new()
             },
+            per_fan_curve_steppers: Vec::new(),
             just_resumed: false,
             consecutive_ec_failures: 0,
             consecutive_battery_failures: 0,
@@ -107,6 +111,7 @@ impl PollState {
     /// `just_resumed`).
     pub(super) fn reset_fan_state(&mut self) {
         self.curve_stepper.reset();
+        self.per_fan_curve_steppers.clear();
         self.last_manual_duty = None;
         self.last_unified_duty = None;
         self.manual_ramp_current = None;
@@ -714,6 +719,7 @@ pub(super) async fn phase_fan(
         poll.last_manual_duty = None;
         poll.last_unified_duty = None;
         poll.manual_per_fan_ramp = None;
+        poll.per_fan_curve_steppers.clear();
         if matches!(mode, crate::types::FanControlMode::Manual) {
             // Prefer last written duty; fallback to RPM estimate.
             let last_duty = state.fan.last_applied_duty.load(Ordering::Acquire) as u32;
@@ -747,6 +753,7 @@ pub(super) async fn phase_fan(
         manual_ramp_current: poll.manual_ramp_current,
         manual_per_fan_ramp: &mut poll.manual_per_fan_ramp,
         curve_stepper: &mut poll.curve_stepper,
+        per_fan_curve_steppers: &mut poll.per_fan_curve_steppers,
         last_fan_mode: poll.last_fan_mode,
         last_unified_duty: poll.last_unified_duty,
         just_resumed: poll.just_resumed,

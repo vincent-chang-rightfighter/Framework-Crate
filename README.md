@@ -30,7 +30,7 @@ Download the `.exe`, then run it as administrator. PawnIO is optional and only n
 
 > Note: the Turbo readout, tray tooltip, Privacy switches, board revision, and PD-only Ports display are slated for the unreleased 0.9.4; the 0.9.3 download page matches its tag.
 
-- **Fan Control** — Auto (firmware), manual (0–100% duty, optional per-fan; at or above 95°C duty is floored at 90%), and curve mode with draggable points on a canvas (default 5 points, hysteresis, and rate limiting; live sensor markers shown on the curve)
+- **Fan Control** — Auto (firmware), manual (0–100% duty, optional per-fan; at or above 95°C duty is floored at 90%), and curve mode with draggable points on a canvas (default 5 points, hysteresis, and rate limiting; live sensor markers shown on the curve; optional per-fan curves on multi-fan machines via the Unified switch)
 - **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity. Details shows charger voltage/input on AC plus smart-battery data (per-cell voltages, pack temperature, safety alerts) when readable
 - **Live Telemetry** — Real-time temperature chart (selectable 15/30/60s window, default 30s), per-sensor display with colored indicators, and fan RPM in the header
 - **Misc Panel** — Camera/mic privacy switch states, keyboard backlight slider, fingerprint LED level, and USB-C / HDMI / DP port classification inferred from PD state
@@ -201,6 +201,7 @@ duty_pct = 50
 poll_ms = 500            # curve polling interval in ms (500–5000)
 sensors = []             # empty = hottest non-battery sensor
 points = [[30, 0], [45, 20], [60, 40], [75, 80], [85, 100]]  # editable 0–99°C; 100–110°C locked 100%
+per_fan_points = []      # optional per-fan points (multi-fan + Unified off); empty slots inherit points
 hysteresis_c = 2
 rate_limit_pct_per_step = 10
 # optional asymmetric down-rate limit (defaults to rate_limit_pct_per_step if omitted)
@@ -263,6 +264,7 @@ The file rotates once it grows past a size threshold, keeping `app.log.1` throug
 - **USB Expansion Card Classification (resolved in v0.3.0)**: Port type (USB-C / USB-A / HDMI / DP) is inferred from EC PD state. Since v0.3.0, ports that ever reported a Sink role are permanently classified as USB-C, so USB-C vs USB-A is no longer flipped when a device is plugged into an expansion-card port. HDMI/DP cards that omit DP-alt may still be mislabeled — use Expansion Card Debug Mode on the About page to inspect raw role / watts.
 - **Sleep / Hibernate Fan Control (resolved in v0.3.0, hardened in v0.9.0)**: Previously, fan-speed control could stop responding correctly after the system resumed from sleep or hibernation. v0.3.0 detects `WM_POWERBROADCAST` resume events (resetting the EC client, `CurveStepper` state, and thermal history) and additionally re-asserts the fan duty every 30 s, so the fans spin back up even if the resume event is missed. Consecutive EC read / write failures also trigger automatic client reinitialization. Since v0.9.0, all EC traffic goes through a single FIFO writer (no overtaking after resume) plus a wall-clock jump fallback when the resume event itself is missed.
 - **Platform-specific**: This project has only been tested on Intel Core Ultra Series 1 (Meteor Lake) Framework laptops; broader support is not yet guaranteed.
+- **Per-fan curves need multi-fan verification**: per-fan curves (multi-fan machines, Unified off) are covered by unit tests with a mocked EC only — no multi-fan hardware (Framework 16 / Desktop) was available to verify the on-device behavior. Single-fan machines take the exact pre-existing code path.
 - **EC driver**: The Framework EC kernel driver must be installed for `framework_lib` to communicate with the hardware.
 - **Crash leaves last-applied state**: orderly quit restores firmware fan control and flushes the charge limit, but a crash or kill bypasses that path, so the EC keeps the last written fan duty until sleep, reboot, or the next launch re-asserts it.
 - **Logoff/restart fan handover is not reliable**: on some Windows 11 elevated setups the session-end broadcast is not delivered to the tray window, so manual/curve duty can persist after sign-out until the next launch or reboot. Use **Restore Auto & Exit** before logging off when the fan is under manual/curve control.

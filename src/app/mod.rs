@@ -108,6 +108,7 @@ pub enum Message {
     FanModeChanged(FanControlMode),
     FanDutyChanged(u32),
     FanCurvePointMoved(usize, u32, u32),
+    FanPerFanCurvePointMoved(usize, usize, u32, u32),
     ToggleCurveSettings,
     CurveSensorSelected(usize),
     FanCurveHysteresisChanged(u32),
@@ -146,7 +147,7 @@ pub enum Message {
     ExportConfig,
     ExportConfigDone(Result<Option<String>, String>),
     ImportConfig,
-    ImportConfigDone(Result<Option<crate::config::ImportedSettings>, String>),
+    ImportConfigDone(Result<Option<Box<crate::config::ImportedSettings>>, String>),
     OpenUrl(&'static str),
     CheckForUpdates,
     UpdateCheckDone(Result<Option<String>, String>),
@@ -346,6 +347,19 @@ impl App {
                             .map(|c| c.curve.points.as_slice())
                             .unwrap_or(&[]),
                     ),
+                ))),
+                per_fan_curve_full_points: Arc::new(RwLock::new(Arc::new(
+                    loaded_config
+                        .fan
+                        .curve
+                        .as_ref()
+                        .map(|c| {
+                            c.per_fan_points
+                                .iter()
+                                .map(|p| crate::types::curve_full_points(p))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 ))),
                 fan_count: Arc::new(AtomicU64::new(0)),
                 unified_duty: Arc::new(AtomicBool::new(loaded_config.fan.unified_duty)),

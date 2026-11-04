@@ -6,8 +6,9 @@ use tracing::warn;
 
 use super::{
     FAN_REASSERT_INTERVAL_MS, FanCtx, Flow, MAX_EC_WRITE_FAILURES, THERMAL_STALE_MS,
-    reset_ec_after_failures, reset_ec_on_panic, shutdown_requested,
+    reset_ec_after_failures, reset_ec_on_panic, shutdown_requested, unified_transition_resets,
 };
+use crate::fan_control::CurveStepper;
 use crate::util::read_lock;
 
 /// Drives Curve mode from the thermal control temperature, handing back to
@@ -75,6 +76,24 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     };
     // Snapshot the points and drop the lock before any EC await below.
     let full_pts: Vec<[u32; 2]> = read_lock(&ctx.state.fan.curve_full_points).as_ref().clone();
+    // Non-unified curves on multi-fan machines: one stepper per fan, each
+    // following its own points. Falls back to the unified path when the
+    // per-fan table is undersized (a fan appeared this same round, before
+    // the seeder caught up).
+    let fan_count = ctx.state.fan.fan_count.load(Ordering::Acquire) as usize;
+    let unified_now = ctx.state.fan.unified_duty.load(Ordering::Acquire);
+    if unified_transition_resets(ctx.last_unified_duty, unified_now) {
+        ctx.last_unified_duty = Some(unified_now);
+        ctx.curve_stepper.reset();
+        ctx.per_fan_curve_steppers.clear();
+        ctx.last_duty_write_ms = 0;
+    }
+    let per_fan_full: Vec<Vec<[u32; 2]>> = read_lock(&ctx.state.fan.per_fan_curve_full_points)
+        .as_ref()
+        .clone();
+    if !unified_now && fan_count > 1 && per_fan_full.len() >= fan_count {
+        return run_per_fan(ctx, control_temp, hyst, rate, &per_fan_full, fan_count).await;
+    }
     let mut next = ctx.curve_stepper.next(
         control_temp,
         hyst,
@@ -234,6 +253,130 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     Flow::Done
 }
 
+/// Drives one curve per fan. Mirrors the unified write-each skeleton
+/// (shutdown/mode re-checks, failure accounting, 30s re-assert) but steps
+/// each fan through its own points with its own stepper.
+async fn run_per_fan(
+    ctx: &mut FanCtx<'_>,
+    control_temp: i32,
+    hyst: u32,
+    rate: u32,
+    per_fan_full: &[Vec<[u32; 2]>],
+    fan_count: usize,
+) -> Flow {
+    // Grow steppers for new fans; never truncate (undock keeps state).
+    // Seed from the live duty so a new fan ramps instead of jumping.
+    if ctx.per_fan_curve_steppers.len() < fan_count {
+        let seed = ctx
+            .curve_stepper
+            .current_duty()
+            .or_else(|| {
+                let last = ctx.state.fan.last_applied_duty.load(Ordering::Acquire) as u32;
+                (last > 0).then_some(last)
+            })
+            .unwrap_or(0);
+        ctx.per_fan_curve_steppers
+            .resize_with(fan_count, || CurveStepper::with_last_duty(seed));
+    }
+    let reassert_all =
+        ctx.now_ms.saturating_sub(ctx.last_duty_write_ms) >= FAN_REASSERT_INTERVAL_MS;
+    let mut targets: Vec<Option<u32>> = Vec::with_capacity(fan_count);
+    for full in per_fan_full.iter().take(fan_count) {
+        let idx = targets.len();
+        let mut next = ctx.per_fan_curve_steppers[idx].next(
+            control_temp,
+            hyst,
+            rate,
+            ctx.curve_rate_limit_down,
+            full,
+        );
+        if next.is_none() && reassert_all {
+            next = ctx.per_fan_curve_steppers[idx].current_duty();
+        }
+        targets.push(next);
+    }
+    // Converged everywhere with no re-assert due: nothing to write and
+    // nothing to count (mirrors the unified `if let Some(next)` guard).
+    if targets.iter().all(|t| t.is_none()) {
+        return Flow::Done;
+    }
+    let mut any_succeeded = false;
+    let mut failed_fans: Vec<u32> = Vec::new();
+    let mut max_duty: Option<u32> = None;
+    for (fan_idx, next) in targets.into_iter().enumerate() {
+        let Some(next) = next else { continue };
+        if shutdown_requested(ctx.state) {
+            return Flow::Stop;
+        }
+        let mode_check =
+            crate::types::FanControlMode::from_u8(ctx.state.fan.mode.load(Ordering::Acquire) as u8);
+        if mode_check != ctx.mode {
+            break;
+        }
+        let ec_clone = Arc::clone(ctx.ec);
+        let idx_u32 = fan_idx as u32;
+        match crate::ec_serial::exec(
+            "curve-set-per-fan-duty",
+            crate::util::EC_IO_TIMEOUT,
+            ec_clone,
+            move |ec| ec.set_fan_duty(next, Some(idx_u32)),
+        )
+        .await
+        {
+            Ok(result) => {
+                if let Err(e) = result {
+                    // Transient per-fan failure (e.g. dock unplugged); only all-fail counts toward reset.
+                    failed_fans.push(idx_u32);
+                    tracing::debug!("Failed to set fan {} duty (curve): {}", idx_u32, e);
+                } else {
+                    any_succeeded = true;
+                    ctx.last_duty_write_ms = ctx.now_ms;
+                    ctx.per_fan_curve_steppers[fan_idx].note_applied(next);
+                    max_duty = Some(max_duty.map_or(next, |m: u32| m.max(next)));
+                }
+            }
+            Err(e) if e.is_overloaded() => {
+                // Backpressure, not failure: skip the rest of this
+                // round like the old lock-contention path did.
+                return Flow::Next;
+            }
+            Err(e) => {
+                warn!(
+                    "EC write failed (set_fan_duty curve fan {}): {}",
+                    idx_u32, e
+                );
+                reset_ec_on_panic(ctx.state);
+                break;
+            }
+        }
+    }
+    if any_succeeded {
+        ctx.consecutive_ec_write_failures = 0;
+    } else {
+        ctx.consecutive_ec_write_failures += 1;
+        if ctx.consecutive_ec_write_failures >= MAX_EC_WRITE_FAILURES {
+            reset_ec_after_failures(ctx.state, ctx.consecutive_ec_write_failures);
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            return Flow::Next;
+        }
+    }
+    if !failed_fans.is_empty() {
+        warn!(
+            "Failed to set fan duties (curve per-fan) for fans {:?}",
+            failed_fans,
+        );
+    }
+    // Single representative for seeding/restart ramps; per-fan truth lives
+    // in the steppers, which outlive any single round.
+    if let Some(max) = max_duty {
+        ctx.state
+            .fan
+            .last_applied_duty
+            .store(max as u64, Ordering::Release);
+    }
+    Flow::Done
+}
+
 #[cfg(test)]
 mod tests {
     use super::run;
@@ -281,6 +424,7 @@ mod tests {
         let ec: Arc<dyn EcHw> = mock.clone();
         let mut ramp = None;
         let mut stepper = CurveStepper::new();
+        let mut per_fan_steppers: Vec<CurveStepper> = Vec::new();
         let mut ctx = FanCtx {
             state: &state,
             ec: &ec,
@@ -299,6 +443,7 @@ mod tests {
             manual_ramp_current: None,
             manual_per_fan_ramp: &mut ramp,
             curve_stepper: &mut stepper,
+            per_fan_curve_steppers: &mut per_fan_steppers,
             last_fan_mode: Some(FanControlMode::Curve),
             last_unified_duty: None,
             just_resumed: false,
@@ -340,6 +485,7 @@ mod tests {
         let ec: Arc<dyn EcHw> = mock.clone();
         let mut ramp = None;
         let mut stepper = CurveStepper::new();
+        let mut per_fan_steppers: Vec<CurveStepper> = Vec::new();
         let mut ctx = FanCtx {
             state: &state,
             ec: &ec,
@@ -358,6 +504,7 @@ mod tests {
             manual_ramp_current: None,
             manual_per_fan_ramp: &mut ramp,
             curve_stepper: &mut stepper,
+            per_fan_curve_steppers: &mut per_fan_steppers,
             last_fan_mode: Some(FanControlMode::Curve),
             last_unified_duty: None,
             just_resumed: false,
@@ -367,5 +514,97 @@ mod tests {
             mock.ops.lock().unwrap().is_empty(),
             "handover must be throttled within one second"
         );
+    }
+
+    #[tokio::test]
+    async fn per_fan_curves_drive_each_fan_from_its_own_points() {
+        use crate::cli::ec_wrapper::FanReading;
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        state
+            .fan
+            .mode
+            .store(FanControlMode::Curve.to_u8() as u64, Ordering::Release);
+        state.fan.unified_duty.store(false, Ordering::Release);
+        state.fan.fan_count.store(2, Ordering::Release);
+        state
+            .thermal
+            .last_success_ms
+            .store(60_000, Ordering::Release);
+        let mut temps = BTreeMap::new();
+        temps.insert("CPU".to_string(), 60);
+        with_write_lock(&state.thermal.data, |guard| {
+            *guard = Arc::new(Some(ThermalData {
+                temps: Arc::new(temps),
+                fans: smallvec::smallvec![
+                    FanReading {
+                        name: "Fan 1".to_string(),
+                        rpm: 2000
+                    },
+                    FanReading {
+                        name: "Fan 2".to_string(),
+                        rpm: 2000
+                    },
+                ],
+            }));
+        });
+        // Same 60C control temp, different per-fan curves.
+        with_write_lock(&state.fan.per_fan_curve_full_points, |guard| {
+            *guard = Arc::new(vec![
+                vec![[0, 0], [60, 20], [100, 100], [110, 100]],
+                vec![[0, 0], [60, 80], [100, 100], [110, 100]],
+            ]);
+        });
+        let mock = Arc::new(MockEc::new());
+        let ec: Arc<dyn EcHw> = mock.clone();
+        let mut ramp = None;
+        let mut stepper = CurveStepper::new();
+        // Pre-seeded near each fan's target so one round lands on two
+        // distinct duties (a cold start would rate-limit both from 0).
+        let mut per_fan_steppers = vec![
+            CurveStepper::with_last_duty(15),
+            CurveStepper::with_last_duty(75),
+        ];
+        let mut ctx = FanCtx {
+            state: &state,
+            ec: &ec,
+            mode: FanControlMode::Curve,
+            now_ms: 60_000,
+            manual_duty: None,
+            curve_hysteresis: Some(2),
+            curve_rate_limit: Some(10),
+            curve_rate_limit_down: None,
+            curve_sensors: vec!["CPU".to_string()],
+            consecutive_ec_write_failures: 0,
+            last_duty_write_ms: 0,
+            last_handover_ms: 0,
+            last_manual_duty: None,
+            manual_ramp_current: None,
+            manual_per_fan_ramp: &mut ramp,
+            curve_stepper: &mut stepper,
+            per_fan_curve_steppers: &mut per_fan_steppers,
+            last_fan_mode: Some(FanControlMode::Curve),
+            last_unified_duty: Some(false),
+            just_resumed: false,
+        };
+        assert!(matches!(run(&mut ctx).await, Flow::Done));
+        let ops = mock.ops.lock().unwrap();
+        assert!(
+            ops.iter().any(|op| op == "set_fan_duty(20,Some(0))"),
+            "fan 1 must follow its own curve: {ops:?}"
+        );
+        assert!(
+            ops.iter().any(|op| op == "set_fan_duty(80,Some(1))"),
+            "fan 2 must follow its own curve: {ops:?}"
+        );
+        assert_eq!(ctx.per_fan_curve_steppers.len(), 2);
     }
 }

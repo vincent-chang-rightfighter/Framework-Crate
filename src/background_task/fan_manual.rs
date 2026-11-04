@@ -7,6 +7,7 @@ use tracing::warn;
 use super::{
     FAN_REASSERT_INTERVAL_MS, FanCtx, Flow, MAX_EC_WRITE_FAILURES, THERMAL_STALE_MS,
     estimate_duty_from_thermal, reset_ec_after_failures, reset_ec_on_panic, shutdown_requested,
+    unified_transition_resets,
 };
 use crate::util::read_lock;
 
@@ -15,10 +16,6 @@ const HOT_FLOOR_TEMP_C: i32 = 95;
 /// Forced minimum duty at or above [`HOT_FLOOR_TEMP_C`]. Applied as a floor
 /// (`max(user, 90)`), never a ceiling: a user at 100% keeps 100%.
 const HOT_FLOOR_DUTY_PCT: u32 = 90;
-
-fn unified_transition_resets(prev: Option<bool>, now: bool) -> bool {
-    prev != Some(now)
-}
 
 /// Drives Manual mode: unified single ramp, or one ramp per fan.
 pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
@@ -322,6 +319,7 @@ mod tests {
         let ec: Arc<dyn EcHw> = mock.clone();
         let mut ramp = Some(vec![100]);
         let mut stepper = CurveStepper::new();
+        let mut per_fan_steppers: Vec<CurveStepper> = Vec::new();
         let mut ctx = FanCtx {
             state: &state,
             ec: &ec,
@@ -339,6 +337,7 @@ mod tests {
             manual_ramp_current: Some(100),
             manual_per_fan_ramp: &mut ramp,
             curve_stepper: &mut stepper,
+            per_fan_curve_steppers: &mut per_fan_steppers,
             last_fan_mode: Some(FanControlMode::Manual),
             last_unified_duty: Some(true),
             just_resumed: false,
@@ -369,6 +368,7 @@ mod tests {
         ec: &'a Arc<dyn EcHw>,
         ramp: &'a mut Option<Vec<u32>>,
         stepper: &'a mut CurveStepper,
+        per_fan_steppers: &'a mut Vec<CurveStepper>,
         temp_c: i32,
         duty: u32,
     ) -> FanCtx<'a> {
@@ -399,6 +399,7 @@ mod tests {
             manual_ramp_current: None,
             manual_per_fan_ramp: ramp,
             curve_stepper: stepper,
+            per_fan_curve_steppers: per_fan_steppers,
             last_fan_mode: Some(FanControlMode::Manual),
             last_unified_duty: Some(true),
             just_resumed: false,
@@ -434,8 +435,17 @@ mod tests {
         let ec: Arc<dyn EcHw> = mock.clone();
         let mut ramp = None;
         let mut stepper = CurveStepper::new();
+        let mut per_fan_steppers: Vec<CurveStepper> = Vec::new();
         // 30% at 95C is lifted to the 90% floor.
-        let mut ctx = manual_ctx_with_temp(&state, &ec, &mut ramp, &mut stepper, 95, 30);
+        let mut ctx = manual_ctx_with_temp(
+            &state,
+            &ec,
+            &mut ramp,
+            &mut stepper,
+            &mut per_fan_steppers,
+            95,
+            30,
+        );
         assert!(matches!(run(&mut ctx).await, Flow::Done));
         let ops = mock.ops.lock().unwrap();
         assert!(
@@ -456,8 +466,17 @@ mod tests {
         let ec: Arc<dyn EcHw> = mock.clone();
         let mut ramp = None;
         let mut stepper = CurveStepper::new();
+        let mut per_fan_steppers: Vec<CurveStepper> = Vec::new();
         // 100% at 99C stays 100%: the floor is a minimum, not a ceiling.
-        let mut ctx = manual_ctx_with_temp(&state, &ec, &mut ramp, &mut stepper, 99, 100);
+        let mut ctx = manual_ctx_with_temp(
+            &state,
+            &ec,
+            &mut ramp,
+            &mut stepper,
+            &mut per_fan_steppers,
+            99,
+            100,
+        );
         assert!(matches!(run(&mut ctx).await, Flow::Done));
         let ops = mock.ops.lock().unwrap();
         assert!(
@@ -474,8 +493,17 @@ mod tests {
         let ec: Arc<dyn EcHw> = mock.clone();
         let mut ramp = None;
         let mut stepper = CurveStepper::new();
+        let mut per_fan_steppers: Vec<CurveStepper> = Vec::new();
         // 0% at 94C is the user's explicit choice: no floor below 95C.
-        let mut ctx = manual_ctx_with_temp(&state, &ec, &mut ramp, &mut stepper, 94, 0);
+        let mut ctx = manual_ctx_with_temp(
+            &state,
+            &ec,
+            &mut ramp,
+            &mut stepper,
+            &mut per_fan_steppers,
+            94,
+            0,
+        );
         assert!(matches!(run(&mut ctx).await, Flow::Done));
         let ops = mock.ops.lock().unwrap();
         assert!(

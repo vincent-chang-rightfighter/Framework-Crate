@@ -1204,6 +1204,7 @@ mod tests {
                 rate_limit_down_pct_per_step: None,
             },
             poll_ms: 1000,
+            per_fan_points: Vec::new(),
         });
 
         let mut cfg2 = cfg.clone();

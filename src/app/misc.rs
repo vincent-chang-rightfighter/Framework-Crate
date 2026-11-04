@@ -375,7 +375,7 @@ impl App {
                                     Ok(None) => return Ok(None),
                                     Err(e) => return Err(e),
                                 };
-                                crate::config::import_file(&src).map(Some)
+                                crate::config::import_file(&src).map(|s| Some(Box::new(s)))
                             },
                         )
                         .await

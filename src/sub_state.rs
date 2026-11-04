@@ -12,6 +12,10 @@ use crate::util::{read_lock, with_write_lock};
 
 pub type PdPortsHistory = VecDeque<Arc<SmallVec<[cli::ec_wrapper::UsbCPort; 4]>>>;
 
+/// Per-fan runtime curves (lock endpoints included), index-aligned with
+/// fans. Alias keeps the triple-nested shared type readable.
+pub type PerFanCurveFullPoints = Vec<Vec<[u32; 2]>>;
+
 #[derive(Clone)]
 pub struct FanState {
     pub mode: Arc<AtomicU64>,
@@ -23,6 +27,11 @@ pub struct FanState {
     pub unified_duty: Arc<AtomicBool>,
     pub per_fan_duty: Arc<RwLock<Arc<Vec<u32>>>>,
     pub last_fan_count: Arc<AtomicU64>,
+    /// Per-fan runtime curves (lock endpoints included), index-aligned with
+    /// fans. Recomputed with the unified curve on edits; grown (never
+    /// truncated) as fans appear. Only read when more than one fan exists
+    /// and the unified toggle is off.
+    pub per_fan_curve_full_points: Arc<RwLock<Arc<PerFanCurveFullPoints>>>,
 }
 
 impl Default for FanState {
@@ -37,6 +46,7 @@ impl Default for FanState {
             unified_duty: Arc::new(AtomicBool::new(true)),
             per_fan_duty: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             last_fan_count: Arc::new(AtomicU64::new(0)),
+            per_fan_curve_full_points: Arc::new(RwLock::new(Arc::new(Vec::new()))),
         }
     }
 }

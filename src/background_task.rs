@@ -68,6 +68,13 @@ pub(super) enum Flow {
     Stop,
 }
 
+/// Unified-toggle edge detector shared by the Manual and Curve arms.
+/// `None` (first round) always counts as a transition so ramps reseed
+/// deterministically instead of inheriting a stale duty.
+pub(super) fn unified_transition_resets(prev: Option<bool>, now: bool) -> bool {
+    prev != Some(now)
+}
+
 /// Per-iteration fan state shared with the mode submodules.
 ///
 /// Plain scalars are owned copies, written back by the parent after the
@@ -92,6 +99,9 @@ pub(super) struct FanCtx<'a> {
     pub manual_ramp_current: Option<u32>,
     pub manual_per_fan_ramp: &'a mut Option<Vec<u32>>,
     pub curve_stepper: &'a mut CurveStepper,
+    /// Per-fan steppers for non-unified curves; the arm grows (never
+    /// truncates) this as fans appear, mirroring `manual_per_fan_ramp`.
+    pub per_fan_curve_steppers: &'a mut Vec<CurveStepper>,
     pub last_fan_mode: Option<crate::types::FanControlMode>,
     pub last_unified_duty: Option<bool>,
     pub just_resumed: bool,
@@ -294,6 +304,54 @@ fn ensure_per_fan_duty(state: &AppState, fan_count: usize) {
     }
 }
 
+/// Grows per-fan curve storage when fans appear on multi-fan machines.
+/// New slots clone the unified curve in memory (flushed to disk on the
+/// next explicit save, like any other config edit); never truncates, so
+/// undock cycles keep every fan's curve. Single-fan machines skip
+/// entirely, and without a curve section there is nothing to seed from.
+fn ensure_per_fan_curve_points(state: &AppState, fan_count: usize) {
+    if fan_count <= 1 {
+        return;
+    }
+    // Fast path: avoid write locks once sized.
+    if read_lock(&state.fan.per_fan_curve_full_points).len() >= fan_count {
+        return;
+    }
+    if read_lock(&state.lifecycle.config).fan.curve.is_none() {
+        return;
+    }
+    with_write_lock(&state.lifecycle.config, |guard| {
+        let cfg = Arc::make_mut(guard);
+        if let Some(curve) = cfg.fan.curve.as_mut()
+            && curve.per_fan_points.len() < fan_count
+        {
+            curve
+                .per_fan_points
+                .resize(fan_count, curve.curve.points.clone());
+        }
+    });
+    let full: Vec<Vec<[u32; 2]>> = {
+        let config = read_lock(&state.lifecycle.config);
+        config
+            .fan
+            .curve
+            .as_ref()
+            .map(|c| {
+                c.per_fan_points
+                    .iter()
+                    .map(|p| crate::types::curve_full_points(p))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    with_write_lock(&state.fan.per_fan_curve_full_points, |guard| {
+        if guard.len() < fan_count && full.len() >= fan_count {
+            *guard = Arc::new(full);
+            mark_view_dirty(state);
+        }
+    });
+}
+
 fn estimate_duty_from_thermal(state: &AppState) -> Option<u32> {
     let thermal_snap = read_lock(&state.thermal.data);
     if let Some(ref t) = *thermal_snap {
@@ -321,12 +379,18 @@ fn record_thermal_sample(state: &AppState, t: cli::ec_wrapper::ThermalData) -> b
     let now_ts = crate::util::monotonic_ms();
     let fan_count = t.fans.len() as u64;
     state.fan.fan_count.store(fan_count, Ordering::Release);
-    // Per-fan duties are only editable/used in Manual mode; Curve writes one
-    // global duty, so resizing the vector there is pointless write churn.
+    // Per-fan duties are only editable/used in Manual mode; Curve drives
+    // its own per-fan curves below, so resizing the duty vector there is
+    // pointless write churn.
     if crate::types::FanControlMode::from_u8(state.fan.mode.load(Ordering::Acquire) as u8)
         == crate::types::FanControlMode::Manual
     {
         ensure_per_fan_duty(state, t.fans.len());
+    }
+    if crate::types::FanControlMode::from_u8(state.fan.mode.load(Ordering::Acquire) as u8)
+        == crate::types::FanControlMode::Curve
+    {
+        ensure_per_fan_curve_points(state, t.fans.len());
     }
     if let Some(max_rpm) = t.fans.iter().map(|f| f.rpm).max() {
         let prev = state.fan.fan_max_rpm.load(Ordering::Acquire) as u32;
@@ -855,6 +919,63 @@ mod tests {
             *read_lock(&state.fan.per_fan_duty),
             vec![50, 50, 30, 30, 50, 50]
         );
+    }
+
+    #[test]
+    fn ensure_per_fan_curve_points_seeds_from_unified() {
+        use crate::app::AppState;
+        use crate::types::{CurveConfig, GlobalCurveConfig};
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        // Single-fan machines never grow per-fan storage.
+        ensure_per_fan_curve_points(&state, 1);
+        assert!(read_lock(&state.fan.per_fan_curve_full_points).is_empty());
+        // No curve section: nothing to seed from, no crash.
+        ensure_per_fan_curve_points(&state, 2);
+        assert!(read_lock(&state.fan.per_fan_curve_full_points).is_empty());
+
+        with_write_lock(&state.lifecycle.config, |guard| {
+            let cfg = Arc::make_mut(guard);
+            cfg.fan.curve = Some(GlobalCurveConfig {
+                curve: CurveConfig {
+                    points: vec![[40, 10]],
+                    ..CurveConfig::default()
+                },
+                poll_ms: 500,
+                per_fan_points: Vec::new(),
+            });
+        });
+        ensure_per_fan_curve_points(&state, 2);
+        let full = read_lock(&state.fan.per_fan_curve_full_points)
+            .as_ref()
+            .clone();
+        assert_eq!(full.len(), 2);
+        // Both slots follow the unified curve (plus lock endpoints).
+        let unified_full = crate::types::curve_full_points(&[[40, 10]]);
+        assert_eq!(full[0], unified_full);
+        assert_eq!(full[1], unified_full);
+        // Config slots grew in memory for edits/exports to see.
+        assert_eq!(
+            read_lock(&state.lifecycle.config)
+                .fan
+                .curve
+                .as_ref()
+                .unwrap()
+                .per_fan_points
+                .len(),
+            2
+        );
+
+        // Undock to 1 fan: fast path is skipped (<=1) and nothing truncates.
+        ensure_per_fan_curve_points(&state, 1);
+        assert_eq!(read_lock(&state.fan.per_fan_curve_full_points).len(), 2);
     }
 
     #[test]

@@ -38,6 +38,12 @@ pub(crate) struct ViewSnapshot {
     pub fan_count: u64,
     pub unified_duty: bool,
     pub per_fan_duty: Arc<Vec<u32>>,
+    /// Per-fan editable curve points from config (falls back to empty when
+    /// no curve section exists). The UI reads this; the arm reads the
+    /// runtime full points below.
+    pub per_fan_curve_points: Arc<Vec<Vec<[u32; 2]>>>,
+    /// Per-fan runtime curves with lock endpoints, index-aligned with fans.
+    pub per_fan_curve_full_points: Arc<crate::sub_state::PerFanCurveFullPoints>,
     pub ports_debug: bool,
     pub cpu_power: Arc<crate::cpu_power::CpuPowerInfo>,
     pub sync_enabled: bool,
@@ -63,12 +69,11 @@ pub(crate) struct ViewSnapshot {
     /// Resolved UI colors for the active theme. Style closures read from
     /// here instead of hardcoded constants so every theme renders fully.
     pub palette: crate::style::Palette,
-    pub curve_points: Arc<[[u32; 2]]>,
     pub curve_marks: Arc<Vec<crate::curve_canvas::SensorMark>>,
 }
 
 impl ViewSnapshot {
-    // NOTE: curve_points (<=7 pts), curve_marks (1-2 items) and the three
+    // NOTE: per-fan points, curve_marks (1-2 items) and the three
     // PL edit strings are rebuilt per snapshot, but each is tiny (tens of
     // bytes) and snapshots only run on tick/generation change (200ms
     // active, 1-2s idle/hidden-skipped). The heavy histories stay Arc
@@ -82,15 +87,17 @@ impl ViewSnapshot {
         let fan_count = app.state.fan.fan_count.load(Ordering::Acquire);
         let unified_duty = app.state.fan.unified_duty.load(Ordering::Acquire);
         let per_fan_duty = Arc::clone(&read_lock(&app.state.fan.per_fan_duty));
+        let per_fan_curve_full_points =
+            Arc::clone(&read_lock(&app.state.fan.per_fan_curve_full_points));
         let cpu_power = app.state.cpu_power.snapshot();
         let sync_enabled = app.state.cpu_power.sync_enabled.load(Ordering::Acquire);
         let config = Arc::clone(&read_lock(&app.state.lifecycle.config));
-        let curve_points: Arc<[[u32; 2]]> = config
+        let per_fan_curve_points: Arc<Vec<Vec<[u32; 2]>>> = config
             .fan
             .curve
             .as_ref()
-            .map(|c| Arc::from(c.curve.points.as_slice()))
-            .unwrap_or_else(|| Arc::from(Vec::<[u32; 2]>::new() as Vec<[u32; 2]>));
+            .map(|c| Arc::new(c.per_fan_points.clone()))
+            .unwrap_or_else(|| Arc::new(Vec::new()));
         let curve_marks: Arc<Vec<crate::curve_canvas::SensorMark>> =
             if let Some(thermal) = thermal_snap.data.as_ref().as_ref() {
                 if let Some(curve) = config.fan.curve.as_ref() {
@@ -156,6 +163,8 @@ impl ViewSnapshot {
             fan_count,
             unified_duty,
             per_fan_duty,
+            per_fan_curve_points,
+            per_fan_curve_full_points,
             ports_debug: app.ports_debug,
             cpu_power,
             sync_enabled,
@@ -180,7 +189,6 @@ impl ViewSnapshot {
             intel_cpu: app.state.system.intel_cpu.load(Ordering::Acquire),
             theme: app.theme,
             palette: crate::style::palette_for(app.theme),
-            curve_points,
             curve_marks,
         }
     }
