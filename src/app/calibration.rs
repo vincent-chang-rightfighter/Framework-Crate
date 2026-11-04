@@ -8,7 +8,7 @@
 //! topology change, missing readings, or EC errors; a finished run saves a
 //! complete table per fan.
 
-use super::{App, Message};
+use super::{App, Message, run_ec_task_result};
 use crate::cli;
 use crate::util::read_lock;
 use iced::Task;
@@ -27,6 +27,13 @@ const SAMPLE_WINDOW: Duration = Duration::from_secs(3);
 /// Abort when non-battery readings reach this (same philosophy as the
 /// Manual 95C floor: open-loop fixed duties must not cook the machine).
 const ABORT_TEMP_C: i32 = 95;
+/// Refuse to start a run when already this hot: the 0% step would begin
+/// with no cooling headroom. 80C leaves margin below the 95C abort.
+const START_MAX_TEMP_C: i32 = 80;
+/// Guard debounce: a single glitch tick (dropped EC sample, dock wobble)
+/// must not discard a ~1min run. Guards must trip consecutively this many
+/// ticks before the run aborts; the progress line shows "retrying" meanwhile.
+const GUARD_DEBOUNCE_TICKS: u32 = 3;
 /// EC write budget for step writes (user may take a while to notice).
 const STEP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Cap sample history; ticks run at 200ms so this never grows past a few
@@ -42,19 +49,32 @@ pub(crate) struct CalibrationRun {
     fan_total: usize,
     samples: Vec<(Instant, Vec<u32>)>,
     results: Vec<Vec<[u32; 2]>>,
+    /// Consecutive guard trips (hot / topology / no-data). Reset on any
+    /// clean tick; the run aborts only at `GUARD_DEBOUNCE_TICKS`.
+    unstable_streak: u32,
 }
 
 impl CalibrationRun {
     pub(crate) fn progress_line(&self) -> String {
         let duty = CALIBRATION_STEPS.get(self.step_idx).copied().unwrap_or(0);
         let elapsed = self.started.elapsed().as_secs();
-        format!(
-            "Step {}/{}: {}% ({}s elapsed)",
-            self.step_idx + 1,
-            CALIBRATION_STEPS.len(),
-            duty,
-            elapsed
-        )
+        if self.unstable_streak > 0 {
+            format!(
+                "Step {}/{}: {}% ({}s elapsed, retrying…)",
+                self.step_idx + 1,
+                CALIBRATION_STEPS.len(),
+                duty,
+                elapsed
+            )
+        } else {
+            format!(
+                "Step {}/{}: {}% ({}s elapsed)",
+                self.step_idx + 1,
+                CALIBRATION_STEPS.len(),
+                duty,
+                elapsed
+            )
+        }
     }
 }
 
@@ -141,6 +161,28 @@ impl App {
             self.mark_dirty();
             return Some(Task::none());
         }
+        // Refuse to start hot: the run ends at 0% with no active cooling,
+        // so starting at 80C+ leaves no headroom before the 95C abort.
+        // Close heavy workloads and let the machine cool first.
+        let start_temp: Option<i32> = read_lock(&self.state.thermal.data)
+            .as_ref()
+            .as_ref()
+            .and_then(|t| {
+                t.temps
+                    .iter()
+                    .filter(|(n, _)| !crate::types::is_battery_sensor(n))
+                    .map(|(_, v)| *v)
+                    .max()
+            });
+        if start_temp.is_some_and(|t| t >= START_MAX_TEMP_C) {
+            self.calibration_status = Some(format!(
+                "Too hot to start ({}C); close heavy workloads, let it cool below {}C, then retry",
+                start_temp.unwrap_or(0),
+                START_MAX_TEMP_C
+            ));
+            self.mark_dirty();
+            return Some(Task::none());
+        }
         self.calibration_status = None;
         self.state
             .fan
@@ -154,6 +196,7 @@ impl App {
             fan_total,
             samples: Vec::new(),
             results: vec![Vec::new(); fan_total],
+            unstable_streak: 0,
         });
         self.mark_dirty();
         Some(emit_step_write(
@@ -166,8 +209,7 @@ impl App {
         if self.calibration.is_none() {
             return Some(Task::none());
         }
-        self.abort_calibration("cancelled by user".to_string());
-        Some(Task::none())
+        Some(self.abort_calibration("cancelled by user".to_string()))
     }
 
     pub(crate) fn calibration_clear_table(&mut self) -> Option<Task<Message>> {
@@ -197,14 +239,16 @@ impl App {
                 run.awaiting_write = false;
                 run.step_started = Instant::now();
                 run.samples.clear();
+                self.mark_dirty();
+                Some(Task::none())
             }
             Err(e) => {
                 let reason = format!("EC write failed: {e}");
-                self.abort_calibration(reason);
+                let restore = self.abort_calibration(reason);
+                self.mark_dirty();
+                Some(restore)
             }
         }
-        self.mark_dirty();
-        Some(Task::none())
     }
 
     /// Advances the wizard one tick: samples RPM, enforces guards, and
@@ -243,21 +287,42 @@ impl App {
             run.samples
                 .retain(|(t, _)| now.duration_since(*t) < SAMPLE_RETAIN);
         }
-        if !has_data {
-            self.abort_calibration("no fan readings".to_string());
+        // Debounced guards: one glitch tick must not kill a ~1min run.
+        // Each guard must trip consecutively GUARD_DEBOUNCE_TICKS times;
+        // meanwhile the progress line shows "retrying…" (see progress_line).
+        let guard_reason: Option<String> = if !has_data {
+            Some("no fan readings".to_string())
+        } else {
+            let fan_total = self.calibration.as_ref().map(|r| r.fan_total).unwrap_or(0);
+            if fan_len != fan_total {
+                Some(format!("fan topology changed ({fan_total}→{fan_len})"))
+            } else if hot {
+                Some(format!(
+                    "temperature reached {ABORT_TEMP_C}C, stopping for safety"
+                ))
+            } else {
+                None
+            }
+        };
+        if let Some(reason) = guard_reason {
+            let streak = self
+                .calibration
+                .as_mut()
+                .map(|r| {
+                    r.unstable_streak = r.unstable_streak.saturating_add(1);
+                    r.unstable_streak
+                })
+                .unwrap_or(GUARD_DEBOUNCE_TICKS);
+            if streak >= GUARD_DEBOUNCE_TICKS {
+                let restore = self.abort_calibration(reason);
+                return Some(restore);
+            }
             return None;
+        }
+        if let Some(run) = self.calibration.as_mut() {
+            run.unstable_streak = 0;
         }
         let fan_total = self.calibration.as_ref().map(|r| r.fan_total).unwrap_or(0);
-        if fan_len != fan_total {
-            self.abort_calibration(format!("fan topology changed ({fan_total}→{fan_len})"));
-            return None;
-        }
-        if hot {
-            self.abort_calibration(format!(
-                "temperature reached {ABORT_TEMP_C}C, stopping for safety"
-            ));
-            return None;
-        }
         let dwell_done = self
             .calibration
             .as_ref()
@@ -283,7 +348,18 @@ impl App {
             match median_u32(&mut vals) {
                 Some(m) => medians.push(m),
                 None => {
-                    self.abort_calibration("no fan readings".to_string());
+                    let streak = self
+                        .calibration
+                        .as_mut()
+                        .map(|r| {
+                            r.unstable_streak = r.unstable_streak.saturating_add(1);
+                            r.unstable_streak
+                        })
+                        .unwrap_or(GUARD_DEBOUNCE_TICKS);
+                    if streak >= GUARD_DEBOUNCE_TICKS {
+                        let restore = self.abort_calibration("no fan readings".to_string());
+                        return Some(restore);
+                    }
                     return None;
                 }
             }
@@ -296,8 +372,8 @@ impl App {
             run.step_idx += 1;
         }
         if step_idx + 1 >= CALIBRATION_STEPS.len() {
-            self.finish_calibration();
-            return None;
+            let restore = self.finish_calibration();
+            return Some(restore);
         }
         if let Some(run) = self.calibration.as_mut() {
             run.awaiting_write = true;
@@ -309,31 +385,58 @@ impl App {
         ))
     }
 
-    fn finish_calibration(&mut self) {
+    fn finish_calibration(&mut self) -> Task<Message> {
         let (tables, secs) = match self.calibration.take() {
             Some(run) => (run.results, run.started.elapsed().as_secs()),
-            None => return,
+            None => return Task::none(),
         };
         let fans = tables.len();
         self.mutate_config(|cfg| {
             cfg.fan.calibration_tables = tables;
         });
         self.save_config();
-        self.teardown_calibration();
+        let restore = self.teardown_calibration();
         self.calibration_status = Some(format!("Calibrated {fans} fan(s) in {secs}s"));
         self.mark_dirty();
+        restore
     }
 
-    fn abort_calibration(&mut self, reason: String) {
+    fn abort_calibration(&mut self, reason: String) -> Task<Message> {
         warn!("Fan calibration aborted: {reason}");
         // Aborts save nothing: a partial table from a hot/cancelled run is
         // exactly what must not get baked in.
-        self.teardown_calibration();
+        let restore = self.teardown_calibration();
         self.calibration_status = Some(format!("Calibration aborted: {reason}"));
         self.mark_dirty();
+        restore
     }
 
-    fn teardown_calibration(&mut self) {
+    /// Silent clear for the quit path: the quit handover owns the final fan
+    /// write (via `exec_force`, after all queued duties), so no immediate
+    /// restore is emitted here. Clears `calibration_active` so no further
+    /// step write is issued between quit request and window close.
+    pub(crate) fn abort_calibration_for_quit(&mut self) {
+        if self.calibration.is_none() {
+            return;
+        }
+        self.calibration = None;
+        self.state
+            .fan
+            .calibration_active
+            .store(false, Ordering::Release);
+    }
+
+    /// Queues an immediate firmware-handover restore on top of the
+    /// `fan_reset_pending` flag. The flag lets the next background round
+    /// re-assert the configured mode; the immediate write closes the hot
+    /// window (e.g. an abort at 0%) without waiting for that round.
+    fn calibration_restore_task(&self) -> Task<Message> {
+        run_ec_task_result(&self.state.system.ec_client, move |ec| {
+            ec.autofanctrl().map_err(|e| e.to_string())
+        })
+    }
+
+    fn teardown_calibration(&mut self) -> Task<Message> {
         self.calibration = None;
         self.state
             .fan
@@ -345,6 +448,7 @@ impl App {
             .fan_reset_pending
             .store(true, Ordering::Release);
         self.mark_dirty();
+        self.calibration_restore_task()
     }
 }
 
@@ -394,6 +498,7 @@ mod tests {
             fan_total: 1,
             samples: Vec::new(),
             results: vec![Vec::new()],
+            unstable_streak: 0,
         };
         assert!(run.progress_line().starts_with("Step 3/5: 50%"));
     }

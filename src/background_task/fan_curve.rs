@@ -84,7 +84,12 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
     let unified_now = ctx.state.fan.unified_duty.load(Ordering::Acquire);
     if unified_transition_resets(ctx.last_unified_duty, unified_now) {
         ctx.last_unified_duty = Some(unified_now);
-        ctx.curve_stepper.reset();
+        // Re-seed from the live duty instead of clearing: a bare reset()
+        // drops to None and the next `next()` jumps straight to target with
+        // no rate-limit (Manual ramps the same transition via
+        // last_applied_duty/estimate). Seeding keeps the toggle bumpless.
+        let seed = ctx.state.fan.last_applied_duty.load(Ordering::Acquire) as u32;
+        *ctx.curve_stepper = CurveStepper::with_last_duty(seed);
         ctx.per_fan_curve_steppers.clear();
         ctx.last_duty_write_ms = 0;
     }
@@ -265,11 +270,17 @@ async fn run_per_fan(
     fan_count: usize,
 ) -> Flow {
     // Grow steppers for new fans; never truncate (undock keeps state).
-    // Seed from the live duty so a new fan ramps instead of jumping.
+    // Seed from live duties so a new fan ramps instead of jumping: prefer
+    // the max of already-running per-fan steppers (unified stepper goes
+    // stale in per-fan mode), then the unified stepper, then last applied.
     if ctx.per_fan_curve_steppers.len() < fan_count {
-        let seed = ctx
-            .curve_stepper
-            .current_duty()
+        let per_fan_max = ctx
+            .per_fan_curve_steppers
+            .iter()
+            .filter_map(|s| s.current_duty())
+            .max();
+        let seed = per_fan_max
+            .or_else(|| ctx.curve_stepper.current_duty())
             .or_else(|| {
                 let last = ctx.state.fan.last_applied_duty.load(Ordering::Acquire) as u32;
                 (last > 0).then_some(last)
@@ -606,5 +617,83 @@ mod tests {
             "fan 2 must follow its own curve: {ops:?}"
         );
         assert_eq!(ctx.per_fan_curve_steppers.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn unified_toggle_seeds_instead_of_jumping() {
+        use crate::cli::ec_wrapper::FanReading;
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        state
+            .fan
+            .mode
+            .store(FanControlMode::Curve.to_u8() as u64, Ordering::Release);
+        // Toggle per-fan -> unified: the stepper must ramp from live duty.
+        state.fan.unified_duty.store(true, Ordering::Release);
+        state.fan.fan_count.store(1, Ordering::Release);
+        state.fan.last_applied_duty.store(50, Ordering::Release);
+        state
+            .thermal
+            .last_success_ms
+            .store(60_000, Ordering::Release);
+        let mut temps = BTreeMap::new();
+        temps.insert("CPU".to_string(), 60);
+        with_write_lock(&state.thermal.data, |guard| {
+            *guard = Arc::new(Some(ThermalData {
+                temps: Arc::new(temps),
+                fans: smallvec::smallvec![FanReading {
+                    name: "Fan 1".to_string(),
+                    rpm: 2000
+                },],
+            }));
+        });
+        with_write_lock(&state.fan.curve_full_points, |guard| {
+            *guard = Arc::new(vec![[0, 0], [60, 80], [100, 100], [110, 100]]);
+        });
+        let mock = Arc::new(MockEc::new());
+        let ec: Arc<dyn EcHw> = mock.clone();
+        let mut ramp = None;
+        let mut stepper = CurveStepper::new();
+        let mut per_fan_steppers: Vec<CurveStepper> = Vec::new();
+        let mut ctx = FanCtx {
+            state: &state,
+            ec: &ec,
+            mode: FanControlMode::Curve,
+            now_ms: 60_000,
+            manual_duty: None,
+            curve_hysteresis: Some(2),
+            curve_rate_limit: Some(10),
+            curve_rate_limit_down: None,
+            curve_sensors: vec!["CPU".to_string()],
+            consecutive_ec_write_failures: 0,
+            last_duty_write_ms: 0,
+            last_handover_ms: 0,
+            last_manual_duty: None,
+            manual_ramp_current: None,
+            manual_per_fan_ramp: &mut ramp,
+            curve_stepper: &mut stepper,
+            per_fan_curve_steppers: &mut per_fan_steppers,
+            last_fan_mode: Some(FanControlMode::Curve),
+            last_unified_duty: Some(false),
+            just_resumed: false,
+        };
+        assert!(matches!(run(&mut ctx).await, Flow::Done));
+        let ops = mock.ops.lock().unwrap();
+        assert!(
+            ops.iter().any(|op| op == "set_fan_duty(60,None)"),
+            "toggle must ramp 50->60, not jump to 80: {ops:?}"
+        );
+        assert!(
+            ops.iter().all(|op| op != "set_fan_duty(80,None)"),
+            "no jump on unified toggle: {ops:?}"
+        );
     }
 }

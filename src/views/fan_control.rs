@@ -81,7 +81,7 @@ pub(crate) fn view_fan_control(snap: &ViewSnapshot) -> Element<'_, Message> {
                 .on_press(Message::FanModeChanged(FanControlMode::Curve))
                 .style(move |theme, status| mode_style(theme, status, is_curve)),
             space::horizontal(),
-            button(text(settings_label).size(FONT_BODY))
+            button(text(settings_label).size(FONT_SMALL))
                 .on_press(Message::ToggleCurveSettings)
                 .style(btn_style),
         ]
@@ -335,7 +335,7 @@ fn calibration_view(snap: &ViewSnapshot, pal: Palette) -> Element<'_, Message> {
                 button(text("Cancel").size(FONT_BODY))
                     .on_press(Message::CalibrationCancel)
                     .style(btn_style),
-                text("Drives all fans 100→0 in 5 steps (~1 min); aborts on heat or cancel.")
+                text("Drives all fans 100→0 in 5 steps (~1 min, aborts on heat); close heavy workloads and keep vents clear.")
                     .size(FONT_SMALL)
                     .style(move |_theme| iced::widget::text::Style {
                         color: Some(pal.gray),

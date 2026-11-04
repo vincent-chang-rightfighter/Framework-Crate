@@ -261,16 +261,25 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 return Flow::Next;
             }
-            // Update on any write, including 0% convergence.
+            // Update on any write, including 0% convergence. Only consider
+            // physically present fans: the ramp vector retains docked fans
+            // beyond fan_count_now, and their stale duties must not leak
+            // into the unified seed / quit-handover baseline.
             if wrote_any {
-                let max_applied = ramp.iter().copied().max().unwrap_or(0);
+                let max_applied = ramp
+                    .iter()
+                    .take(fan_count_now)
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
                 ctx.state
                     .fan
                     .last_applied_duty
                     .store(max_applied as u64, Ordering::Release);
             }
             // Sync unified ramp seed with per-fan max for mode switch.
-            ctx.manual_ramp_current = ramp.iter().copied().max();
+            // Same dock-residual guard as above: only present fans seed.
+            ctx.manual_ramp_current = ramp.iter().take(fan_count_now).copied().max();
         }
     }
     Flow::Done
@@ -361,6 +370,78 @@ mod tests {
     fn unchanged_unified_mode_keeps_ramps() {
         assert!(!unified_transition_resets(Some(true), true));
         assert!(!unified_transition_resets(Some(false), false));
+    }
+
+    #[tokio::test]
+    async fn per_fan_max_ignores_docked_residual() {
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        state
+            .fan
+            .mode
+            .store(FanControlMode::Manual.to_u8() as u64, Ordering::Release);
+        state.fan.unified_duty.store(false, Ordering::Release);
+        // One physical fan; slot 1 retains a docked fan's stale 100.
+        state.fan.fan_count.store(1, Ordering::Release);
+        state
+            .thermal
+            .last_success_ms
+            .store(60_000, Ordering::Release);
+        with_write_lock(&state.fan.per_fan_duty, |guard| {
+            *guard = Arc::new(vec![20, 100]);
+        });
+        let mock = Arc::new(MockEc::new());
+        let ec: Arc<dyn EcHw> = mock.clone();
+        // Ramp retains the docked residual; only the present fan may seed.
+        let mut ramp = Some(vec![20, 100]);
+        let mut stepper = CurveStepper::new();
+        let mut per_fan_steppers: Vec<CurveStepper> = Vec::new();
+        let mut ctx = FanCtx {
+            state: &state,
+            ec: &ec,
+            mode: FanControlMode::Manual,
+            now_ms: 60_000,
+            manual_duty: None,
+            curve_hysteresis: None,
+            curve_rate_limit: None,
+            curve_rate_limit_down: None,
+            curve_sensors: Vec::new(),
+            consecutive_ec_write_failures: 0,
+            // Old write time so the periodic re-assert forces a write.
+            last_duty_write_ms: 0,
+            last_handover_ms: 0,
+            last_manual_duty: None,
+            manual_ramp_current: None,
+            manual_per_fan_ramp: &mut ramp,
+            curve_stepper: &mut stepper,
+            per_fan_curve_steppers: &mut per_fan_steppers,
+            last_fan_mode: Some(FanControlMode::Manual),
+            last_unified_duty: Some(false),
+            just_resumed: false,
+        };
+        assert!(matches!(run(&mut ctx).await, Flow::Done));
+        assert_eq!(
+            state.fan.last_applied_duty.load(Ordering::Acquire),
+            20,
+            "docked residual must not leak into the unified seed"
+        );
+        let ops = mock.ops.lock().unwrap();
+        assert!(
+            ops.iter().any(|op| op == "set_fan_duty(20,Some(0))"),
+            "present fan must be written: {ops:?}"
+        );
+        assert!(
+            ops.iter().all(|op| !op.contains("Some(1)")),
+            "docked fan must never be written: {ops:?}"
+        );
     }
 
     fn manual_ctx_with_temp<'a>(

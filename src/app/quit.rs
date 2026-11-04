@@ -8,6 +8,10 @@ impl App {
     pub(crate) fn handle_quit_message(&mut self, message: &Message) -> Option<Task<Message>> {
         match *message {
             Message::QuitWithRestore => {
+                // Stop the wizard first: the quit handover (exec_force) runs
+                // after all queued duties, and no further step write may be
+                // issued between request and window close.
+                self.abort_calibration_for_quit();
                 self.show_quit_warning = false;
                 self.state.lifecycle.shutdown.store(true, Ordering::Release);
                 self.state.cpu_power.stop_sync();
@@ -32,6 +36,7 @@ impl App {
                 Some(Task::none())
             }
             Message::QuitWithDuty => {
+                self.abort_calibration_for_quit();
                 self.show_quit_warning = false;
                 self.state.lifecycle.shutdown.store(true, Ordering::Release);
                 self.state.cpu_power.stop_sync();
@@ -58,6 +63,7 @@ impl App {
                 ))
             }
             Message::QuitWithoutRestore => {
+                self.abort_calibration_for_quit();
                 self.show_quit_warning = false;
                 self.tray.shutdown();
                 self.state.lifecycle.shutdown.store(true, Ordering::Release);

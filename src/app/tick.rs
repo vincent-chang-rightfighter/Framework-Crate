@@ -66,17 +66,21 @@ impl App {
                 .store(false, Ordering::Release);
         }
 
-        // Ensure CPU power is initialized if needed (non-blocking). This runs
+        // Ensure CPU power is initialized if needed (non-blocking). Runs
         // every tick (not only startup recovery): PawnIO/modules often become
         // ready after the one-shot startup refresh already filled empties.
-        if self.cpu_power_supported() {
+        // Note: this must not early-return. The tray init/update, PL-reset,
+        // and sync-death checks below must run even while CPU power is
+        // unavailable; otherwise a machine without PawnIO starves them every
+        // tick. Queue at most one catch-up refresh and continue.
+        let cpu_power_refresh: Option<Task<Message>> = if self.cpu_power_supported() {
             let info = self.state.cpu_power.snapshot();
             if !info.available {
+                // Keep the latch open while hardware is missing so the
+                // catch-up fires again once it appears.
+                self.pl_fields_primed = false;
                 let cpu_power = self.state.cpu_power.clone();
-                return Task::batch([
-                    refresh_cpu_power_task(cpu_power, || {}),
-                    tick_task(self.tick_interval_ms),
-                ]);
+                Some(refresh_cpu_power_task(cpu_power, || {}))
             } else if !self.pl_fields_primed {
                 // Hardware just appeared (the background poll brought it
                 // up without a refresh message): populate the edit boxes
@@ -86,12 +90,13 @@ impl App {
                 // explicit-only, so in-progress typing is never clobbered
                 // by the poll loop.
                 let cpu_power = self.state.cpu_power.clone();
-                return Task::batch([
-                    refresh_cpu_power_task(cpu_power, || {}),
-                    tick_task(self.tick_interval_ms),
-                ]);
+                Some(refresh_cpu_power_task(cpu_power, || {}))
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         let now_ms = crate::util::monotonic_ms();
         let reset_retry_at = self
@@ -263,7 +268,10 @@ impl App {
             self.mark_dirty();
         }
 
-        tick_task(next_ms)
+        match cpu_power_refresh {
+            Some(refresh) => Task::batch([refresh, tick_task(next_ms)]),
+            None => tick_task(next_ms),
+        }
     }
 
     pub(crate) fn autosize_task(&self) -> Option<Task<Message>> {

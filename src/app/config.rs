@@ -405,8 +405,13 @@ impl App {
     /// chart window) the same way startup and the per-field handlers do.
     /// Hardware converges through the existing paths (fan atomics are read
     /// every poll round; charge limit goes out via the save-task watcher).
+    /// Callers must ensure no calibration run is active (see the import
+    /// handler): importing mid-run would race the wizard for EC writes and
+    /// lose to its finish.
     pub(crate) fn apply_imported_config(&mut self, cfg: &Config) {
         let cfg = cfg.clone();
+        let old_tables =
+            read_lock(&self.state.lifecycle.config).fan.calibration_tables.clone();
         self.mutate_config(|c| *c = cfg);
         let applied = read_lock(&self.state.lifecycle.config).clone();
         self.state
@@ -420,6 +425,20 @@ impl App {
         with_write_lock(&self.state.fan.per_fan_duty, |guard| {
             *guard = Arc::new(applied.fan.per_fan_duty.clone());
         });
+        // Keep the in-memory custom-limit flag in sync or the snapshot badge
+        // (views) drifts from config until the next infer pass.
+        self.pl_custom_applied
+            .store(applied.pl_custom_applied, Ordering::Release);
+        // Refresh the sensor dropdown cache so newly imported sensor
+        // selections show immediately instead of staying stale.
+        self.rebuild_sensor_cache();
+        // Force fan re-convergence: without this a Curve↔Manual↔Disabled
+        // switch would wait up to 30s for the periodic re-assert.
+        self.state
+            .lifecycle
+            .fan_reset_pending
+            .store(true, Ordering::Release);
+        self.state.fan.last_applied_duty.store(0, Ordering::Release);
         self.state
             .lifecycle
             .poll_ms
@@ -432,6 +451,10 @@ impl App {
         });
         self.theme =
             crate::style::ThemeId::parse(&applied.theme).unwrap_or(crate::style::ThemeId::Default);
+        // A new table makes any previous "Calibrated N fans" line stale.
+        if old_tables != applied.fan.calibration_tables {
+            self.calibration_status = None;
+        }
         self.update_curve_full_points();
         self.save_config();
     }

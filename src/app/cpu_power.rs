@@ -423,6 +423,10 @@ impl App {
                     // the tick loop uses it to fire exactly one catch-up
                     // refresh when hardware appears without a message.
                     self.pl_fields_primed = true;
+                } else {
+                    // Hardware dropped: reopen the latch so the next
+                    // appearance fires a catch-up refresh again.
+                    self.pl_fields_primed = false;
                 }
                 self.infer_pl_custom_applied();
                 self.mark_dirty();
@@ -653,6 +657,18 @@ mod tests {
         assert!(!app.pl_fields_primed);
         // Unavailable snapshot: boxes cleared, latch stays open so the tick
         // loop keeps firing catch-up refreshes.
+        let _ = app.handle_cpu_power_message(&Message::CpuPowerDataRefreshed);
+        assert!(!app.pl_fields_primed);
+    }
+
+    #[test]
+    fn primed_reopens_when_hardware_drops() {
+        use crate::app::Message;
+        let (mut app, _) = crate::App::new(false);
+        // Flap: a latched latch must reopen when hardware drops so the next
+        // appearance fires another catch-up refresh (test harness has no
+        // PawnIO, so the snapshot reads unavailable).
+        app.pl_fields_primed = true;
         let _ = app.handle_cpu_power_message(&Message::CpuPowerDataRefreshed);
         assert!(!app.pl_fields_primed);
     }
