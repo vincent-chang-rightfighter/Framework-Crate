@@ -190,6 +190,18 @@ details.rel summary .muted { font-weight: 400; }
 .dl-sha-row { display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; margin: 0; overflow-x: auto; }
 .dl-sha { flex: 0 0 auto; font-size: var(--fs-sm); line-height: 1.5; white-space: nowrap; color: var(--muted); background: none; border: 0; padding: 0; }
 #dl-sha-copy { margin: 0; flex: 0 0 auto; }
+.vt-line { margin: 0 0 10px; }
+.vt-chip {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: var(--fs-sm);
+  text-decoration: none;
+  color: var(--fg);
+}
+.vt-chip:hover { border-color: var(--accent); color: var(--accent); }
 /* Cap the latest-release notes so the card height stays predictable;
    the full history lives on the Changelog page. */
 .dl-grid .notes {

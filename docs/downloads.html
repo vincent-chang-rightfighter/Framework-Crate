@@ -24,6 +24,8 @@
 <p><a id="dl-btn" class="btn btn-big btn-block" href="https://github.com/vincent-chang-rightfighter/Framework-Crate/releases">Download</a></p>
 <p><strong id="dl-file-name">framework-crate.exe</strong></p>
 <p class="muted small" id="dl-file-meta">Loading latest release info…</p>
+<p class="vt-line" id="vt-line" hidden><span class="muted small">VirusTotal:</span>
+<a id="vt-link" class="vt-chip" href="#">…</a></p>
 </div>
 <div>
 <p><strong>What's new in <span id="dl-ver-name">the latest release</span></strong></p>
@@ -130,6 +132,24 @@
     addMetaLine("Downloads: " + exeDls.toLocaleString("en-US"));
     document.getElementById("dl-ver-name").textContent = latest.tag_name;
     renderNotes(document.getElementById("dl-notes"), latest.body || "No release notes provided.");
+    // The release notes carry the scan result; render it as a chip instead of
+    // fetching vt.json from the release assets (shields.io blocks that domain
+    // and release files send no CORS headers).
+    var body = latest.body || "";
+    var vtUrl = body.match(/https:\/\/www\.virustotal\.com\/gui\/file\/[0-9a-f]{64}/i);
+    var vtVerdict = body.match(/(\d+)\s+malicious,\s+(\d+)\s+suspicious\s+of\s+(\d+)\s+engines/i);
+    if (vtUrl) {
+      var vtLine = document.getElementById("vt-line");
+      var vtLink = document.getElementById("vt-link");
+      vtLink.href = vtUrl[0];
+      if (vtVerdict) {
+        vtLink.textContent = latest.tag_name + " · " + vtVerdict[1] + " malicious, " +
+          vtVerdict[2] + " suspicious of " + vtVerdict[3] + " engines";
+      } else {
+        vtLink.textContent = latest.tag_name + " · view report";
+      }
+      vtLine.hidden = false;
+    }
     var shaBox = document.getElementById("dl-sha");
     var shaEl = document.getElementById("dl-sha-text");
     var copyBtn = document.getElementById("dl-sha-copy");
@@ -181,7 +201,7 @@
       body.className = "rel-body";
       var files = document.createElement("ul");
       files.className = "tight";
-      (rel.assets || []).forEach(function (a) {
+      (rel.assets || []).filter(function (a) { return !/\.json$/i.test(a.name); }).forEach(function (a) {
         var li = document.createElement("li");
         var link = document.createElement("a");
         link.href = a.browser_download_url;
