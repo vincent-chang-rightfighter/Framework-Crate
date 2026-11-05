@@ -139,6 +139,13 @@ jobs:
         run: |
           $exe = Get-ChildItem -Recurse -Filter git-cliff.exe gitcliff | Select-Object -First 1
           & $exe.FullName --config cliff.toml --latest --strip header --output release_notes.md
+          # git-cliff separates every bullet with a blank line; collapse those
+          # so the published notes read as compact lists (one blank line
+          # between groups).
+          $notes = Get-Content release_notes.md -Raw
+          $notes = $notes -replace "(?m)^\r?\n(?=- )", ""
+          $notes = $notes -replace "(\r?\n){3,}", "`n`n"
+          Set-Content -Path release_notes.md -Value $notes -NoNewline -Encoding utf8
           Get-Content release_notes.md
 
       - name: Append contributors
@@ -211,7 +218,7 @@ jobs:
           if ($status -ne "completed") {
             Write-Output "VirusTotal analysis did not complete in time; publishing the link anyway."
           }
-          Add-Content -Path release_notes.md -Value "`n**VirusTotal**: $link$verdict" -Encoding utf8
+          Add-Content -Path release_notes.md -Value "`n### Verification`n- **VirusTotal**: $link$verdict" -Encoding utf8
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
