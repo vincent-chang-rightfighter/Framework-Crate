@@ -19,12 +19,20 @@ Download the `.exe`, then run it as administrator. PawnIO is optional and only n
 
 <table>
   <tr>
-    <td><img src="images/Framework-Crate-v0.9.0-1.png" width="400" alt="Framework Crate v0.9.0 main view"></td>
-    <td><img src="images/Framework-Crate-v0.9.0-2.png" width="400" alt="Framework Crate v0.9.0 fan curve settings"></td>
+    <td><img src="images/Framework-Crate-v0.9.5-1.png" width="400" alt="Framework Crate v0.9.5 main view"></td>
+    <td><img src="images/Framework-Crate-v0.9.5-2.png" width="400" alt="Framework Crate v0.9.5 fan curve settings and calibration"></td>
   </tr>
   <tr>
-    <td><img src="images/Framework-Crate-v0.9.0-3.png" width="400" alt="Framework Crate v0.9.0 expansion cards and CPU power"></td>
-    <td><img src="images/Framework-Crate-v0.9.0-4.png" width="400" alt="Framework Crate v0.9.0 About page with themes"></td>
+    <td><img src="images/Framework-Crate-v0.9.5-8.png" width="400" alt="Framework Crate v0.9.5 manual fan mode and sensor settings"></td>
+    <td><img src="images/Framework-Crate-v0.9.5-3.png" width="400" alt="Framework Crate v0.9.5 CPU power settings"></td>
+  </tr>
+  <tr>
+    <td><img src="images/Framework-Crate-v0.9.5-7.png" width="400" alt="Framework Crate v0.9.5 battery details"></td>
+    <td><img src="images/Framework-Crate-v0.9.5-4.png" width="400" alt="Framework Crate v0.9.5 privacy switches, ports, and backlight"></td>
+  </tr>
+  <tr>
+    <td><img src="images/Framework-Crate-v0.9.5-5.png" width="400" alt="Framework Crate v0.9.5 About page with keep-alive toggle"></td>
+    <td><img src="images/Framework-Crate-v0.9.5-6.png" width="400" alt="Framework Crate v0.9.5 About page with themes and license"></td>
   </tr>
 </table>
 
