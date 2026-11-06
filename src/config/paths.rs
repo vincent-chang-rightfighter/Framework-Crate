@@ -130,6 +130,58 @@ pub(crate) fn dir_has_reparse_point(path: &std::path::Path) -> bool {
     attrs != INVALID_FILE_ATTRIBUTES && attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
+/// True only for symlinks and junctions, i.e. reparse tags that redirect the
+/// path elsewhere. Cloud placeholders (OneDrive and similar) carry the
+/// reparse attribute but are ordinary files for the caller's purpose, so the
+/// broader [`dir_has_reparse_point`] would wrongly block exporting settings
+/// into a synced folder.
+pub(crate) fn is_symlink_or_junction(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileAttributeTagInfo, GetFileInformationByHandleEx, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::SystemServices::{
+        IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
+    };
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: null-terminated path; the handle is closed before returning.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return false;
+    }
+    let mut info: FILE_ATTRIBUTE_TAG_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            &mut info as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    // SAFETY: handle came from CreateFileW above.
+    unsafe { CloseHandle(handle) };
+    ok != 0
+        && (info.ReparseTag == IO_REPARSE_TAG_SYMLINK
+            || info.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
+}
+
 fn default_config_dir() -> PathBuf {
     #[cfg(test)]
     {
@@ -159,5 +211,27 @@ mod tests {
     fn reparse_check_passes_plain_dir() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!dir_has_reparse_point(dir.path()));
+    }
+
+    #[test]
+    fn symlink_or_junction_ignores_plain_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("plain.toml");
+        std::fs::write(&file, "x = 1").unwrap();
+        assert!(!is_symlink_or_junction(dir.path()));
+        assert!(!is_symlink_or_junction(&file));
+        assert!(!is_symlink_or_junction(&dir.path().join("missing")));
+    }
+
+    #[test]
+    fn symlink_or_junction_detects_symlinks_when_supported() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.toml");
+        std::fs::write(&original, "x = 1").unwrap();
+        let link = dir.path().join("link.toml");
+        if std::os::windows::fs::symlink_file(&original, &link).is_err() {
+            return; // needs Developer Mode or elevation
+        }
+        assert!(is_symlink_or_junction(&link));
     }
 }

@@ -52,6 +52,10 @@ pub(crate) struct CalibrationRun {
     /// Consecutive guard trips (hot / topology / no-data). Reset on any
     /// clean tick; the run aborts only at `GUARD_DEBOUNCE_TICKS`.
     unstable_streak: u32,
+    /// Consecutive dwells that produced no median for some fan. Kept apart
+    /// from `unstable_streak` because a clean guard tick must not erase it,
+    /// otherwise the median-miss abort can never be reached.
+    median_misses: u32,
 }
 
 impl CalibrationRun {
@@ -197,6 +201,7 @@ impl App {
             samples: Vec::new(),
             results: vec![Vec::new(); fan_total],
             unstable_streak: 0,
+            median_misses: 0,
         });
         self.mark_dirty();
         Some(emit_step_write(
@@ -348,21 +353,26 @@ impl App {
             match median_u32(&mut vals) {
                 Some(m) => medians.push(m),
                 None => {
-                    let streak = self
+                    // A clean guard tick must not clear this counter, or the
+                    // abort below could never fire (see `median_misses`).
+                    let misses = self
                         .calibration
                         .as_mut()
                         .map(|r| {
-                            r.unstable_streak = r.unstable_streak.saturating_add(1);
-                            r.unstable_streak
+                            r.median_misses = r.median_misses.saturating_add(1);
+                            r.median_misses
                         })
                         .unwrap_or(GUARD_DEBOUNCE_TICKS);
-                    if streak >= GUARD_DEBOUNCE_TICKS {
+                    if misses >= GUARD_DEBOUNCE_TICKS {
                         let restore = self.abort_calibration("no fan readings".to_string());
                         return Some(restore);
                     }
                     return None;
                 }
             }
+        }
+        if let Some(run) = self.calibration.as_mut() {
+            run.median_misses = 0;
         }
         let step_idx = self.calibration.as_ref().map(|r| r.step_idx).unwrap_or(0);
         if let Some(run) = self.calibration.as_mut() {
@@ -499,6 +509,7 @@ mod tests {
             samples: Vec::new(),
             results: vec![Vec::new()],
             unstable_streak: 0,
+            median_misses: 0,
         };
         assert!(run.progress_line().starts_with("Step 3/5: 50%"));
     }

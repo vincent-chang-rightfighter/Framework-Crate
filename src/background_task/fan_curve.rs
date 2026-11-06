@@ -6,7 +6,8 @@ use tracing::warn;
 
 use super::{
     FAN_REASSERT_INTERVAL_MS, FanCtx, Flow, MAX_EC_WRITE_FAILURES, THERMAL_STALE_MS,
-    reset_ec_after_failures, reset_ec_on_panic, shutdown_requested, unified_transition_resets,
+    estimate_duty_from_thermal, reset_ec_after_failures, reset_ec_on_panic, shutdown_requested,
+    unified_transition_resets,
 };
 use crate::fan_control::CurveStepper;
 use crate::util::read_lock;
@@ -88,8 +89,19 @@ pub(super) async fn run(ctx: &mut FanCtx<'_>) -> Flow {
         // drops to None and the next `next()` jumps straight to target with
         // no rate-limit (Manual ramps the same transition via
         // last_applied_duty/estimate). Seeding keeps the toggle bumpless.
-        let seed = ctx.state.fan.last_applied_duty.load(Ordering::Acquire) as u32;
-        *ctx.curve_stepper = CurveStepper::with_last_duty(seed);
+        //
+        // Startup, resume, and settings import all zero `last_applied_duty`;
+        // seeding 0 there would make the first write ramp up from a standstill
+        // (10%/poll) on a possibly hot machine. Fall back to the live RPM
+        // estimate, and to the old jump behaviour when nothing is readable.
+        let last = ctx.state.fan.last_applied_duty.load(Ordering::Acquire) as u32;
+        let seed = (last > 0)
+            .then_some(last)
+            .or_else(|| estimate_duty_from_thermal(ctx.state));
+        *ctx.curve_stepper = match seed {
+            Some(duty) => CurveStepper::with_last_duty(duty),
+            None => CurveStepper::new(),
+        };
         ctx.per_fan_curve_steppers.clear();
         ctx.last_duty_write_ms = 0;
     }
@@ -694,6 +706,87 @@ mod tests {
         assert!(
             ops.iter().all(|op| op != "set_fan_duty(80,None)"),
             "no jump on unified toggle: {ops:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_last_duty_seeds_from_live_rpm_not_zero() {
+        use crate::cli::ec_wrapper::FanReading;
+        let _serial = crate::ec_serial::global_dispatch_test_lock().lock().await;
+        let state = AppState {
+            system: Default::default(),
+            fan: Default::default(),
+            thermal: Default::default(),
+            peripherals: Default::default(),
+            battery: Default::default(),
+            cpu_power: Default::default(),
+            lifecycle: Default::default(),
+        };
+        state
+            .fan
+            .mode
+            .store(FanControlMode::Curve.to_u8() as u64, Ordering::Release);
+        state.fan.unified_duty.store(true, Ordering::Release);
+        state.fan.fan_count.store(1, Ordering::Release);
+        // Startup / resume / import all clear the applied duty.
+        state.fan.last_applied_duty.store(0, Ordering::Release);
+        state.fan.fan_max_rpm.store(5000, Ordering::Release);
+        state
+            .thermal
+            .last_success_ms
+            .store(60_000, Ordering::Release);
+        let mut temps = BTreeMap::new();
+        temps.insert("CPU".to_string(), 60);
+        with_write_lock(&state.thermal.data, |guard| {
+            *guard = Arc::new(Some(ThermalData {
+                temps: Arc::new(temps),
+                fans: smallvec::smallvec![FanReading {
+                    name: "Fan 1".to_string(),
+                    rpm: 2000
+                },],
+            }));
+        });
+        with_write_lock(&state.fan.curve_full_points, |guard| {
+            *guard = Arc::new(vec![[0, 0], [60, 80], [100, 100], [110, 100]]);
+        });
+        let mock = Arc::new(MockEc::new());
+        let ec: Arc<dyn EcHw> = mock.clone();
+        let mut ramp = None;
+        let mut stepper = CurveStepper::new();
+        let mut per_fan_steppers: Vec<CurveStepper> = Vec::new();
+        let mut ctx = FanCtx {
+            state: &state,
+            ec: &ec,
+            mode: FanControlMode::Curve,
+            now_ms: 60_000,
+            manual_duty: None,
+            curve_hysteresis: Some(2),
+            curve_rate_limit: Some(10),
+            curve_rate_limit_down: None,
+            curve_sensors: vec!["CPU".to_string()],
+            consecutive_ec_write_failures: 0,
+            last_duty_write_ms: 0,
+            last_handover_ms: 0,
+            last_manual_duty: None,
+            manual_ramp_current: None,
+            manual_per_fan_ramp: &mut ramp,
+            curve_stepper: &mut stepper,
+            per_fan_curve_steppers: &mut per_fan_steppers,
+            last_fan_mode: Some(FanControlMode::Curve),
+            last_unified_duty: None,
+            just_resumed: false,
+        };
+        assert!(matches!(run(&mut ctx).await, Flow::Done));
+        let ops = mock.ops.lock().unwrap();
+        // 2000 rpm of a 5000 rpm maximum estimates 40%, so the first write
+        // must be 50% (rate limit), not 10% from a zero seed.
+        assert!(
+            ops.iter().any(|op| op == "set_fan_duty(50,None)"),
+            "first curve write must seed from live RPM: {ops:?}"
+        );
+        assert!(
+            ops.iter().all(|op| op != "set_fan_duty(10,None)"),
+            "must not ramp up from a zero seed: {ops:?}"
         );
     }
 }

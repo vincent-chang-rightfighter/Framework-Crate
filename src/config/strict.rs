@@ -5,7 +5,7 @@
 use crate::types::Config;
 
 use super::io::render_config_toml;
-use super::paths::dir_has_reparse_point;
+use super::paths::is_symlink_or_junction;
 
 /// Maximum accepted import file size; the real file is a few KB, so
 /// anything larger is not a settings export.
@@ -307,7 +307,7 @@ pub fn export_to_path(config: &Config, dest: &std::path::Path) -> Result<(), Str
         }
         content = stamped;
     }
-    if dir_has_reparse_point(dest) {
+    if is_symlink_or_junction(dest) {
         return Err(format!(
             "refusing to write through symlink: {}",
             dest.display()
@@ -319,7 +319,7 @@ pub fn export_to_path(config: &Config, dest: &std::path::Path) -> Result<(), Str
     // itself is still created with create_new (O_EXCL).
     if let Some(parent) = dest.parent()
         && !parent.as_os_str().is_empty()
-        && dir_has_reparse_point(parent)
+        && is_symlink_or_junction(parent)
     {
         return Err(format!(
             "refusing to write under a symlinked directory: {}",
