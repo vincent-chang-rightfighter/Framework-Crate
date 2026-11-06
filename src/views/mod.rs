@@ -67,6 +67,12 @@ pub(crate) struct ViewSnapshot {
     pub pl2_enabled: bool,
     pub pl1_clamped: bool,
     pub pl2_clamped: bool,
+    /// Whether the CPU Power card is editing the AC profile (true) or the
+    /// battery profile (false).
+    pub pl_profile_is_ac: bool,
+    pub pl_profile_ac_saved: bool,
+    pub pl_profile_battery_saved: bool,
+    pub cpu_power_status: Option<Arc<String>>,
     pub cpu_power_error: Option<Arc<String>>,
     pub ec_op_error: Option<Arc<String>>,
     pub intel_cpu: bool,
@@ -104,6 +110,10 @@ impl ViewSnapshot {
         let cpu_power = app.state.cpu_power.snapshot();
         let config = Arc::clone(&read_lock(&app.state.lifecycle.config));
         let has_calibration_table = config.fan.calibration_tables.iter().any(|t| !t.is_empty());
+        let (pl_profile_ac_saved, pl_profile_battery_saved) = (
+            config.cpu_power.ac.is_some(),
+            config.cpu_power.battery.is_some(),
+        );
         let per_fan_curve_points: Arc<Vec<Vec<[u32; 2]>>> = config
             .fan
             .curve
@@ -199,6 +209,10 @@ impl ViewSnapshot {
             pl2_enabled: app.pl2_enabled,
             pl1_clamped: app.pl1_clamped,
             pl2_clamped: app.pl2_clamped,
+            pl_profile_is_ac: app.pl_profile_is_ac,
+            pl_profile_ac_saved,
+            pl_profile_battery_saved,
+            cpu_power_status: app.cpu_power_status.as_ref().map(|s| Arc::new(s.clone())),
             cpu_power_error: app.cpu_power_error.as_ref().map(|s| Arc::new(s.clone())),
             ec_op_error: app.ec_op_error.as_ref().map(|s| Arc::new(s.clone())),
             intel_cpu: app.state.system.intel_cpu.load(Ordering::Acquire),

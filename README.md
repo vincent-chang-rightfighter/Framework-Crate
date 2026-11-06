@@ -44,7 +44,7 @@ Download the `.exe`, then run it as administrator. PawnIO is optional and only n
 - **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity. Details shows charger voltage/input on AC plus smart-battery data (per-cell voltages, pack temperature, safety alerts) when readable
 - **Live Telemetry** — Real-time temperature chart (selectable 15/30/60s window, default 30s), per-sensor display with colored indicators, and fan RPM in the header
 - **Misc Panel** — Camera/mic privacy switch states, keyboard backlight slider, fingerprint LED level, and USB-C / HDMI / DP port classification inferred from PD state
-- **CPU Power** — Intel CPUs only today (AMD/Ryzen support is planned through PawnIO's RyzenSMU module and depends on community hardware testing; see [Known Limitations](#known-limitations)). Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download); live turbo readout (current/limit GHz) when readable; original factory limits are saved on the first run while on AC for `Reset`. Writes go to MSR 0x610 only: the official IntelMCHBAR module is read-only, so the MMIO mirror is displayed but never written. Writes are capped per model (Laptop 12 → 40W, 13 → 70W, 16 → 100W, Desktop → 120W), require ≥5W when enabled, and require PL1 ≤ PL2. AMD and other vendors are not supported.
+- **CPU Power** — Intel CPUs only today (AMD/Ryzen support is planned through PawnIO's RyzenSMU module and depends on community hardware testing; see [Known Limitations](#known-limitations)). Read/write PL1/PL2 via PawnIO (optional; SHA-256 verified module download); live turbo readout (current/limit GHz) when readable; original factory limits are saved on the first run while on AC for `Reset`. `Apply` saves the selected **AC** or **Battery** profile; while "Keep power limits applied" is enabled on the About page (persisted across launches), the matching profile is applied at startup and on every AC↔battery change. Writes go to MSR 0x610 only: the official IntelMCHBAR module is read-only, so the MMIO mirror is displayed but never written. Writes are capped per model (Laptop 12 → 40W, 13 → 70W, 16 → 100W, Desktop → 120W), require ≥5W when enabled, and require PL1 ≤ PL2. AMD and other vendors are not supported.
 - **About Page** — Hardware info (CPU, RAM, display, BIOS, board revision), PD controller firmware versions, software settings (poll rate, refresh interval, launch at startup, keep power limits applied), GitHub link, one-click copy buttons for the manual-download URLs, and third-party license notices
 - **Settings Backup** — Export settings to a file (native save dialog, machine-stamped) and import them back; strict validation rejects unknown fields and version mismatches, and a different chassis size is refused outright
 - **System Tray** — Minimize to tray, tray icon with context menu (Show / Quit) and hover tooltip with the current temperature, icon restored automatically if Explorer restarts
@@ -229,6 +229,27 @@ rate_limit_pct_per_step = 10
 enabled = true
 value = 80
 
+[cpu_power]
+keep_limits = true  # About -> "Keep power limits applied"
+
+[cpu_power.ac]
+pl1_watts = 30.0
+pl1_enabled = true
+pl1_clamped = false
+pl1_time_s = 28.0
+pl2_watts = 60.0
+pl2_enabled = true
+pl2_clamped = false
+
+[cpu_power.battery]
+pl1_watts = 20.0
+pl1_enabled = true
+pl1_clamped = false
+pl1_time_s = 20.0
+pl2_watts = 45.0
+pl2_enabled = true
+pl2_clamped = false
+
 [telemetry]
 poll_ms = 500
 ui_refresh_ms = 100
@@ -306,7 +327,7 @@ The section reads and optionally writes PL1/PL2 via official PawnIO Modules. Tho
 
 A missing file blocks CPU Power; a hash mismatch also blocks use — update the app for the new release, or set `FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1` only after manual verification. Failed download shows manual instructions: download latest `release_*.zip` from the releases page and place `IntelMSR.bin` + `IntelMCHBAR.bin` into `%APPDATA%/framework-crate/modules/`. Use **Open Modules Folder** and **Redetect** in the UI to verify — no restart needed.
 
-The first successful RAPL read while on AC also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` restores the MSR values from that snapshot; the MMIO mirror is read-only and is left untouched. After sleep/resume the app re-reads the live limits and, when "Keep power limits applied" is enabled on the About page, re-asserts the user's desired values once immediately (and every 5 minutes thereafter); it does not overwrite them with the BIOS snapshot.
+The first successful RAPL read while on AC also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` restores the MSR values from that snapshot; the MMIO mirror is read-only and is left untouched. `Apply` stores the edited values in the currently selected AC or Battery profile. With "Keep power limits applied" enabled on the About page, the matching profile is applied once at startup, immediately after resume, on every AC↔battery change, and re-asserted every 5 minutes; the toggle is persisted in the config. When the toggle is off, AC→battery keeps the old behavior of resetting to BIOS defaults. A source with no saved profile falls back to that reset instead of guessing values.
 
 The official `IntelMCHBAR.bin` exports only read ioctls (`ioctl_read_qword`). `Apply` therefore writes MSR 0x610 only; the MMIO mirror is read for display and for the effective `min(MSR, MMIO)` estimate. There is no MMIO write attempt (and no repeated `ioctl_write_qword` failure). If the MMIO mirror holds a lower limit than MSR, an MSR-only write may not change the effective limit; a custom MCHBAR write module would be required for that, which this project intentionally does not ship.
 

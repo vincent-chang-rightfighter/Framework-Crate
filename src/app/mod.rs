@@ -181,6 +181,8 @@ pub enum Message {
     CpuPowerApplied(Result<(), String>),
     CpuPowerDataRefreshed,
     CpuPowerSyncStopped,
+    CpuPowerProfileSourceChanged(bool),
+    CpuPowerProfileApplied(bool, Result<(), String>),
     RefreshCpuPower,
     CpuPowerSyncStart,
     CpuPowerSyncStarted(Result<(), String>),
@@ -281,6 +283,17 @@ pub struct App {
     pub pl2_enabled: bool,
     pub pl1_clamped: bool,
     pub pl2_clamped: bool,
+    /// Selected profile in the CPU Power card: AC (true) or battery (false).
+    /// Following the live source until the user picks one explicitly keeps
+    /// Apply on the active profile without hiding the other profile.
+    pub pl_profile_is_ac: bool,
+    pub pl_profile_user_selected: bool,
+    /// Last source whose profile was applied (None until first apply/startup).
+    pub pl_active_source: Option<bool>,
+    pub pl_profile_busy: bool,
+    pub pl_profile_retry_at_ms: u64,
+    /// Non-error status line for profile saves/applies.
+    pub cpu_power_status: Option<String>,
     /// Latched once a refresh has populated the edit boxes from live
     /// hardware. Lets the tick loop fire exactly one catch-up refresh when
     /// hardware appears without a refresh message (background polls never
@@ -520,6 +533,12 @@ impl App {
             pl2_enabled: true,
             pl1_clamped: false,
             pl2_clamped: false,
+            pl_profile_is_ac: crate::cpu_power::read_ac_present() != Some(false),
+            pl_profile_user_selected: false,
+            pl_active_source: None,
+            pl_profile_busy: false,
+            pl_profile_retry_at_ms: 0,
+            cpu_power_status: None,
             pl_fields_primed: false,
             cpu_power_error: None,
             ec_op_error: None,

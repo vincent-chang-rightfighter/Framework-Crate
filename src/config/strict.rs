@@ -19,6 +19,7 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "battery",
     "telemetry",
     "theme",
+    "cpu_power",
     "pl_custom_applied",
     "version",
     "exported_from",
@@ -140,6 +141,30 @@ fn check_nested_unknown(table: &toml::Table) -> Result<(), String> {
         ],
         &mut unknown,
     );
+    let cpu_power = table.get("cpu_power");
+    check(
+        cpu_power,
+        "cpu_power",
+        &["keep_limits", "ac", "battery"],
+        &mut unknown,
+    );
+    let cpu_power_tbl = cpu_power.and_then(|v| v.as_table());
+    for source in ["ac", "battery"] {
+        check(
+            cpu_power_tbl.and_then(|t| t.get(source)),
+            &format!("cpu_power.{source}"),
+            &[
+                "pl1_watts",
+                "pl1_enabled",
+                "pl1_clamped",
+                "pl1_time_s",
+                "pl2_watts",
+                "pl2_enabled",
+                "pl2_clamped",
+            ],
+            &mut unknown,
+        );
+    }
     unknown.sort();
     if unknown.is_empty() {
         Ok(())
@@ -398,6 +423,42 @@ mod tests {
     }
 
     #[test]
+    fn import_strict_accepts_cpu_power_profiles() {
+        let cfg = crate::config::import_strict(
+            "version = 2\n[cpu_power]\nkeep_limits = true\n[cpu_power.ac]\npl1_watts = 30.0\npl1_enabled = true\npl1_clamped = false\npl1_time_s = 28.0\npl2_watts = 60.0\npl2_enabled = true\npl2_clamped = false\n",
+        )
+        .unwrap();
+        assert!(cfg.cpu_power.keep_limits);
+        let ac = cfg.cpu_power.ac.unwrap();
+        assert_eq!(ac.pl1_watts, 30.0);
+        assert_eq!(ac.pl2_watts, 60.0);
+        assert!(cfg.cpu_power.battery.is_none());
+    }
+
+    #[test]
+    fn import_strict_rejects_unknown_cpu_power_field() {
+        let err = crate::config::import_strict(
+            "version = 2\n[cpu_power]\nkeep_limits = true\nbogus = 1\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("cpu_power.bogus"), "{err}");
+        let err = crate::config::import_strict(
+            "version = 2\n[cpu_power.battery]\npl1_watts = 20.0\nevil = true\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("cpu_power.battery.evil"), "{err}");
+    }
+
+    #[test]
+    fn import_strict_drops_non_finite_power_profile() {
+        let cfg = crate::config::import_strict(
+            "version = 2\n[cpu_power.battery]\npl1_watts = nan\npl2_watts = 60.0\n",
+        )
+        .unwrap();
+        assert!(cfg.cpu_power.battery.is_none());
+    }
+
+    #[test]
     fn import_strict_rejects_missing_version() {
         let err = crate::config::import_strict("[fan]\nmode = \"curve\"\n").unwrap_err();
         assert!(err.contains("missing settings version"), "{err}");
@@ -408,6 +469,19 @@ mod tests {
         let mut cfg = Config::default();
         cfg.fan.mode = FanControlMode::Manual;
         cfg.fan.manual = Some(ManualConfig { duty_pct: 42 });
+        cfg.cpu_power.keep_limits = true;
+        cfg.cpu_power.ac = Some(crate::types::PowerProfile {
+            pl1_watts: 28.0,
+            pl1_time_s: 20.0,
+            pl2_watts: 55.0,
+            ..Default::default()
+        });
+        cfg.cpu_power.battery = Some(crate::types::PowerProfile {
+            pl1_watts: 18.0,
+            pl1_time_s: 15.0,
+            pl2_watts: 35.0,
+            ..Default::default()
+        });
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("exported.toml");
         crate::config::export_to_path(&cfg, &path).unwrap();

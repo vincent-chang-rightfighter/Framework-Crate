@@ -1,20 +1,9 @@
 use super::{App, Message, PL_RESET_RETRY_MS, refresh_cpu_power_task, stop_sync_task};
+use crate::types::PowerProfile;
 use iced::Task;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tracing::{error, warn};
-
-fn sync_restart_params(
-    was_sync: bool,
-    write_ok: bool,
-    applied: crate::cpu_power::PowerLimitParams,
-    previous: Option<crate::cpu_power::PowerLimitParams>,
-) -> Option<crate::cpu_power::PowerLimitParams> {
-    if !was_sync {
-        return None;
-    }
-    if write_ok { Some(applied) } else { previous }
-}
 
 fn sync_restart_after_reset(
     was_sync: bool,
@@ -229,64 +218,80 @@ impl App {
                 if !self.cpu_power_supported() || !self.state.cpu_power.snapshot().available {
                     return Some(Task::none());
                 }
-                let (pl1, pl2, pl1_time) = match self.validate_cpu_power_inputs() {
-                    Ok(v) => v,
+                let profile = match self.profile_from_inputs() {
+                    Ok(profile) => profile,
                     Err(e) => {
                         self.cpu_power_error = Some(e);
                         self.mark_dirty();
                         return Some(Task::none());
                     }
                 };
-
+                // Apply always saves the selected profile, even when it is not
+                // the active source; only a matching source writes the MSR.
+                self.store_profile(self.pl_profile_is_ac, profile.clone());
+                self.save_config();
                 self.cpu_power_error = None;
-                let info = self.state.cpu_power.snapshot();
-                let params = crate::cpu_power::PowerLimitParams {
-                    pl1_watts: pl1,
-                    pl1_enabled: self.pl1_enabled,
-                    pl1_clamped: self.pl1_clamped,
-                    pl1_time_s: pl1_time,
-                    pl2_watts: pl2,
-                    pl2_enabled: self.pl2_enabled,
-                    pl2_clamped: self.pl2_clamped,
-                    pl2_time_s: info.pl2_time_s,
-                    max_time_s: info.max_time_s,
-                    power_unit: info.power_unit,
-                    time_unit: info.time_unit,
+                self.cpu_power_status = None;
+                if self
+                    .current_power_source()
+                    .is_some_and(|ac| ac != self.pl_profile_is_ac)
+                {
+                    self.cpu_power_status = Some(format!(
+                        "Saved {} profile; it will apply on {}.",
+                        source_label(self.pl_profile_is_ac),
+                        source_label(self.pl_profile_is_ac)
+                    ));
+                    self.mark_dirty();
+                    return Some(Task::none());
+                }
+                let params = match self.profile_params(&profile) {
+                    Ok(params) => params,
+                    Err(e) => {
+                        self.cpu_power_error = Some(e);
+                        self.mark_dirty();
+                        return Some(Task::none());
+                    }
                 };
                 // Invalidate an older Start/Stop task: this explicit Apply is
                 // the newest sync-affecting intent.
                 self.sync_intent.fetch_add(1, Ordering::AcqRel);
-                let cpu_power = self.state.cpu_power.clone();
-                Some(Task::perform(
-                    async move {
-                        let _guard = crate::util::cpu_power_mutex().lock().await;
-                        crate::util::spawn_blocking_with_timeout(
-                            crate::util::PAWNIO_SYNC_TIMEOUT,
-                            move || {
-                                // Re-read intent after acquiring the mutex so a
-                                // Stop pressed while we waited is not undone.
-                                let was_sync = cpu_power.sync_enabled.load(Ordering::Acquire);
-                                let previous_sync = cpu_power.desired_sync_params();
-                                cpu_power.stop_sync();
-                                let result = crate::cpu_power::write_msr_pl1_pl2_public(params)
-                                    .map_err(|e| e.to_string());
-                                if let Some(params) = sync_restart_params(
-                                    was_sync,
-                                    result.is_ok(),
-                                    params,
-                                    previous_sync,
-                                ) && let Err(e) = cpu_power.start_sync(params)
-                                {
-                                    warn!("Failed to restart CPU power sync after apply: {}", e);
-                                }
-                                result
-                            },
-                        )
-                        .await
-                        .unwrap_or_else(Err)
-                    },
-                    Message::CpuPowerApplied,
-                ))
+                self.pl_profile_retry_at_ms =
+                    crate::util::monotonic_ms().saturating_add(PL_RESET_RETRY_MS);
+                Some(self.apply_profile_task(self.pl_profile_is_ac, params))
+            }
+            Message::CpuPowerProfileSourceChanged(ac) => {
+                self.pl_profile_is_ac = *ac;
+                self.pl_profile_user_selected = true;
+                self.cpu_power_status = None;
+                self.cpu_power_error = None;
+                self.load_pl_fields_for_source();
+                self.mark_dirty();
+                Some(Task::none())
+            }
+            Message::CpuPowerProfileApplied(ac, result) => {
+                self.pl_profile_busy = false;
+                match result {
+                    Ok(()) => {
+                        self.pl_active_source = Some(*ac);
+                        self.pl_profile_retry_at_ms = 0;
+                        self.set_pl_custom_applied(true);
+                        self.cpu_power_error = None;
+                        self.cpu_power_status =
+                            Some(format!("{} profile applied.", source_label(*ac)));
+                        if self.pl_profile_is_ac == *ac {
+                            self.load_pl_fields_for_source();
+                        }
+                        return Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}));
+                    }
+                    Err(e) => {
+                        error!("Failed to apply {} power profile: {}", source_label(*ac), e);
+                        self.cpu_power_error = Some(e.to_string());
+                        self.pl_profile_retry_at_ms =
+                            crate::util::monotonic_ms().saturating_add(PL_RESET_RETRY_MS);
+                    }
+                }
+                self.mark_dirty();
+                Some(Task::none())
             }
             Message::CpuPowerApplied(result) => {
                 match result {
@@ -308,50 +313,51 @@ impl App {
                 if !self.cpu_power_supported() || !self.state.cpu_power.snapshot().available {
                     return Some(Task::none());
                 }
-                let (pl1, pl2, pl1_time) = match self.validate_cpu_power_inputs() {
-                    Ok(v) => v,
+                let ac = self.current_power_source().unwrap_or(self.pl_profile_is_ac);
+                // When the card is editing the active source, enabling the
+                // toggle captures the current fields (unsaved edits included).
+                // Otherwise use the saved profile for the active source.
+                let profile = if self.pl_profile_is_ac == ac {
+                    match self.profile_from_inputs() {
+                        Ok(profile) => profile,
+                        Err(e) => {
+                            self.cpu_power_error = Some(e);
+                            self.mark_dirty();
+                            return Some(Task::none());
+                        }
+                    }
+                } else {
+                    match self.saved_profile(ac) {
+                        Some(profile) => profile,
+                        None => {
+                            self.cpu_power_error =
+                                Some(format!("No {} profile saved yet.", source_label(ac)));
+                            self.mark_dirty();
+                            return Some(Task::none());
+                        }
+                    }
+                };
+                let params = match self.profile_params(&profile) {
+                    Ok(params) => params,
                     Err(e) => {
                         self.cpu_power_error = Some(e);
                         self.mark_dirty();
                         return Some(Task::none());
                     }
                 };
-
+                self.store_profile(ac, profile);
+                self.mutate_config(|cfg| cfg.cpu_power.keep_limits = true);
+                self.save_config();
+                self.pl_profile_is_ac = ac;
+                self.pl_profile_user_selected = true;
                 self.cpu_power_error = None;
-                let info = self.state.cpu_power.snapshot();
-                let params = crate::cpu_power::PowerLimitParams {
-                    pl1_watts: pl1,
-                    pl1_enabled: self.pl1_enabled,
-                    pl1_clamped: self.pl1_clamped,
-                    pl1_time_s: pl1_time,
-                    pl2_watts: pl2,
-                    pl2_enabled: self.pl2_enabled,
-                    pl2_clamped: self.pl2_clamped,
-                    pl2_time_s: info.pl2_time_s,
-                    max_time_s: info.max_time_s,
-                    power_unit: info.power_unit,
-                    time_unit: info.time_unit,
-                };
-                let cpu_power = self.state.cpu_power.clone();
-                let intent = self.sync_intent.fetch_add(1, Ordering::AcqRel) + 1;
-                let sync_intent = Arc::clone(&self.sync_intent);
-                Some(Task::perform(
-                    async move {
-                        let _guard = crate::util::cpu_power_mutex().lock().await;
-                        if sync_intent.load(Ordering::Acquire) != intent {
-                            // A newer Start/Stop was issued while we waited.
-                            return Message::CpuPowerSyncStopped;
-                        }
-                        let result = crate::util::spawn_blocking_with_timeout(
-                            crate::util::PAWNIO_SYNC_TIMEOUT,
-                            move || cpu_power.start_sync(params).map_err(|e| e.to_string()),
-                        )
-                        .await
-                        .unwrap_or_else(Err);
-                        Message::CpuPowerSyncStarted(result)
-                    },
-                    |msg| msg,
-                ))
+                self.cpu_power_status = Some("Keep-alive on.".to_string());
+                self.pl_profile_busy = true;
+                self.pl_profile_retry_at_ms =
+                    crate::util::monotonic_ms().saturating_add(PL_RESET_RETRY_MS);
+                // Invalidate an older Stop queued before this start.
+                self.sync_intent.fetch_add(1, Ordering::AcqRel);
+                Some(self.apply_profile_task(ac, params))
             }
             Message::CpuPowerSyncStarted(result) => {
                 match result {
@@ -377,6 +383,12 @@ impl App {
                 if !self.cpu_power_supported() {
                     return Some(Task::none());
                 }
+                self.mutate_config(|cfg| cfg.cpu_power.keep_limits = false);
+                self.save_config();
+                self.pl_active_source = None;
+                self.pl_profile_busy = false;
+                self.cpu_power_status = Some("Keep-alive off.".to_string());
+                self.mark_dirty();
                 let intent = self.sync_intent.fetch_add(1, Ordering::AcqRel) + 1;
                 Some(stop_sync_task(
                     self.state.cpu_power.clone(),
@@ -417,7 +429,12 @@ impl App {
             }
             Message::CpuPowerDataRefreshed => {
                 let info = self.state.cpu_power.snapshot();
-                self.apply_edit_fields_from_snapshot(&info);
+                if info.available && !self.pl_profile_user_selected {
+                    // Follow the live source until the user picks a profile.
+                    self.pl_profile_is_ac =
+                        self.current_power_source().unwrap_or(self.pl_profile_is_ac);
+                }
+                self.load_pl_fields_for_source();
                 if info.available {
                     // Latched once live hardware has populated the boxes;
                     // the tick loop uses it to fire exactly one catch-up
@@ -447,9 +464,178 @@ impl App {
     }
 }
 
+fn source_label(ac: bool) -> &'static str {
+    if ac { "AC" } else { "Battery" }
+}
+
 impl App {
     pub(crate) fn cpu_power_supported(&self) -> bool {
         self.state.system.intel_cpu.load(Ordering::Acquire)
+    }
+
+    /// Whether the About keep-alive toggle is enabled (persisted intent).
+    fn keep_limits_enabled(&self) -> bool {
+        crate::util::read_lock(&self.state.lifecycle.config)
+            .cpu_power
+            .keep_limits
+    }
+
+    fn saved_profile(&self, ac: bool) -> Option<PowerProfile> {
+        crate::util::read_lock(&self.state.lifecycle.config)
+            .cpu_power
+            .profile(ac)
+            .cloned()
+    }
+
+    fn store_profile(&mut self, ac: bool, profile: PowerProfile) {
+        self.mutate_config(|cfg| *cfg.cpu_power.profile_mut(ac) = Some(profile));
+    }
+
+    fn profile_from_inputs(&self) -> Result<PowerProfile, String> {
+        let (pl1, pl2, pl1_time) = self.validate_cpu_power_inputs()?;
+        Ok(PowerProfile {
+            pl1_watts: pl1,
+            pl1_enabled: self.pl1_enabled,
+            pl1_clamped: self.pl1_clamped,
+            pl1_time_s: pl1_time,
+            pl2_watts: pl2,
+            pl2_enabled: self.pl2_enabled,
+            pl2_clamped: self.pl2_clamped,
+        })
+    }
+
+    fn profile_params(
+        &self,
+        profile: &PowerProfile,
+    ) -> Result<crate::cpu_power::PowerLimitParams, String> {
+        let info = self.state.cpu_power.snapshot();
+        let params = crate::cpu_power::params_for_profile(profile, &info);
+        crate::cpu_power::validate_limit_params(&params).map(|()| params)
+    }
+
+    fn show_profile_fields(&mut self, profile: &PowerProfile) {
+        self.pl1_edit = format!("{:.1}", profile.pl1_watts);
+        self.pl2_edit = format!("{:.1}", profile.pl2_watts);
+        self.pl1_time_edit = format!("{:.1}", profile.pl1_time_s);
+        self.pl1_enabled = profile.pl1_enabled;
+        self.pl2_enabled = profile.pl2_enabled;
+        self.pl1_clamped = profile.pl1_clamped;
+        self.pl2_clamped = profile.pl2_clamped;
+    }
+
+    /// Loads the selected profile into the edit boxes: the saved values when
+    /// one exists, otherwise the live registers for the active source.
+    fn load_pl_fields_for_source(&mut self) {
+        if let Some(profile) = self.saved_profile(self.pl_profile_is_ac) {
+            self.show_profile_fields(&profile);
+        } else if self
+            .current_power_source()
+            .is_none_or(|ac| ac == self.pl_profile_is_ac)
+        {
+            let info = self.state.cpu_power.snapshot();
+            self.apply_edit_fields_from_snapshot(&info);
+        }
+    }
+
+    pub(crate) fn current_power_source(&self) -> Option<bool> {
+        crate::cpu_power::read_ac_present()
+    }
+
+    fn apply_profile_task(
+        &self,
+        ac: bool,
+        params: crate::cpu_power::PowerLimitParams,
+    ) -> Task<Message> {
+        let cpu_power = self.state.cpu_power.clone();
+        let config = Arc::clone(&self.state.lifecycle.config);
+        Task::perform(
+            async move {
+                let _guard = crate::util::cpu_power_mutex().lock().await;
+                let result = crate::util::spawn_blocking_with_timeout(
+                    crate::util::PAWNIO_SYNC_TIMEOUT,
+                    move || {
+                        let was_sync = cpu_power.sync_enabled.load(Ordering::Acquire);
+                        let previous_sync = cpu_power.desired_sync_params();
+                        cpu_power.stop_sync();
+                        let result = crate::cpu_power::write_msr_pl1_pl2_public(params)
+                            .map_err(|e| e.to_string());
+                        if result.is_ok() {
+                            // Re-read the toggle after taking the mutex: a Stop
+                            // clicked while this task waited must win.
+                            let keep = crate::util::read_lock(&config).cpu_power.keep_limits;
+                            if (keep || was_sync)
+                                && let Err(e) = cpu_power.start_sync(params)
+                            {
+                                warn!("Failed to restart CPU power sync after profile apply: {e}");
+                            }
+                        } else if was_sync
+                            && let Some(previous) = previous_sync
+                            && let Err(e) = cpu_power.start_sync(previous)
+                        {
+                            warn!("Failed to restore CPU power sync after profile apply: {e}");
+                        }
+                        result
+                    },
+                )
+                .await
+                .unwrap_or_else(Err);
+                Message::CpuPowerProfileApplied(ac, result)
+            },
+            |msg| msg,
+        )
+    }
+
+    /// Applies the saved profile for the current power source when the
+    /// keep-alive toggle is on and the source changed (or at startup). A
+    /// source without a profile falls back to the existing BIOS reset path.
+    pub(crate) fn maybe_auto_apply_profile(&mut self, now_ms: u64) -> Option<Task<Message>> {
+        if !self.cpu_power_supported()
+            || !self.state.cpu_power.snapshot().available
+            || !self.keep_limits_enabled()
+            || self.pl_profile_busy
+        {
+            return None;
+        }
+        let ac = self.current_power_source()?;
+        if self.pl_active_source == Some(ac) {
+            return None;
+        }
+        if now_ms < self.pl_profile_retry_at_ms {
+            return None;
+        }
+        let Some(profile) = self.saved_profile(ac) else {
+            self.pl_active_source = Some(ac);
+            if self.pl_custom_applied.load(Ordering::Acquire) {
+                // Never leave the previous source's limits enforced after a
+                // switch: fall back to the factory values like the legacy
+                // AC→battery path.
+                self.state
+                    .lifecycle
+                    .pl_reset_pending
+                    .store(true, Ordering::Release);
+                self.cpu_power_status = Some(format!(
+                    "No {} profile saved; resetting to BIOS defaults.",
+                    source_label(ac)
+                ));
+            } else {
+                self.cpu_power_status = Some(format!("No {} profile saved yet.", source_label(ac)));
+            }
+            self.mark_dirty();
+            return None;
+        };
+        let params = match self.profile_params(&profile) {
+            Ok(params) => params,
+            Err(e) => {
+                self.cpu_power_error = Some(e);
+                self.pl_profile_retry_at_ms = now_ms.saturating_add(PL_RESET_RETRY_MS);
+                self.mark_dirty();
+                return None;
+            }
+        };
+        self.cpu_power_error = None;
+        self.pl_profile_busy = true;
+        self.pl_profile_retry_at_ms = now_ms.saturating_add(PL_RESET_RETRY_MS);
+        Some(self.apply_profile_task(ac, params))
     }
 
     /// Updates the in-memory flag and persists it so an app restart on battery
@@ -627,8 +813,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::sync_restart_params;
-    use crate::cpu_power::{CpuPowerInfo, PowerLimitParams};
+    use crate::cpu_power::CpuPowerInfo;
 
     #[test]
     fn refresh_always_overwrites_edit_fields() {
@@ -673,6 +858,31 @@ mod tests {
         assert!(!app.pl_fields_primed);
     }
 
+    #[test]
+    fn switching_source_loads_the_saved_profile_fields() {
+        use crate::types::PowerProfile;
+        let (mut app, _) = crate::App::new(false);
+        app.store_profile(
+            false,
+            PowerProfile {
+                pl1_watts: 22.0,
+                pl1_enabled: false,
+                pl1_clamped: true,
+                pl1_time_s: 15.0,
+                pl2_watts: 44.0,
+                pl2_enabled: true,
+                pl2_clamped: false,
+            },
+        );
+        app.pl_profile_is_ac = false;
+        app.load_pl_fields_for_source();
+        assert_eq!(app.pl1_edit, "22.0");
+        assert_eq!(app.pl2_edit, "44.0");
+        assert_eq!(app.pl1_time_edit, "15.0");
+        assert!(!app.pl1_enabled);
+        assert!(app.pl1_clamped);
+    }
+
     #[tokio::test]
     async fn begin_pawnio_task_uses_status_not_error() {
         let (mut app, _) = crate::App::new(false);
@@ -681,47 +891,6 @@ mod tests {
         assert_eq!(app.pawnio_status.as_deref(), Some("Installing PawnIO..."));
         assert!(app.modules_download_error.is_none());
         assert!(!app.begin_pawnio_task("again"));
-    }
-
-    fn params(pl1: f64) -> PowerLimitParams {
-        PowerLimitParams {
-            pl1_watts: pl1,
-            pl1_enabled: true,
-            pl1_clamped: false,
-            pl1_time_s: 28.0,
-            pl2_watts: 35.0,
-            pl2_enabled: true,
-            pl2_clamped: false,
-            pl2_time_s: 28.0,
-            max_time_s: None,
-            power_unit: 0.125,
-            time_unit: 0.0009765625,
-        }
-    }
-
-    #[test]
-    fn apply_keeps_sync_disabled_when_it_was_disabled() {
-        assert_eq!(
-            sync_restart_params(false, true, params(15.0), Some(params(28.0))),
-            None
-        );
-    }
-
-    #[test]
-    fn successful_apply_restarts_sync_with_new_params() {
-        assert_eq!(
-            sync_restart_params(true, true, params(15.0), Some(params(28.0))),
-            Some(params(15.0))
-        );
-    }
-
-    #[test]
-    fn failed_apply_restores_previous_sync_params() {
-        assert_eq!(
-            sync_restart_params(true, false, params(15.0), Some(params(28.0))),
-            Some(params(28.0))
-        );
-        assert_eq!(sync_restart_params(true, false, params(15.0), None), None);
     }
 }
 

@@ -19,7 +19,9 @@ pub use modules::{
     download_and_extract_modules, modules_downloaded, open_modules_dir, pawnio_modules_version,
     redetect_modules,
 };
-pub use types::{CpuPowerInfo, CpuPowerUnavailable, LIMIT_MAX_TIME_S, PowerLimitParams};
+pub use types::{
+    CpuPowerInfo, CpuPowerUnavailable, LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS, PowerLimitParams,
+};
 
 use bios::{
     PersistedBios, bios_defaults_valid, load_persisted_bios_defaults, persist_bios_defaults,
@@ -32,6 +34,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
 
 use crate::util::with_write_lock;
+
+/// Builds write parameters from a saved profile. The profile only stores the
+/// user's intent; units, the firmware time ceiling, and the PL2 window always
+/// come from the live snapshot so a profile can never pair stale encodings
+/// with current hardware.
+pub fn params_for_profile(
+    profile: &crate::types::PowerProfile,
+    info: &CpuPowerInfo,
+) -> PowerLimitParams {
+    PowerLimitParams {
+        pl1_watts: profile.pl1_watts,
+        pl1_enabled: profile.pl1_enabled,
+        pl1_clamped: profile.pl1_clamped,
+        pl1_time_s: profile.pl1_time_s,
+        pl2_watts: profile.pl2_watts,
+        pl2_enabled: profile.pl2_enabled,
+        pl2_clamped: profile.pl2_clamped,
+        pl2_time_s: info.pl2_time_s,
+        max_time_s: info.max_time_s,
+        power_unit: info.power_unit,
+        time_unit: info.time_unit,
+    }
+}
 
 /// Shared CPU power state.
 #[derive(Clone)]
@@ -403,6 +428,37 @@ impl CpuPowerState {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::PowerProfile;
+
+    #[test]
+    fn profile_params_take_units_and_pl2_window_from_live_info() {
+        let profile = PowerProfile {
+            pl1_watts: 12.5,
+            pl1_enabled: false,
+            pl1_clamped: true,
+            pl1_time_s: 20.0,
+            pl2_watts: 40.0,
+            pl2_enabled: true,
+            pl2_clamped: false,
+        };
+        let info = CpuPowerInfo {
+            pl2_time_s: 2.5,
+            max_time_s: Some(28.0),
+            power_unit: 0.125,
+            time_unit: 0.25,
+            ..CpuPowerInfo::default()
+        };
+        let params = super::params_for_profile(&profile, &info);
+        assert_eq!(params.pl1_watts, 12.5);
+        assert!(!params.pl1_enabled);
+        assert!(params.pl1_clamped);
+        assert_eq!(params.pl1_time_s, 20.0);
+        assert_eq!(params.pl2_watts, 40.0);
+        assert_eq!(params.pl2_time_s, 2.5);
+        assert_eq!(params.max_time_s, Some(28.0));
+        assert_eq!(params.power_unit, 0.125);
+        assert_eq!(params.time_unit, 0.25);
+    }
     use super::*;
 
     // Exercises the start_sync/stop_sync locking path: the calls must serialize

@@ -351,6 +351,40 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             );
         }
 
+        // Source selector: Apply saves the edited values into the selected
+        // AC/Battery profile. While the About keep-alive toggle is on, the
+        // matching profile is auto-applied on every source change.
+        let saved_note = if snap.pl_profile_is_ac {
+            if snap.pl_profile_ac_saved {
+                "saved"
+            } else {
+                "not saved"
+            }
+        } else if snap.pl_profile_battery_saved {
+            "saved"
+        } else {
+            "not saved"
+        };
+        let is_ac = snap.pl_profile_is_ac;
+        settings_content = settings_content.push(
+            row![
+                text("  Profile:").size(FONT_BODY),
+                button(text("AC").size(FONT_BODY))
+                    .on_press(Message::CpuPowerProfileSourceChanged(true))
+                    .style(move |theme, status| mode_style(theme, status, is_ac)),
+                button(text("Battery").size(FONT_BODY))
+                    .on_press(Message::CpuPowerProfileSourceChanged(false))
+                    .style(move |theme, status| mode_style(theme, status, !is_ac)),
+                text(saved_note)
+                    .size(FONT_SMALL)
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.gray),
+                    }),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center),
+        );
+
         // Editable PL1/PL2 writes to MSR 0x610. Only the PL1 time window is
         // editable; the PL2 window follows the live register value instead of
         // taking a second field, so an apply can never pair a PL2 wattage with
@@ -400,6 +434,13 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             .align_y(iced::Alignment::Center),
         );
 
+        if let Some(ref status) = snap.cpu_power_status {
+            settings_content = settings_content.push(text(status.as_str()).size(FONT_SMALL).style(
+                move |_theme| iced::widget::text::Style {
+                    color: Some(pal.gray),
+                },
+            ));
+        }
         if let Some(ref err) = snap.cpu_power_error {
             settings_content =
                 settings_content.push(text(err.as_str()).size(FONT_SMALL).style(move |_theme| {
@@ -419,6 +460,13 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                     .style(btn_style),
             ]
             .spacing(8),
+        );
+        settings_content = settings_content.push(
+            text("Apply saves the selected profile. Profiles switch automatically only while \"Keep power limits applied\" is on (About).")
+                .size(FONT_SMALL)
+                .style(move |_theme| iced::widget::text::Style {
+                    color: Some(pal.gray),
+                }),
         );
 
         content = content.push(

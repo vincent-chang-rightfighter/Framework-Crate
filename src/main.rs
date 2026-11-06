@@ -779,6 +779,7 @@ mod tests {
             battery: types::BatteryConfig::default(),
             telemetry: types::TelemetryConfig::default(),
             theme: "default".to_string(),
+            cpu_power: types::CpuPowerConfig::default(),
             pl_custom_applied: false,
             version: 0,
         };
@@ -809,6 +810,7 @@ mod tests {
             battery: types::BatteryConfig::default(),
             telemetry: types::TelemetryConfig::default(),
             theme: "dracula".to_string(),
+            cpu_power: types::CpuPowerConfig::default(),
             pl_custom_applied: false,
             version: 0,
         };
@@ -842,6 +844,7 @@ mod tests {
                 chart_window_seconds: 60,
             },
             theme: "light".to_string(),
+            cpu_power: types::CpuPowerConfig::default(),
             pl_custom_applied: false,
             version: 0,
         };

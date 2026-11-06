@@ -45,6 +45,10 @@ pub struct Config {
     /// AC-only live comparison corrects it when the source is known.
     #[serde(default)]
     pub pl_custom_applied: bool,
+    /// Persisted CPU power policy: the About keep-alive intent plus the
+    /// optional AC/Battery PL1/PL2 profiles it manages.
+    #[serde(default)]
+    pub cpu_power: CpuPowerConfig,
     /// One-time migration marker; old files have no field and default to 0.
     #[serde(default)]
     pub version: u32,
@@ -181,6 +185,27 @@ impl Config {
                 crate::style::CHARGE_LIMIT_MIN as u8,
                 crate::style::CHARGE_LIMIT_MAX as u8,
             );
+        }
+        // Drop unusable power profiles instead of letting a NaN/zero wattage
+        // reach the MSR writer; cap persisted values to the hardware ceiling.
+        for is_ac in [true, false] {
+            let valid = self
+                .cpu_power
+                .profile(is_ac)
+                .is_none_or(PowerProfile::is_valid);
+            if !valid {
+                warn!(
+                    "Dropping invalid {} power profile from config",
+                    if is_ac { "AC" } else { "battery" }
+                );
+                *self.cpu_power.profile_mut(is_ac) = None;
+                continue;
+            }
+            if let Some(profile) = self.cpu_power.profile_mut(is_ac) {
+                profile.pl1_watts = profile.pl1_watts.min(crate::cpu_power::LIMIT_MAX_WATTS);
+                profile.pl2_watts = profile.pl2_watts.min(crate::cpu_power::LIMIT_MAX_WATTS);
+                profile.pl1_time_s = profile.pl1_time_s.min(crate::cpu_power::LIMIT_MAX_TIME_S);
+            }
         }
         // Record that load-time migrations have run for this file.
         self.version = CONFIG_VERSION;
@@ -491,6 +516,79 @@ pub struct SettingU8 {
 pub struct BatteryConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub charge_limit_max_pct: Option<SettingU8>,
+}
+
+/// One saved PL1/PL2 profile. Units and the PL2 window come from the live
+/// registers at apply time; only the user's intent is persisted here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PowerProfile {
+    #[serde(default)]
+    pub pl1_watts: f64,
+    #[serde(default = "default_true")]
+    pub pl1_enabled: bool,
+    #[serde(default)]
+    pub pl1_clamped: bool,
+    #[serde(default)]
+    pub pl1_time_s: f64,
+    #[serde(default)]
+    pub pl2_watts: f64,
+    #[serde(default = "default_true")]
+    pub pl2_enabled: bool,
+    #[serde(default)]
+    pub pl2_clamped: bool,
+}
+
+impl Default for PowerProfile {
+    fn default() -> Self {
+        Self {
+            pl1_watts: 30.0,
+            pl1_enabled: true,
+            pl1_clamped: false,
+            pl1_time_s: 28.0,
+            pl2_watts: 60.0,
+            pl2_enabled: true,
+            pl2_clamped: false,
+        }
+    }
+}
+
+impl PowerProfile {
+    /// Rejects values that could never be written (NaN/infinite/negative) so a
+    /// hand-edited config cannot poison the apply path.
+    pub fn is_valid(&self) -> bool {
+        self.pl1_watts.is_finite()
+            && self.pl1_watts > 0.0
+            && self.pl1_time_s.is_finite()
+            && self.pl1_time_s >= 0.0
+            && self.pl2_watts.is_finite()
+            && self.pl2_watts > 0.0
+    }
+}
+
+/// CPU power policy persisted across launches. Profiles are only consulted
+/// while `keep_limits` is enabled (the About toggle).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct CpuPowerConfig {
+    #[serde(default)]
+    pub keep_limits: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ac: Option<PowerProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub battery: Option<PowerProfile>,
+}
+
+impl CpuPowerConfig {
+    pub fn profile(&self, ac: bool) -> Option<&PowerProfile> {
+        if ac {
+            self.ac.as_ref()
+        } else {
+            self.battery.as_ref()
+        }
+    }
+
+    pub fn profile_mut(&mut self, ac: bool) -> &mut Option<PowerProfile> {
+        if ac { &mut self.ac } else { &mut self.battery }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

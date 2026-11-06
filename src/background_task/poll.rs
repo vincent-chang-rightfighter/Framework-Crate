@@ -350,11 +350,17 @@ pub(super) async fn phase_battery(state: &AppState, ec: &Arc<dyn cli::EcHw>, pol
             let had_prior_sample = state.battery.last_success_ms.load(Ordering::Acquire) != 0;
             let ac_was = state.battery.prev_ac_present.load(Ordering::Acquire);
             if ac_transition_pending(ac_was, ac_now, had_prior_sample) {
-                state
-                    .lifecycle
-                    .pl_reset_pending
-                    .store(true, Ordering::Release);
-                tracing::info!("AC→battery transition detected, PL1/PL2 reset pending");
+                // With the keep-alive policy on, the UI layer applies the
+                // target AC/Battery profile instead of resetting to BIOS
+                // defaults. Only the legacy path sets the reset flag here.
+                let keep_limits = read_lock(&state.lifecycle.config).cpu_power.keep_limits;
+                if !keep_limits {
+                    state
+                        .lifecycle
+                        .pl_reset_pending
+                        .store(true, Ordering::Release);
+                    tracing::info!("AC→battery transition detected, PL1/PL2 reset pending");
+                }
             }
             state
                 .battery

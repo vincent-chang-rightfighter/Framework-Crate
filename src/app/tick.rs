@@ -217,6 +217,11 @@ impl App {
             }
         }
 
+        // Keep-alive profiles: when the About toggle is on, apply the saved
+        // profile for the current source on startup and whenever AC↔battery
+        // changes. Runs after tray upkeep for the same reason as the reset.
+        let mut profile_task = self.maybe_auto_apply_profile(now_ms);
+
         // AC→battery: reset PL1/PL2 to BIOS defaults. Runs after the tray
         // upkeep so a reset tick never skips tray initialization. The pending
         // flag is cleared by CpuPowerResetDone on success; failures schedule
@@ -246,11 +251,14 @@ impl App {
                     .pl_reset_retry_at_ms
                     .store(now_ms.saturating_add(PL_RESET_RETRY_MS), Ordering::Release);
                 let reset = self.handle_cpu_power_sync_reset();
-                let tick = tick_task(self.tick_interval_ms);
-                return match cpu_power_refresh.take() {
-                    Some(refresh) => Task::batch([reset, tick, refresh]),
-                    None => Task::batch([reset, tick]),
-                };
+                let mut tasks = Task::batch([reset, tick_task(self.tick_interval_ms)]);
+                if let Some(refresh) = cpu_power_refresh.take() {
+                    tasks = Task::batch([tasks, refresh]);
+                }
+                if let Some(profile) = profile_task.take() {
+                    tasks = Task::batch([tasks, profile]);
+                }
+                return tasks;
             }
         }
 
@@ -281,10 +289,14 @@ impl App {
             self.mark_dirty();
         }
 
-        match cpu_power_refresh {
-            Some(refresh) => Task::batch([refresh, tick_task(next_ms)]),
-            None => tick_task(next_ms),
+        let mut tasks = tick_task(next_ms);
+        if let Some(refresh) = cpu_power_refresh {
+            tasks = Task::batch([tasks, refresh]);
         }
+        if let Some(profile) = profile_task.take() {
+            tasks = Task::batch([tasks, profile]);
+        }
+        tasks
     }
 
     pub(crate) fn autosize_task(&self) -> Option<Task<Message>> {

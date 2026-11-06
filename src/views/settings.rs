@@ -306,7 +306,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
     // Sync moved here from the CPU Power card: it is a background policy, not
     // a per-apply control, and the explanation belongs on the About page.
     if app.state.system.intel_cpu.load(Ordering::Relaxed) {
-        let sync_on = app.state.cpu_power.sync_enabled.load(Ordering::Relaxed);
+        let sync_on = read_lock(&app.state.lifecycle.config).cpu_power.keep_limits;
         let available = app.state.cpu_power.snapshot().available;
         let sync_button = button(text(if sync_on { "ON" } else { "OFF" }).size(FONT_BODY))
             .style(move |theme, status| mode_style(theme, status, sync_on));
@@ -328,7 +328,7 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
-                text("Re-applies PL1/PL2 after sleep or AC changes, and every 5 minutes, in case firmware resets them.")
+                text("Applies the saved AC/Battery profile after sleep or AC changes, and keeps it applied every 5 minutes. Profiles are edited on the CPU Power card.")
                     .size(FONT_SMALL)
                     .style(move |_theme| iced::widget::text::Style {
                         color: Some(pal.gray),
