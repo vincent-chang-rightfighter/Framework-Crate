@@ -295,12 +295,19 @@ impl App {
                     .store(false, Ordering::Release);
                 warn!("Sync thread exited and cannot be restarted (no desired params)");
             }
-            // Auto-restart gave up permanently: surface it once so the user
-            // knows Sync needs a manual press. Cleared by the next
-            // successful apply/sync/reset, which resets cpu_power_error.
+            // Auto-restart gave up permanently: clear the persisted intent so
+            // the About toggle does not claim to be on, then surface it once.
+            // Cleared by the next successful apply/sync/reset.
             if self.state.cpu_power.sync_restart_latched() && self.cpu_power_error.is_none() {
-                self.cpu_power_error =
-                    Some("Sync failed repeatedly and stopped; press Sync to retry".to_string());
+                if self.keep_limits_enabled() {
+                    self.mutate_config(|cfg| cfg.cpu_power.keep_limits = false);
+                    self.save_config();
+                    self.pl_active_source = None;
+                }
+                self.cpu_power_error = Some(
+                    "Keep-alive stopped after repeated failures; turn it on in About to retry."
+                        .to_string(),
+                );
             }
             // Reflect state change (or pending retry) in the UI.
             self.mark_dirty();

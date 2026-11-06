@@ -529,7 +529,7 @@ impl App {
     }
 
     /// Whether the About keep-alive toggle is enabled (persisted intent).
-    fn keep_limits_enabled(&self) -> bool {
+    pub(crate) fn keep_limits_enabled(&self) -> bool {
         crate::util::read_lock(&self.state.lifecycle.config)
             .cpu_power
             .keep_limits
@@ -833,12 +833,16 @@ impl App {
 
     pub(crate) fn handle_cpu_power_sync_reset(&mut self) -> Task<Message> {
         if !self.cpu_power_supported() {
+            // A manual Reset that never starts must not leave the flag armed
+            // for a later automatic reset.
+            self.pl_reset_disable_keep = false;
             return Task::none();
         }
         self.cpu_power_error = None;
         let bios = match self.state.cpu_power.bios_defaults() {
             Some(b) => b,
             None => {
+                self.pl_reset_disable_keep = false;
                 self.cpu_power_error = Some(
                     "Cannot reset: BIOS defaults not available (PawnIO may not be running)".into(),
                 );
@@ -1048,6 +1052,14 @@ mod tests {
         assert_eq!(app.pl1_time_edit, "15.0");
         assert!(!app.pl1_enabled);
         assert!(app.pl1_clamped);
+    }
+
+    #[test]
+    fn reset_that_cannot_start_disarms_the_manual_keep_flag() {
+        let (mut app, _) = crate::App::new(false);
+        app.pl_reset_disable_keep = true;
+        let _ = app.handle_cpu_power_sync_reset();
+        assert!(!app.pl_reset_disable_keep);
     }
 
     #[tokio::test]
