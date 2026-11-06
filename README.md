@@ -30,7 +30,7 @@ Download the `.exe`, then run it as administrator. PawnIO is optional and only n
 
 ## Features
 
-> Note: 0.9.4 adds the Turbo readout, tray tooltip, Privacy switches, board revision, and PD-only Ports display on top of the 0.9.3 release.
+> Note: 0.9.5 fixes curve seeding after a reset, makes the calibration 3-strike abort reachable, hardens export/import and tray quit, and replaces the manual Sync button with an automatic 5-minute keep-alive toggle on the About page.
 
 - **Fan Control** — Auto (firmware), manual (0–100% duty, optional per-fan; at or above 95°C duty is floored at 90%), and curve mode with draggable points on a canvas (default 5 points, hysteresis, and rate limiting; live sensor markers shown on the curve; optional per-fan curves on multi-fan machines via the Unified switch; calibration wizard measures per-fan RPM tables for accurate ramp seeding)
 - **Battery Management** — Maximum charge limit (25–100%) with enable/disable toggle; saved limit is applied on startup. Health uses last-full / design capacity. Details shows charger voltage/input on AC plus smart-battery data (per-cell voltages, pack temperature, safety alerts) when readable
