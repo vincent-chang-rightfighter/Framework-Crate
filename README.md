@@ -1,17 +1,17 @@
 # Framework Crate (Windows)
 
-[![Rust CI](https://github.com/vincent-chang-rightfighter/Framework-Crate/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/vincent-chang-rightfighter/Framework-Crate/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/vincent-chang-rightfighter/Framework-Crate)](https://github.com/vincent-chang-rightfighter/Framework-Crate/releases)
+[![Rust CI](https://github.com/vinctw22/Framework-Crate/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/vinctw22/Framework-Crate/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/vinctw22/Framework-Crate)](https://github.com/vinctw22/Framework-Crate/releases)
 
 A native desktop GUI for Framework laptop fan control, battery charge limits, and live hardware telemetry. Built with Rust and [Iced](https://iced.rs/) 0.14, using [`framework_lib`](https://github.com/FrameworkComputer/framework-system) for direct EC hardware access.
 
-Project site (with Privacy Policy and License): https://vincent-chang-rightfighter.github.io/Framework-Crate/
+Project site (with Privacy Policy and License): https://vinctw22.github.io/Framework-Crate/
 
 Inspired by [ozturkkl/framework-control](https://github.com/ozturkkl/framework-control).
 
 ## Downloads
 
-Prebuilt Windows binaries are attached to each [GitHub Release](https://github.com/vincent-chang-rightfighter/Framework-Crate/releases) as `framework-crate.exe`. The release notes list what changed in that version.
+Prebuilt Windows binaries are attached to each [GitHub Release](https://github.com/vinctw22/Framework-Crate/releases) as `framework-crate.exe`. The release notes list what changed in that version.
 
 Download the `.exe`, then run it as administrator. PawnIO is optional and only needed for the CPU Power card; everything else works with the Framework EC driver alone.
 

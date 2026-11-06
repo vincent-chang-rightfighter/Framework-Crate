@@ -16,7 +16,7 @@ releases may miss EC/MSR hardening and config-integrity fixes.
 
 1. GitHub → Security tab → **Report a vulnerability** (private vulnerability
    reporting) on
-   [Framework-Crate](https://github.com/vincent-chang-rightfighter/Framework-Crate),
+   [Framework-Crate](https://github.com/vinctw22/Framework-Crate),
    preferred — it keeps the report private until a fix ships.
 2. If private reporting is unavailable, open a normal issue **without**
    exploit details and ask for a private channel.
@@ -45,7 +45,7 @@ requires local administrator rights you already granted the app.
 ## Full releases and notices
 
 Security-relevant changes are listed in the
-[release notes](https://github.com/vincent-chang-rightfighter/Framework-Crate/releases).
-The [project site](https://vincent-chang-rightfighter.github.io/Framework-Crate/)
-also hosts the [Privacy Policy](https://vincent-chang-rightfighter.github.io/Framework-Crate/privacy.html)
-and [License](https://vincent-chang-rightfighter.github.io/Framework-Crate/license.html) pages.
+[release notes](https://github.com/vinctw22/Framework-Crate/releases).
+The [project site](https://vinctw22.github.io/Framework-Crate/)
+also hosts the [Privacy Policy](https://vinctw22.github.io/Framework-Crate/privacy.html)
+and [License](https://vinctw22.github.io/Framework-Crate/license.html) pages.

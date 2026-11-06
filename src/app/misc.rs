@@ -314,7 +314,7 @@ impl App {
                 // A future static-str call site with file:// or ms-msdt:
                 // would otherwise become a protocol-handler hijack.
                 let allowed = url
-                    .strip_prefix("https://github.com/vincent-chang-rightfighter/Framework-Crate")
+                    .strip_prefix("https://github.com/vinctw22/Framework-Crate")
                     .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
                 if !allowed {
                     tracing::warn!("Refusing to open non-whitelisted URL: {}", url);

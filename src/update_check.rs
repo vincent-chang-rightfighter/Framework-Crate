@@ -5,12 +5,11 @@ use std::os::windows::process::CommandExt;
 
 /// API endpoint for this repository's latest release.
 const LATEST_RELEASE_API: &str =
-    "https://api.github.com/repos/vincent-chang-rightfighter/Framework-Crate/releases/latest";
+    "https://api.github.com/repos/vinctw22/Framework-Crate/releases/latest";
 
 /// Project pages opened from the About page.
-pub const PROJECT_URL: &str = "https://github.com/vincent-chang-rightfighter/Framework-Crate";
-pub const RELEASES_URL: &str =
-    "https://github.com/vincent-chang-rightfighter/Framework-Crate/releases";
+pub const PROJECT_URL: &str = "https://github.com/vinctw22/Framework-Crate";
+pub const RELEASES_URL: &str = "https://github.com/vinctw22/Framework-Crate/releases";
 
 /// Fetches the latest release tag (e.g. "v0.6.2") via curl.exe, like the
 /// Modules download path. Returns None when unreachable.
