@@ -20,7 +20,7 @@
 
 <ul class="tight">
 <li><strong>AMD CPU Power is not supported yet.</strong> The CPU Power card shows Not Supported and no power-limit access is attempted. AMD (Ryzen) power tuning is planned through PawnIO and its RyzenSMU module, but the maintainer has no AMD hardware — it will ship only after community testing verifies the register behavior per CPU generation.</li>
-<li><strong>MMIO mirror is read-only.</strong> The official Intel MCHBAR module exposes reads only, so Apply/Sync writes MSR 0x610 alone. If firmware holds the MMIO mirror below your MSR value, the enforced limit may not move.</li>
+<li><strong>MMIO mirror is read-only.</strong> The official Intel MCHBAR module exposes reads only, so Apply writes MSR 0x610 alone (the optional keepalive re-asserts the same register). If firmware holds the MMIO mirror below your MSR value, the enforced limit may not move.</li>
 <li><strong>Tested platform is narrow.</strong> Only Intel Core Ultra Series 1 (Meteor Lake) Framework laptops are tested; the Framework EC kernel driver must be installed.</li>
 <li><strong>Per-fan curves lack multi-fan verification.</strong> Covered by mocked unit tests only — no Framework 16 / Desktop hardware was available. Single-fan machines use the exact pre-existing code path.</li>
 <li><strong>Crash keeps the last state.</strong> Orderly quit restores firmware fan control and flushes the charge limit, but a crash or kill bypasses that path: the EC keeps the last written fan duty until sleep, reboot, or the next launch.</li>

@@ -191,15 +191,6 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 .style(move |_theme| iced::widget::text::Style {
                     color: Some(pl2_color)
                 }),
-            if snap.sync_enabled {
-                text("  [Syncing]").size(FONT_SMALL).style(move |_theme| {
-                    iced::widget::text::Style {
-                        color: Some(pal.green),
-                    }
-                })
-            } else {
-                text("").size(FONT_SMALL)
-            },
         ]
         .spacing(4),
     );
@@ -344,7 +335,7 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
             .spacing(4),
         );
         settings_content = settings_content.push(
-            text("Official IntelMCHBAR is read-only: Apply/Sync write MSR 0x610 only. The MMIO mirror is displayed, not written.")
+            text("Official IntelMCHBAR is read-only: writes go to MSR 0x610 only. The MMIO mirror is displayed, not written.")
                 .size(FONT_SMALL)
                 .style(move |_theme| iced::widget::text::Style {
                     color: Some(pal.gray),
@@ -418,35 +409,11 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
                 }));
         }
 
-        if snap.sync_enabled {
-            settings_content = settings_content.push(
-                text("Syncing MSR 0x610 every 250ms")
-                    .size(FONT_SMALL)
-                    .style(move |_theme| iced::widget::text::Style {
-                        color: Some(pal.green),
-                    }),
-            );
-        }
-
         settings_content = settings_content.push(
             row![
                 button(text("Apply").size(FONT_BODY))
                     .on_press(Message::CpuPowerApply)
                     .style(btn_style),
-                button(
-                    text(if snap.sync_enabled {
-                        "Stop Sync"
-                    } else {
-                        "Start Sync"
-                    })
-                    .size(FONT_BODY)
-                )
-                .on_press(if snap.sync_enabled {
-                    Message::CpuPowerSyncStop
-                } else {
-                    Message::CpuPowerSyncStart
-                })
-                .style(btn_style),
                 button(text("Reset").size(FONT_BODY))
                     .on_press(Message::CpuPowerSyncReset)
                     .style(btn_style),

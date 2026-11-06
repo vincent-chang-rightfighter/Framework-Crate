@@ -1,4 +1,6 @@
-//! Background thread that re-asserts PL1/PL2 against firmware and EC overwrites.
+//! Background thread that periodically re-asserts PL1/PL2 against firmware and
+//! EC overwrites. It is a slow keepalive (5 minutes), not a tight poll: sleep
+//! resume and AC transitions issue an immediate one-shot write instead.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,7 +11,7 @@ use super::limits::write_msr_pl1_pl2;
 use super::modules::load_intel_msr_blob;
 use super::types::PowerLimitParams;
 
-/// Sync thread that continuously re-asserts MSR 0x610 to counter
+/// Sync thread that re-asserts MSR 0x610 on a slow cadence to counter
 /// firmware/EC overwrites. Runs until `external_alive` is dropped.
 pub(super) struct SyncThread {
     pub(super) running: Arc<AtomicBool>,
@@ -155,7 +157,12 @@ impl FailureCounter {
 /// Consecutive-failure limit for the sync loop breaker.
 const MSR_BREAKER_LIMIT: u32 = 30;
 
-/// Sync thread main loop; re-asserts MSR 0x610 every 250ms.
+/// Successful-pass cadence: a slow keepalive, not a polling loop. Sleep
+/// resume and AC transitions do an immediate one-shot write, so five minutes
+/// only bounds how long an unnoticed firmware reset can persist.
+const REASSERT_INTERVAL_MS: u64 = 5 * 60 * 1000;
+
+/// Sync thread main loop; re-asserts MSR 0x610 every `REASSERT_INTERVAL_MS`.
 ///
 /// The official IntelMCHBAR module is read-only, so this thread intentionally
 /// does not attempt MMIO writes; the mirror is still read for status/effective
@@ -196,8 +203,9 @@ fn sync_thread_main(
 
     let mut msr_failures = FailureCounter::new("MSR");
     while running.load(Ordering::Relaxed) {
-        // Unconditionally re-assert limits every 250ms. The whole point of
-        // this thread is to win against firmware/EC overwrites.
+        // Slow keepalive: one write on start, one after resume, one per AC
+        // transition, and one every five minutes. Tight polling was removed
+        // because the firmware only rewrites the registers on those events.
         match write_msr_pl1_pl2(&msr_handle, &params) {
             Ok(()) => msr_failures.succeeded(),
             Err(e) => msr_failures.failed(&e),
@@ -221,7 +229,7 @@ fn sync_thread_main(
         } else if write_failures >= 4 {
             1000
         } else {
-            250
+            REASSERT_INTERVAL_MS
         };
         // Sleep in short chunks so stop_sync()/join() never blocks on the
         // full backoff interval (previously up to 30s of UI freeze).
@@ -261,8 +269,9 @@ mod tests {
 
     #[test]
     fn failure_log_level_is_silent_after_the_switchover() {
-        // A BIOS-locked register fails on every pass, so anything logged past
-        // the switchover would be four lines per second forever.
+        // A BIOS-locked register fails on every pass; the backoff makes later
+        // passes rare, and anything logged past the switchover would still be
+        // noise forever.
         for count in 7..10_000 {
             assert_eq!(
                 failure_log_level(count),

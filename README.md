@@ -103,7 +103,7 @@ src/
     header.rs          — Top system info header + About button
     sensors.rs         — Temperature sensors, chart settings
     fan_control.rs     — Fan mode, duty slider, curve canvas + settings panel
-    cpu_power.rs       — PL1/PL2 control, sync status, MSR/MMIO display
+    cpu_power.rs       — PL1/PL2 control, MSR/MMIO display
     battery.rs         — Battery info, charge limit section
     misc.rs            — Keyboard backlight, ports section
     settings.rs        — About / Settings popup
@@ -124,7 +124,7 @@ src/
     modules.rs         — PawnIO Modules download, hashing, extraction, install
     limits.rs          — PL1/PL2 encoding, writes, reset to BIOS defaults
     ffi.rs             — PawnIOLib.dll binding and RAPL register access
-    sync.rs            — Background sync thread
+    sync.rs            — Periodic PL1/PL2 re-assert (5 min keepalive)
     bios.rs            — Factory default capture and persistence
     read.rs            — PL1/PL2 reading
   temp_chart.rs        — Canvas-based temperature line chart (selectable history window)
@@ -298,9 +298,9 @@ The section reads and optionally writes PL1/PL2 via official PawnIO Modules. Tho
 
 A missing file blocks CPU Power; a hash mismatch also blocks use — update the app for the new release, or set `FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1` only after manual verification. Failed download shows manual instructions: download latest `release_*.zip` from the releases page and place `IntelMSR.bin` + `IntelMCHBAR.bin` into `%APPDATA%/framework-crate/modules/`. Use **Open Modules Folder** and **Redetect** in the UI to verify — no restart needed.
 
-The first successful RAPL read while on AC also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` restores the MSR values from that snapshot; the MMIO mirror is read-only and is left untouched. After sleep/resume the app re-reads the live limits and resumes sync with the user's desired values; it does not overwrite them with the BIOS snapshot.
+The first successful RAPL read while on AC also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` restores the MSR values from that snapshot; the MMIO mirror is read-only and is left untouched. After sleep/resume the app re-reads the live limits and, when "Keep power limits applied" is enabled on the About page, re-asserts the user's desired values once immediately (and every 5 minutes thereafter); it does not overwrite them with the BIOS snapshot.
 
-The official `IntelMCHBAR.bin` exports only read ioctls (`ioctl_read_qword`). `Apply` and `Sync` therefore write MSR 0x610 only; the MMIO mirror is read for display and for the effective `min(MSR, MMIO)` estimate. There is no MMIO write attempt (and no repeated `ioctl_write_qword` failure). If the MMIO mirror holds a lower limit than MSR, an MSR-only write may not change the effective limit; a custom MCHBAR write module would be required for that, which this project intentionally does not ship.
+The official `IntelMCHBAR.bin` exports only read ioctls (`ioctl_read_qword`). `Apply` therefore writes MSR 0x610 only; the MMIO mirror is read for display and for the effective `min(MSR, MMIO)` estimate. There is no MMIO write attempt (and no repeated `ioctl_write_qword` failure). If the MMIO mirror holds a lower limit than MSR, an MSR-only write may not change the effective limit; a custom MCHBAR write module would be required for that, which this project intentionally does not ship.
 
 **Requirements:**
 - PawnIO installed

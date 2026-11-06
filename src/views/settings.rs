@@ -4,6 +4,7 @@ use crate::style::*;
 use crate::util::read_lock;
 use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length};
+use std::sync::atomic::Ordering;
 
 /// Board revision is SMBIOS firmware data: immutable for the process, but
 /// the About page rebuilds on every dirty frame, so parse once instead of
@@ -302,6 +303,41 @@ pub(crate) fn view_settings(app: &App) -> Element<'_, Message> {
         ]
         .spacing(8),
     );
+    // Sync moved here from the CPU Power card: it is a background policy, not
+    // a per-apply control, and the explanation belongs on the About page.
+    if app.state.system.intel_cpu.load(Ordering::Relaxed) {
+        let sync_on = app.state.cpu_power.sync_enabled.load(Ordering::Relaxed);
+        let available = app.state.cpu_power.snapshot().available;
+        let sync_button = button(text(if sync_on { "ON" } else { "OFF" }).size(FONT_BODY))
+            .style(move |theme, status| mode_style(theme, status, sync_on));
+        let sync_button = if available {
+            sync_button.on_press(if sync_on {
+                Message::CpuPowerSyncStop
+            } else {
+                Message::CpuPowerSyncStart
+            })
+        } else {
+            sync_button
+        };
+        content = content.push(card(
+            column![
+                section_title(pal, "CPU Power"),
+                row![
+                    text("Keep power limits applied:").size(FONT_BODY),
+                    sync_button,
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+                text("Re-applies PL1/PL2 after sleep or AC changes, and every 5 minutes, in case firmware resets them.")
+                    .size(FONT_SMALL)
+                    .style(move |_theme| iced::widget::text::Style {
+                        color: Some(pal.gray),
+                    }),
+            ]
+            .spacing(4)
+            .into(),
+        ));
+    }
     if let Some(ref err) = app.cpu_power_error {
         content = content.push(card(
             text(err.as_str())

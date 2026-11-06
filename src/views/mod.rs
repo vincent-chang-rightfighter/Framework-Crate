@@ -54,7 +54,6 @@ pub(crate) struct ViewSnapshot {
     pub calibration_busy: bool,
     pub ports_debug: bool,
     pub cpu_power: Arc<crate::cpu_power::CpuPowerInfo>,
-    pub sync_enabled: bool,
     pub show_cpu_power_settings: bool,
     pub show_curve_settings: bool,
     pub pl_custom_applied: bool,
@@ -103,7 +102,6 @@ impl ViewSnapshot {
         };
         let calibration_status = app.calibration_status.as_ref().map(|s| Arc::new(s.clone()));
         let cpu_power = app.state.cpu_power.snapshot();
-        let sync_enabled = app.state.cpu_power.sync_enabled.load(Ordering::Acquire);
         let config = Arc::clone(&read_lock(&app.state.lifecycle.config));
         let has_calibration_table = config.fan.calibration_tables.iter().any(|t| !t.is_empty());
         let per_fan_curve_points: Arc<Vec<Vec<[u32; 2]>>> = config
@@ -185,7 +183,6 @@ impl ViewSnapshot {
             calibration_busy,
             ports_debug: app.ports_debug,
             cpu_power,
-            sync_enabled,
             show_cpu_power_settings: app.show_cpu_power_settings,
             show_curve_settings: app.show_curve_settings,
             pl_custom_applied: app.pl_custom_applied.load(Ordering::Acquire),

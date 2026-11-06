@@ -307,6 +307,19 @@ pub(super) fn phase_resume(state: &AppState, poll: &mut PollState) -> Phase {
         tracing::warn!(
             "[RESUME] EC client and fan state reset after system resume (history retained)"
         );
+        // Firmware typically rewrites the RAPL registers across sleep; the
+        // keepalive thread only fires every five minutes, so re-assert the
+        // user's limits once, immediately, off the poll loop.
+        if state.cpu_power.sync_enabled.load(Ordering::Acquire)
+            && let Some(params) = state.cpu_power.desired_sync_params()
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            handle.spawn_blocking(move || {
+                if let Err(e) = crate::cpu_power::write_msr_pl1_pl2_public(params) {
+                    tracing::warn!("Post-resume CPU power re-assert failed: {}", e);
+                }
+            });
+        }
     }
     if state
         .lifecycle
