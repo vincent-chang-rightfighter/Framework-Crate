@@ -213,7 +213,7 @@ jobs:
           if ($analysis -and $analysis.data.attributes.stats) {
             $s = $analysis.data.attributes.stats
             $total = ($s.harmless + $s.malicious + $s.suspicious + $s.undetected + $s.timeout)
-            $verdict = " — $($s.malicious) malicious, $($s.suspicious) suspicious of $total engines"
+            $verdict = "`n  - $($s.malicious) malicious, $($s.suspicious) suspicious of $total engines"
           }
           if ($status -ne "completed") {
             Write-Output "VirusTotal analysis did not complete in time; publishing the link anyway."
