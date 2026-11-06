@@ -91,6 +91,9 @@ impl App {
                     }
                     self.show_quit_warning = true;
                 } else {
+                    // Same guard as the quit dialog: stop the wizard before the
+                    // forced handover so no step write is queued behind it.
+                    self.abort_calibration_for_quit();
                     self.tray.shutdown();
                     self.state.lifecycle.shutdown.store(true, Ordering::Release);
                     let limit = read_lock(&self.state.lifecycle.config)

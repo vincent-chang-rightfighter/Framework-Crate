@@ -42,6 +42,8 @@ const SAMPLE_RETAIN: Duration = Duration::from_secs(60);
 
 /// In-progress wizard run.
 pub(crate) struct CalibrationRun {
+    /// Monotonic id; late results from a cancelled run are ignored.
+    seq: u64,
     step_idx: usize,
     step_started: Instant,
     started: Instant,
@@ -126,7 +128,7 @@ pub(crate) fn duty_for_rpm(table: &[[u32; 2]], rpm: u32) -> Option<u32> {
     None
 }
 
-fn emit_step_write(ec_client: &cli::SharedEc, duty: u32) -> Task<Message> {
+fn emit_step_write(ec_client: &cli::SharedEc, duty: u32, seq: u64) -> Task<Message> {
     let ec_client = Arc::clone(ec_client);
     Task::perform(
         async move {
@@ -147,7 +149,7 @@ fn emit_step_write(ec_client: &cli::SharedEc, duty: u32) -> Task<Message> {
             } else {
                 Err("no EC client".to_string())
             };
-            Message::CalibrationStepDone(res)
+            Message::CalibrationStepDone(seq, res)
         },
         |msg| msg,
     )
@@ -192,7 +194,10 @@ impl App {
             .fan
             .calibration_active
             .store(true, Ordering::Release);
+        self.calibration_seq = self.calibration_seq.wrapping_add(1);
+        let seq = self.calibration_seq;
         self.calibration = Some(CalibrationRun {
+            seq,
             step_idx: 0,
             step_started: Instant::now(),
             started: Instant::now(),
@@ -207,6 +212,7 @@ impl App {
         Some(emit_step_write(
             &self.state.system.ec_client,
             CALIBRATION_STEPS[0],
+            seq,
         ))
     }
 
@@ -234,11 +240,16 @@ impl App {
 
     pub(crate) fn calibration_step_done(
         &mut self,
+        seq: u64,
         result: &Result<(), String>,
     ) -> Option<Task<Message>> {
         let Some(run) = self.calibration.as_mut() else {
             return Some(Task::none());
         };
+        // A result from a cancelled run must not touch the current one.
+        if run.seq != seq {
+            return Some(Task::none());
+        }
         match result {
             Ok(()) => {
                 run.awaiting_write = false;
@@ -264,6 +275,25 @@ impl App {
         // Live progress line.
         self.mark_dirty();
         if self.calibration.as_ref().is_some_and(|r| r.awaiting_write) {
+            // A step write can take up to STEP_WRITE_TIMEOUT; the heat guard
+            // must still fire inside that window (unconditional, no debounce).
+            let hot = read_lock(&self.state.thermal.data)
+                .as_ref()
+                .as_ref()
+                .and_then(|t| {
+                    t.temps
+                        .iter()
+                        .filter(|(n, _)| !crate::types::is_battery_sensor(n))
+                        .map(|(_, v)| *v)
+                        .max()
+                })
+                .is_some_and(|max| max >= ABORT_TEMP_C);
+            if hot {
+                let restore = self.abort_calibration(format!(
+                    "temperature reached {ABORT_TEMP_C}C, stopping for safety"
+                ));
+                return Some(restore);
+            }
             return None;
         }
         let now = Instant::now();
@@ -385,6 +415,11 @@ impl App {
             let restore = self.finish_calibration();
             return Some(restore);
         }
+        let seq = self
+            .calibration
+            .as_ref()
+            .map(|run| run.seq)
+            .unwrap_or_default();
         if let Some(run) = self.calibration.as_mut() {
             run.awaiting_write = true;
             run.samples.clear();
@@ -392,6 +427,7 @@ impl App {
         Some(emit_step_write(
             &self.state.system.ec_client,
             CALIBRATION_STEPS[step_idx + 1],
+            seq,
         ))
     }
 
@@ -501,6 +537,7 @@ mod tests {
     #[test]
     fn progress_line_counts_steps() {
         let run = CalibrationRun {
+            seq: 1,
             step_idx: 2,
             step_started: Instant::now(),
             started: Instant::now(),

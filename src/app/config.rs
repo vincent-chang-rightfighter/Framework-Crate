@@ -440,7 +440,33 @@ impl App {
             .lifecycle
             .fan_reset_pending
             .store(true, Ordering::Release);
-        self.state.fan.last_applied_duty.store(0, Ordering::Release);
+        // Keep the quit/ramp baseline truthful: `fan_reset_pending` makes the
+        // next poll re-assert the mode, but a quit before that round reads
+        // `last_applied_duty`. Store the imported target instead of zeroing
+        // it (Curve has no fixed target until the next temperature read, so
+        // keep the previous baseline there).
+        let fan_count = self.state.fan.fan_count.load(Ordering::Acquire) as usize;
+        let target: u64 = match applied.fan.mode {
+            FanControlMode::Disabled => 0,
+            FanControlMode::Manual => if applied.fan.unified_duty {
+                applied.fan.manual.as_ref().map(|m| m.duty_pct).unwrap_or(0)
+            } else {
+                applied
+                    .fan
+                    .per_fan_duty
+                    .iter()
+                    .take(fan_count.max(1))
+                    .copied()
+                    .max()
+                    .unwrap_or(0)
+            }
+            .into(),
+            FanControlMode::Curve => self.state.fan.last_applied_duty.load(Ordering::Acquire),
+        };
+        self.state
+            .fan
+            .last_applied_duty
+            .store(target, Ordering::Release);
         self.state
             .lifecycle
             .poll_ms

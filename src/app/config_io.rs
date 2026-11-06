@@ -104,6 +104,12 @@ impl App {
                             None
                         };
                         self.apply_imported_config(&imported.config);
+                        if wizard_restore.is_some() {
+                            // The import intentionally cancelled the run; do
+                            // not leave its "aborted" line next to the success
+                            // status.
+                            self.calibration_status = None;
+                        }
                         // A same-chassis warning is informational, not an
                         // error: fold it into the success line so it is
                         // seen but never blocks the apply. Imports replace
@@ -135,7 +141,7 @@ impl App {
             Message::CalibrationStart => self.calibration_start(),
             Message::CalibrationCancel => self.calibration_cancel(),
             Message::CalibrationClearTable => self.calibration_clear_table(),
-            Message::CalibrationStepDone(result) => self.calibration_step_done(result),
+            Message::CalibrationStepDone(seq, result) => self.calibration_step_done(*seq, result),
             _ => None,
         }
     }

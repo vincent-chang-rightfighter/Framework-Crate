@@ -149,7 +149,7 @@ pub enum Message {
     CalibrationStart,
     CalibrationCancel,
     CalibrationClearTable,
-    CalibrationStepDone(Result<(), String>),
+    CalibrationStepDone(u64, Result<(), String>),
     ExportConfig,
     ExportConfigDone(Result<Option<String>, String>),
     ImportConfig,
@@ -269,6 +269,8 @@ pub struct App {
     /// Active calibration wizard run; `None` when idle. Owns EC fan writes
     /// while present (the background arm yields, see `calibration_active`).
     pub(crate) calibration: Option<calibration::CalibrationRun>,
+    /// Monotonic run id; late EC results from an aborted run are discarded.
+    pub(crate) calibration_seq: u64,
     /// Last wizard outcome (completed table summary or abort reason) shown
     /// until the next run. Separate from the live progress line.
     pub calibration_status: Option<String>,
@@ -509,6 +511,7 @@ impl App {
             config_io_status: None,
             config_io_error: None,
             calibration: None,
+            calibration_seq: 0,
             calibration_status: None,
             pl1_edit: String::new(),
             pl2_edit: String::new(),
