@@ -58,6 +58,25 @@ pub fn params_for_profile(
     }
 }
 
+/// Captures the firmware's initial power wall from the read-only MMIO mirror.
+/// This is the value shown as the default profile for the current source
+/// (plugged-in AC or battery) before the user saves their own.
+pub fn initial_profile_from_mmio(info: &CpuPowerInfo) -> Option<crate::types::PowerProfile> {
+    if !info.mmio_available {
+        return None;
+    }
+    let profile = crate::types::PowerProfile {
+        pl1_watts: info.pl1_mmio,
+        pl1_enabled: info.pl1_mmio_enabled,
+        pl1_clamped: info.pl1_mmio_clamped,
+        pl1_time_s: info.pl1_mmio_time_s,
+        pl2_watts: info.pl2_mmio,
+        pl2_enabled: info.pl2_mmio_enabled,
+        pl2_clamped: info.pl2_mmio_clamped,
+    };
+    profile.is_valid().then_some(profile)
+}
+
 /// Shared CPU power state.
 #[derive(Clone)]
 pub struct CpuPowerState {
@@ -429,6 +448,32 @@ impl CpuPowerState {
 #[cfg(test)]
 mod tests {
     use crate::types::PowerProfile;
+
+    #[test]
+    fn initial_profile_uses_the_mmio_mirror() {
+        let info = CpuPowerInfo {
+            mmio_available: true,
+            pl1_msr: 99.0,
+            pl2_msr: 99.0,
+            pl1_mmio: 28.0,
+            pl1_mmio_enabled: true,
+            pl1_mmio_clamped: false,
+            pl1_mmio_time_s: 20.0,
+            pl2_mmio: 55.0,
+            pl2_mmio_enabled: false,
+            pl2_mmio_clamped: true,
+            ..CpuPowerInfo::default()
+        };
+        let profile = super::initial_profile_from_mmio(&info).expect("valid capture");
+        assert_eq!(profile.pl1_watts, 28.0);
+        assert_eq!(profile.pl1_time_s, 20.0);
+        assert_eq!(profile.pl2_watts, 55.0);
+        assert!(!profile.pl2_enabled);
+        assert!(profile.pl2_clamped);
+        // The MSR side must never leak into the captured default.
+        assert_ne!(profile.pl1_watts, info.pl1_msr);
+        assert!(super::initial_profile_from_mmio(&CpuPowerInfo::default()).is_none());
+    }
 
     #[test]
     fn profile_params_take_units_and_pl2_window_from_live_info() {

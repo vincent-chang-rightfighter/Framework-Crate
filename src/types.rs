@@ -188,20 +188,32 @@ impl Config {
         }
         // Drop unusable power profiles instead of letting a NaN/zero wattage
         // reach the MSR writer; cap persisted values to the hardware ceiling.
-        for is_ac in [true, false] {
-            let valid = self
-                .cpu_power
-                .profile(is_ac)
-                .is_none_or(PowerProfile::is_valid);
-            if !valid {
+        for (is_ac, initial) in [(true, false), (false, false), (true, true), (false, true)] {
+            let profile = if initial {
+                self.cpu_power.initial(is_ac)
+            } else {
+                self.cpu_power.profile(is_ac)
+            };
+            if profile.is_some_and(|p| !p.is_valid()) {
                 warn!(
-                    "Dropping invalid {} power profile from config",
-                    if is_ac { "AC" } else { "battery" }
+                    "Dropping invalid {} {} power profile from config",
+                    if is_ac { "AC" } else { "battery" },
+                    if initial { "initial" } else { "user" }
                 );
-                *self.cpu_power.profile_mut(is_ac) = None;
+                let slot = if initial {
+                    self.cpu_power.initial_mut(is_ac)
+                } else {
+                    self.cpu_power.profile_mut(is_ac)
+                };
+                *slot = None;
                 continue;
             }
-            if let Some(profile) = self.cpu_power.profile_mut(is_ac) {
+            let slot = if initial {
+                self.cpu_power.initial_mut(is_ac)
+            } else {
+                self.cpu_power.profile_mut(is_ac)
+            };
+            if let Some(profile) = slot {
                 profile.pl1_watts = profile.pl1_watts.min(crate::cpu_power::LIMIT_MAX_WATTS);
                 profile.pl2_watts = profile.pl2_watts.min(crate::cpu_power::LIMIT_MAX_WATTS);
                 profile.pl1_time_s = profile.pl1_time_s.min(crate::cpu_power::LIMIT_MAX_TIME_S);
@@ -575,6 +587,14 @@ pub struct CpuPowerConfig {
     pub ac: Option<PowerProfile>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub battery: Option<PowerProfile>,
+    /// MMIO mirror observed while on AC: the firmware's initial power wall
+    /// for that source. Updated only when the mirror value changes, and used
+    /// as the default when no user profile exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ac_initial: Option<PowerProfile>,
+    /// Same as `ac_initial`, captured while on battery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub battery_initial: Option<PowerProfile>,
 }
 
 impl CpuPowerConfig {
@@ -588,6 +608,22 @@ impl CpuPowerConfig {
 
     pub fn profile_mut(&mut self, ac: bool) -> &mut Option<PowerProfile> {
         if ac { &mut self.ac } else { &mut self.battery }
+    }
+
+    pub fn initial(&self, ac: bool) -> Option<&PowerProfile> {
+        if ac {
+            self.ac_initial.as_ref()
+        } else {
+            self.battery_initial.as_ref()
+        }
+    }
+
+    pub fn initial_mut(&mut self, ac: bool) -> &mut Option<PowerProfile> {
+        if ac {
+            &mut self.ac_initial
+        } else {
+            &mut self.battery_initial
+        }
     }
 }
 

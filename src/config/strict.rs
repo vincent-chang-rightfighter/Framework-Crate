@@ -68,6 +68,11 @@ pub fn import_strict(content: &str) -> Result<Config, String> {
     let mut config: Config =
         toml::from_str(content).map_err(|e| format!("invalid settings: {}", e))?;
     config.validate();
+    // Captured MMIO walls are machine-local; never apply them to another
+    // machine. The receiving install records its own on the next AC/battery
+    // observation.
+    config.cpu_power.ac_initial = None;
+    config.cpu_power.battery_initial = None;
     Ok(config)
 }
 
@@ -145,11 +150,17 @@ fn check_nested_unknown(table: &toml::Table) -> Result<(), String> {
     check(
         cpu_power,
         "cpu_power",
-        &["keep_limits", "ac", "battery"],
+        &[
+            "keep_limits",
+            "ac",
+            "battery",
+            "ac_initial",
+            "battery_initial",
+        ],
         &mut unknown,
     );
     let cpu_power_tbl = cpu_power.and_then(|v| v.as_table());
-    for source in ["ac", "battery"] {
+    for source in ["ac", "battery", "ac_initial", "battery_initial"] {
         check(
             cpu_power_tbl.and_then(|t| t.get(source)),
             &format!("cpu_power.{source}"),
@@ -311,7 +322,12 @@ fn toml_escape(raw: &str) -> String {
 /// internal save hardening (exclusive create plus symlink refusal); no ACL
 /// hardening here since the destination is the user's own file.
 pub fn export_to_path(config: &Config, dest: &std::path::Path) -> Result<(), String> {
-    let mut content = render_config_toml(config)?;
+    // Machine-local MMIO captures stay out of portable exports; import clears
+    // them defensively too, in case an older export still carries them.
+    let mut portable = config.clone();
+    portable.cpu_power.ac_initial = None;
+    portable.cpu_power.battery_initial = None;
+    let mut content = render_config_toml(&portable)?;
     if let Some(origin) = local_product_name() {
         // The stamp must stay top-level: anything after a [table] header
         // would belong to that table, so splice it before the first
@@ -425,13 +441,15 @@ mod tests {
     #[test]
     fn import_strict_accepts_cpu_power_profiles() {
         let cfg = crate::config::import_strict(
-            "version = 2\n[cpu_power]\nkeep_limits = true\n[cpu_power.ac]\npl1_watts = 30.0\npl1_enabled = true\npl1_clamped = false\npl1_time_s = 28.0\npl2_watts = 60.0\npl2_enabled = true\npl2_clamped = false\n",
+            "version = 2\n[cpu_power]\nkeep_limits = true\n[cpu_power.ac]\npl1_watts = 30.0\npl1_enabled = true\npl1_clamped = false\npl1_time_s = 28.0\npl2_watts = 60.0\npl2_enabled = true\npl2_clamped = false\n[cpu_power.ac_initial]\npl1_watts = 28.0\npl1_time_s = 20.0\npl2_watts = 55.0\n",
         )
         .unwrap();
         assert!(cfg.cpu_power.keep_limits);
         let ac = cfg.cpu_power.ac.unwrap();
         assert_eq!(ac.pl1_watts, 30.0);
         assert_eq!(ac.pl2_watts, 60.0);
+        // MMIO captures are machine-local and cleared on import.
+        assert!(cfg.cpu_power.ac_initial.is_none());
         assert!(cfg.cpu_power.battery.is_none());
     }
 
@@ -482,11 +500,26 @@ mod tests {
             pl2_watts: 35.0,
             ..Default::default()
         });
+        cfg.cpu_power.ac_initial = Some(crate::types::PowerProfile {
+            pl1_watts: 29.0,
+            ..Default::default()
+        });
+        cfg.cpu_power.battery_initial = Some(crate::types::PowerProfile {
+            pl1_watts: 19.0,
+            ..Default::default()
+        });
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("exported.toml");
         crate::config::export_to_path(&cfg, &path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("ac_initial"), "{raw}");
+        assert!(!raw.contains("battery_initial"), "{raw}");
         let imported = crate::config::import_file(&path).unwrap();
         let mut expected = cfg.clone();
+        // MMIO captures are local-only: exported files omit them and import
+        // clears any older ones defensively.
+        expected.cpu_power.ac_initial = None;
+        expected.cpu_power.battery_initial = None;
         expected.validate();
         assert_eq!(imported.config, expected);
         // Same-machine round trip matches, unless this host cannot read

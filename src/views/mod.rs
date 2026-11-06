@@ -72,6 +72,8 @@ pub(crate) struct ViewSnapshot {
     pub pl_profile_is_ac: bool,
     pub pl_profile_ac_saved: bool,
     pub pl_profile_battery_saved: bool,
+    pub pl_profile_ac_initial: bool,
+    pub pl_profile_battery_initial: bool,
     pub cpu_power_status: Option<Arc<String>>,
     pub cpu_power_error: Option<Arc<String>>,
     pub ec_op_error: Option<Arc<String>>,
@@ -113,6 +115,10 @@ impl ViewSnapshot {
         let (pl_profile_ac_saved, pl_profile_battery_saved) = (
             config.cpu_power.ac.is_some(),
             config.cpu_power.battery.is_some(),
+        );
+        let (pl_profile_ac_initial, pl_profile_battery_initial) = (
+            config.cpu_power.ac_initial.is_some(),
+            config.cpu_power.battery_initial.is_some(),
         );
         let per_fan_curve_points: Arc<Vec<Vec<[u32; 2]>>> = config
             .fan
@@ -212,6 +218,8 @@ impl ViewSnapshot {
             pl_profile_is_ac: app.pl_profile_is_ac,
             pl_profile_ac_saved,
             pl_profile_battery_saved,
+            pl_profile_ac_initial,
+            pl_profile_battery_initial,
             cpu_power_status: app.cpu_power_status.as_ref().map(|s| Arc::new(s.clone())),
             cpu_power_error: app.cpu_power_error.as_ref().map(|s| Arc::new(s.clone())),
             ec_op_error: app.ec_op_error.as_ref().map(|s| Arc::new(s.clone())),

@@ -292,6 +292,18 @@ pub struct App {
     pub pl_active_source: Option<bool>,
     pub pl_profile_busy: bool,
     pub pl_profile_retry_at_ms: u64,
+    /// Consecutive auto-apply failures; capped so a locked register cannot
+    /// retry forever.
+    pub pl_profile_retry_failures: u32,
+    /// Set only by the manual Reset button so its completion can disable the
+    /// persisted keep-alive intent without affecting automatic fallback resets.
+    pub pl_reset_disable_keep: bool,
+    /// Last source whose MMIO wall was observed; triggers one refresh when
+    /// the machine switches between AC and battery.
+    pub pl_capture_source: Option<bool>,
+    /// Guards against queueing the source-change refresh every tick while one
+    /// is already in flight; cleared by CpuPowerDataRefreshed.
+    pub pl_capture_in_flight: bool,
     /// Non-error status line for profile saves/applies.
     pub cpu_power_status: Option<String>,
     /// Latched once a refresh has populated the edit boxes from live
@@ -538,6 +550,10 @@ impl App {
             pl_active_source: None,
             pl_profile_busy: false,
             pl_profile_retry_at_ms: 0,
+            pl_profile_retry_failures: 0,
+            pl_reset_disable_keep: false,
+            pl_capture_source: None,
+            pl_capture_in_flight: false,
             cpu_power_status: None,
             pl_fields_primed: false,
             cpu_power_error: None,

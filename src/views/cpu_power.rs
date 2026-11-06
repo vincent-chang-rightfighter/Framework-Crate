@@ -219,7 +219,8 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
     if snap.show_cpu_power_settings {
         let mut settings_content = column![].spacing(4).padding(4);
 
-        settings_content = settings_content.push(text("MSR (Read-only)").size(FONT_BODY));
+        settings_content =
+            settings_content.push(text("MSR (writable via MSR 0x610)").size(FONT_BODY));
         settings_content = settings_content.push(
             row![
                 text(format!(
@@ -354,14 +355,18 @@ pub(crate) fn cpu_power_section(snap: &ViewSnapshot) -> Element<'_, Message> {
         // Source selector: Apply saves the edited values into the selected
         // AC/Battery profile. While the About keep-alive toggle is on, the
         // matching profile is auto-applied on every source change.
-        let saved_note = if snap.pl_profile_is_ac {
-            if snap.pl_profile_ac_saved {
-                "saved"
-            } else {
-                "not saved"
-            }
-        } else if snap.pl_profile_battery_saved {
+        let (saved, has_default) = if snap.pl_profile_is_ac {
+            (snap.pl_profile_ac_saved, snap.pl_profile_ac_initial)
+        } else {
+            (
+                snap.pl_profile_battery_saved,
+                snap.pl_profile_battery_initial,
+            )
+        };
+        let saved_note = if saved {
             "saved"
+        } else if has_default {
+            "MMIO default"
         } else {
             "not saved"
         };

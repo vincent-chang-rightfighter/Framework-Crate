@@ -255,6 +255,7 @@ impl App {
                 // Invalidate an older Start/Stop task: this explicit Apply is
                 // the newest sync-affecting intent.
                 self.sync_intent.fetch_add(1, Ordering::AcqRel);
+                self.pl_profile_retry_failures = 0;
                 self.pl_profile_retry_at_ms =
                     crate::util::monotonic_ms().saturating_add(PL_RESET_RETRY_MS);
                 Some(self.apply_profile_task(self.pl_profile_is_ac, params))
@@ -274,6 +275,7 @@ impl App {
                     Ok(()) => {
                         self.pl_active_source = Some(*ac);
                         self.pl_profile_retry_at_ms = 0;
+                        self.pl_profile_retry_failures = 0;
                         self.set_pl_custom_applied(true);
                         self.cpu_power_error = None;
                         self.cpu_power_status =
@@ -283,11 +285,31 @@ impl App {
                         }
                         return Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}));
                     }
+                    Err(e) if e == PROFILE_SKIPPED_SOURCE_CHANGED => {
+                        // Let the next tick pick up the profile for the new
+                        // source immediately instead of showing a red error.
+                        self.pl_active_source = None;
+                        self.pl_profile_retry_at_ms = 0;
+                        self.pl_profile_retry_failures = 0;
+                        self.cpu_power_status = Some(
+                            "Power source changed; applying the matching profile.".to_string(),
+                        );
+                        self.cpu_power_error = None;
+                    }
                     Err(e) => {
                         error!("Failed to apply {} power profile: {}", source_label(*ac), e);
                         self.cpu_power_error = Some(e.to_string());
-                        self.pl_profile_retry_at_ms =
-                            crate::util::monotonic_ms().saturating_add(PL_RESET_RETRY_MS);
+                        self.pl_profile_retry_failures =
+                            self.pl_profile_retry_failures.saturating_add(1);
+                        if self.pl_profile_retry_failures >= MAX_PROFILE_AUTO_RETRIES {
+                            self.pl_profile_retry_at_ms = 0;
+                            self.cpu_power_status = Some(
+                                "Profile apply failed 3 times; press Apply to retry.".to_string(),
+                            );
+                        } else {
+                            self.pl_profile_retry_at_ms =
+                                crate::util::monotonic_ms().saturating_add(PL_RESET_RETRY_MS);
+                        }
                     }
                 }
                 self.mark_dirty();
@@ -353,6 +375,7 @@ impl App {
                 self.cpu_power_error = None;
                 self.cpu_power_status = Some("Keep-alive on.".to_string());
                 self.pl_profile_busy = true;
+                self.pl_profile_retry_failures = 0;
                 self.pl_profile_retry_at_ms =
                     crate::util::monotonic_ms().saturating_add(PL_RESET_RETRY_MS);
                 // Invalidate an older Stop queued before this start.
@@ -387,6 +410,7 @@ impl App {
                 self.save_config();
                 self.pl_active_source = None;
                 self.pl_profile_busy = false;
+                self.pl_profile_retry_failures = 0;
                 self.cpu_power_status = Some("Keep-alive off.".to_string());
                 self.mark_dirty();
                 let intent = self.sync_intent.fetch_add(1, Ordering::AcqRel) + 1;
@@ -399,6 +423,10 @@ impl App {
             Message::CpuPowerSyncReset => {
                 // A queued Start/Stop from before this Reset must not run after it.
                 self.sync_intent.fetch_add(1, Ordering::AcqRel);
+                // A successful manual Reset also turns the persisted
+                // keep-alive policy off, so the app does not immediately
+                // re-apply the profile behind the user's back.
+                self.pl_reset_disable_keep = true;
                 Some(self.handle_cpu_power_sync_reset())
             }
             Message::CpuPowerResetDone(result) => {
@@ -414,8 +442,19 @@ impl App {
                             .lifecycle
                             .pl_reset_retry_at_ms
                             .store(0, Ordering::Release);
+                        if self.pl_reset_disable_keep {
+                            self.pl_reset_disable_keep = false;
+                            self.mutate_config(|cfg| cfg.cpu_power.keep_limits = false);
+                            self.save_config();
+                            self.pl_active_source = None;
+                            self.cpu_power_status =
+                                Some("Reset complete; keep-alive off.".to_string());
+                        } else {
+                            self.cpu_power_status = Some("Reset to BIOS defaults.".to_string());
+                        }
                     }
                     Err(e) => {
+                        self.pl_reset_disable_keep = false;
                         warn!("CPU power reset failed: {}", e);
                         self.cpu_power_error = Some(format!("Reset failed: {}", e));
                         self.state.lifecycle.pl_reset_retry_at_ms.store(
@@ -429,10 +468,19 @@ impl App {
             }
             Message::CpuPowerDataRefreshed => {
                 let info = self.state.cpu_power.snapshot();
-                if info.available && !self.pl_profile_user_selected {
-                    // Follow the live source until the user picks a profile.
-                    self.pl_profile_is_ac =
-                        self.current_power_source().unwrap_or(self.pl_profile_is_ac);
+                self.pl_capture_in_flight = false;
+                if info.available {
+                    if !self.pl_profile_user_selected {
+                        // Follow the live source until the user picks a profile.
+                        self.pl_profile_is_ac =
+                            self.current_power_source().unwrap_or(self.pl_profile_is_ac);
+                    }
+                    if let Some(ac) = self.current_power_source() {
+                        self.pl_capture_source = Some(ac);
+                        // Record the firmware wall for this source, updating
+                        // only when the MMIO mirror actually changed.
+                        self.capture_initial_profile(ac, &info);
+                    }
                 }
                 self.load_pl_fields_for_source();
                 if info.available {
@@ -468,6 +516,13 @@ fn source_label(ac: bool) -> &'static str {
     if ac { "AC" } else { "Battery" }
 }
 
+/// Sentinel returned when the power source changes while a profile write is
+/// waiting on the hardware mutex; the write must not land on the new source.
+const PROFILE_SKIPPED_SOURCE_CHANGED: &str = "power source changed before the profile write";
+
+/// Automatic profile retries before waiting for a manual Apply.
+const MAX_PROFILE_AUTO_RETRIES: u32 = 3;
+
 impl App {
     pub(crate) fn cpu_power_supported(&self) -> bool {
         self.state.system.intel_cpu.load(Ordering::Acquire)
@@ -487,8 +542,84 @@ impl App {
             .cloned()
     }
 
+    fn saved_initial(&self, ac: bool) -> Option<PowerProfile> {
+        crate::util::read_lock(&self.state.lifecycle.config)
+            .cpu_power
+            .initial(ac)
+            .cloned()
+    }
+
     fn store_profile(&mut self, ac: bool, profile: PowerProfile) {
         self.mutate_config(|cfg| *cfg.cpu_power.profile_mut(ac) = Some(profile));
+    }
+
+    /// Records the MMIO wall seen for a source, updating the stored default
+    /// only when the mirror actually changes (e.g. after a BIOS update).
+    fn capture_initial_profile(&mut self, ac: bool, info: &crate::cpu_power::CpuPowerInfo) {
+        let Some(profile) = crate::cpu_power::initial_profile_from_mmio(info) else {
+            return;
+        };
+        // Do not record a wall the writer would reject (e.g. a zero time
+        // window); it would only make the automatic apply retry forever.
+        if crate::cpu_power::validate_limit_params(&crate::cpu_power::params_for_profile(
+            &profile, info,
+        ))
+        .is_err()
+        {
+            return;
+        }
+        // If a custom MSR write is active and the mirror tracks it exactly,
+        // treat the value as the user's own limit, not a firmware baseline.
+        let mirror_matches_msr = (info.pl1_mmio - info.pl1_msr).abs() <= 0.05
+            && (info.pl2_mmio - info.pl2_msr).abs() <= 0.05;
+        if self.pl_custom_applied.load(Ordering::Acquire) && mirror_matches_msr {
+            tracing::debug!(
+                "Skipping {} MMIO wall capture while custom limits mirror the MSR",
+                source_label(ac)
+            );
+            return;
+        }
+        let previous = self.saved_initial(ac);
+        if previous.as_ref() == Some(&profile) {
+            return;
+        }
+        match previous {
+            Some(old) => tracing::info!(
+                "Updated {} MMIO power wall: PL1 {:.1}W ({:.1}s) -> {:.1}W ({:.1}s), \
+                 PL2 {:.1}W -> {:.1}W",
+                source_label(ac),
+                old.pl1_watts,
+                old.pl1_time_s,
+                profile.pl1_watts,
+                profile.pl1_time_s,
+                old.pl2_watts,
+                profile.pl2_watts
+            ),
+            None => tracing::info!(
+                "Recorded {} MMIO power wall: PL1={:.1}W ({:.1}s, en={}, clamped={}) \
+                 PL2={:.1}W (en={}, clamped={})",
+                source_label(ac),
+                profile.pl1_watts,
+                profile.pl1_time_s,
+                profile.pl1_enabled,
+                profile.pl1_clamped,
+                profile.pl2_watts,
+                profile.pl2_enabled,
+                profile.pl2_clamped
+            ),
+        }
+        self.mutate_config(|cfg| *cfg.cpu_power.initial_mut(ac) = Some(profile));
+        self.save_config();
+        self.mark_dirty();
+        // A freshly captured wall is the default profile for this source:
+        // let the next tick apply it when keep-alive is on and the user has
+        // not saved a profile yet.
+        if self.keep_limits_enabled()
+            && self.current_power_source() == Some(ac)
+            && self.saved_profile(ac).is_none()
+        {
+            self.pl_active_source = None;
+        }
     }
 
     fn profile_from_inputs(&self) -> Result<PowerProfile, String> {
@@ -523,15 +654,17 @@ impl App {
         self.pl2_clamped = profile.pl2_clamped;
     }
 
-    /// Loads the selected profile into the edit boxes: the saved values when
-    /// one exists, otherwise the live registers for the active source.
+    /// Loads the selected profile into the edit boxes: the user's saved
+    /// profile first, then the source's one-time MMIO capture, then the live
+    /// registers. This keeps the default wall aligned with what the firmware
+    /// enforces when plugged in or on battery.
     fn load_pl_fields_for_source(&mut self) {
-        if let Some(profile) = self.saved_profile(self.pl_profile_is_ac) {
-            self.show_profile_fields(&profile);
-        } else if self
-            .current_power_source()
-            .is_none_or(|ac| ac == self.pl_profile_is_ac)
+        if let Some(profile) = self
+            .saved_profile(self.pl_profile_is_ac)
+            .or_else(|| self.saved_initial(self.pl_profile_is_ac))
         {
+            self.show_profile_fields(&profile);
+        } else {
             let info = self.state.cpu_power.snapshot();
             self.apply_edit_fields_from_snapshot(&info);
         }
@@ -554,6 +687,13 @@ impl App {
                 let result = crate::util::spawn_blocking_with_timeout(
                     crate::util::PAWNIO_SYNC_TIMEOUT,
                     move || {
+                        // The source can change while this task waits for the
+                        // mutex; never write the old source's profile onto the
+                        // new state. Leave sync untouched in that case.
+                        if crate::cpu_power::read_ac_present().is_some_and(|current| current != ac)
+                        {
+                            return Err(PROFILE_SKIPPED_SOURCE_CHANGED.to_string());
+                        }
                         let was_sync = cpu_power.sync_enabled.load(Ordering::Acquire);
                         let previous_sync = cpu_power.desired_sync_params();
                         cpu_power.stop_sync();
@@ -600,10 +740,14 @@ impl App {
         if self.pl_active_source == Some(ac) {
             return None;
         }
-        if now_ms < self.pl_profile_retry_at_ms {
+        if self.pl_profile_retry_failures >= MAX_PROFILE_AUTO_RETRIES
+            || now_ms < self.pl_profile_retry_at_ms
+        {
             return None;
         }
-        let Some(profile) = self.saved_profile(ac) else {
+        // Use the user profile when present, otherwise the one-time MMIO wall
+        // recorded for this source.
+        let Some(profile) = self.saved_profile(ac).or_else(|| self.saved_initial(ac)) else {
             self.pl_active_source = Some(ac);
             if self.pl_custom_applied.load(Ordering::Acquire) {
                 // Never leave the previous source's limits enforced after a
@@ -856,6 +1000,29 @@ mod tests {
         app.pl_fields_primed = true;
         let _ = app.handle_cpu_power_message(&Message::CpuPowerDataRefreshed);
         assert!(!app.pl_fields_primed);
+    }
+
+    #[test]
+    fn data_refresh_prefers_saved_profile_then_the_mmio_capture() {
+        use crate::app::Message;
+        use crate::types::PowerProfile;
+        let (mut app, _) = crate::App::new(false);
+        app.mutate_config(|cfg| {
+            cfg.cpu_power.ac = None;
+            cfg.cpu_power.ac_initial = Some(PowerProfile {
+                pl1_watts: 28.0,
+                pl2_watts: 55.0,
+                ..Default::default()
+            });
+        });
+        app.pl_profile_is_ac = true;
+        app.pl_profile_user_selected = true;
+        app.pl1_edit = "stale".into();
+        let _ = app.handle_cpu_power_message(&Message::CpuPowerDataRefreshed);
+        // No PawnIO in the test harness: the saved/captured default is the
+        // only source for the boxes, and it must win over stale fields.
+        assert_eq!(app.pl1_edit, "28.0");
+        assert_eq!(app.pl2_edit, "55.0");
     }
 
     #[test]

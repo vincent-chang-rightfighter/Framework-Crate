@@ -73,6 +73,25 @@ impl App {
         // and sync-death checks below must run even while CPU power is
         // unavailable; otherwise a machine without PawnIO starves them every
         // tick. Queue at most one catch-up refresh and continue.
+        let source_changed = if self.cpu_power_supported()
+            && self.state.cpu_power.snapshot().available
+            && !self.pl_capture_in_flight
+        {
+            match crate::cpu_power::read_ac_present() {
+                Some(source) if self.pl_capture_source != Some(source) => {
+                    // One refresh per observed source so the MMIO wall can be
+                    // recorded for both plugged-in and battery states. The
+                    // in-flight flag retries if the refresh cannot complete.
+                    self.pl_capture_in_flight = true;
+                    // A source change is a fresh start for auto-profile retries.
+                    self.pl_profile_retry_failures = 0;
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
         let mut cpu_power_refresh: Option<Task<Message>> = if self.cpu_power_supported() {
             let info = self.state.cpu_power.snapshot();
             if !info.available {
@@ -81,14 +100,12 @@ impl App {
                 self.pl_fields_primed = false;
                 let cpu_power = self.state.cpu_power.clone();
                 Some(refresh_cpu_power_task(cpu_power, || {}))
-            } else if !self.pl_fields_primed {
+            } else if !self.pl_fields_primed || source_changed {
                 // Hardware just appeared (the background poll brought it
-                // up without a refresh message): populate the edit boxes
-                // once so they never sit empty on a working machine.
-                // The flag latches in the completion handler, so a failed
-                // refresh retries on the next tick. Later refreshes stay
-                // explicit-only, so in-progress typing is never clobbered
-                // by the poll loop.
+                // up without a refresh message), or the AC/battery source
+                // changed: refresh once so the boxes and the MMIO capture
+                // match the new state. Later refreshes stay explicit-only,
+                // so in-progress typing is never clobbered by the poll loop.
                 let cpu_power = self.state.cpu_power.clone();
                 Some(refresh_cpu_power_task(cpu_power, || {}))
             } else {

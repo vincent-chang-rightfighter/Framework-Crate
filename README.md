@@ -250,6 +250,20 @@ pl2_watts = 45.0
 pl2_enabled = true
 pl2_clamped = false
 
+# MMIO mirror seen for each source, updated only when the value changes and
+# used as the default when the matching user profile is absent. Machine-local:
+# excluded from settings export and cleared on import. Leave these alone
+# unless you deliberately want to change the baseline.
+[cpu_power.ac_initial]
+pl1_watts = 30.0
+pl1_time_s = 28.0
+pl2_watts = 60.0
+
+[cpu_power.battery_initial]
+pl1_watts = 20.0
+pl1_time_s = 20.0
+pl2_watts = 45.0
+
 [telemetry]
 poll_ms = 500
 ui_refresh_ms = 100
@@ -327,7 +341,7 @@ The section reads and optionally writes PL1/PL2 via official PawnIO Modules. Tho
 
 A missing file blocks CPU Power; a hash mismatch also blocks use — update the app for the new release, or set `FRAMEWORK_ALLOW_UNKNOWN_MODULE_HASH=1` only after manual verification. Failed download shows manual instructions: download latest `release_*.zip` from the releases page and place `IntelMSR.bin` + `IntelMCHBAR.bin` into `%APPDATA%/framework-crate/modules/`. Use **Open Modules Folder** and **Redetect** in the UI to verify — no restart needed.
 
-The first successful RAPL read while on AC also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` restores the MSR values from that snapshot; the MMIO mirror is read-only and is left untouched. `Apply` stores the edited values in the currently selected AC or Battery profile. With "Keep power limits applied" enabled on the About page, the matching profile is applied once at startup, immediately after resume, on every AC↔battery change, and re-asserted every 5 minutes; the toggle is persisted in the config. When the toggle is off, AC→battery keeps the old behavior of resetting to BIOS defaults. A source with no saved profile falls back to that reset instead of guessing values.
+The first successful RAPL read while on AC also persists the original factory limits to `bios_defaults.toml` (see Configuration). `Reset` restores the MSR values from that snapshot; the MMIO mirror is read-only and is left untouched. `Apply` stores the edited values in the currently selected AC or Battery profile. The app records each state's firmware power wall from the **MMIO mirror** (`ac_initial` / `battery_initial` in the config), updating it only when the mirror value changes (e.g. after a BIOS update), and uses it as the default when no user profile exists. Those captures are machine-local: settings export omits them and import clears them so the receiving machine records its own. With "Keep power limits applied" enabled on the About page, the matching profile (or the recorded wall) is applied once at startup, immediately after resume, on every AC↔battery change, and re-asserted every 5 minutes; the toggle is persisted in the config. When the toggle is off, AC→battery keeps the old behavior of resetting to BIOS defaults. A source with neither a profile nor a recorded wall falls back to that reset instead of guessing values.
 
 The official `IntelMCHBAR.bin` exports only read ioctls (`ioctl_read_qword`). `Apply` therefore writes MSR 0x610 only; the MMIO mirror is read for display and for the effective `min(MSR, MMIO)` estimate. There is no MMIO write attempt (and no repeated `ioctl_write_qword` failure). If the MMIO mirror holds a lower limit than MSR, an MSR-only write may not change the effective limit; a custom MCHBAR write module would be required for that, which this project intentionally does not ship.
 
