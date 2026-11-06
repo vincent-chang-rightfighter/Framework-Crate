@@ -189,9 +189,9 @@ fn effective_limit(msr: f64, msr_en: bool, mmio: f64, mmio_en: bool) -> f64 {
 
 /// The PL1/PL2 limits and the RAPL units they are expressed in.
 ///
-/// Passed as one value rather than ten positional arguments: the write path
-/// and the sync thread both need all ten, and a caller that has them as a
-/// `CpuPowerInfo` should not have to unpack and repack them.
+/// Passed as one value rather than eleven positional arguments: the write
+/// path and the sync thread both need all eleven, and a caller that has them
+/// as a `CpuPowerInfo` should not have to unpack and repack them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PowerLimitParams {
     pub pl1_watts: f64,
@@ -210,7 +210,9 @@ pub struct PowerLimitParams {
     pub time_unit: f64,
 }
 
+/// Absolute ceiling for any model (Desktop); per-model caps are lower.
 pub const LIMIT_MAX_WATTS: f64 = 120.0;
+/// Upper bound for a PL time window.
 pub const LIMIT_MAX_TIME_S: f64 = 120.0;
 /// Minimum meaningful enabled limit: below this the CPU cannot make
 /// progress and the machine appears hung.

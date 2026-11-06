@@ -73,7 +73,7 @@ impl App {
         // and sync-death checks below must run even while CPU power is
         // unavailable; otherwise a machine without PawnIO starves them every
         // tick. Queue at most one catch-up refresh and continue.
-        let cpu_power_refresh: Option<Task<Message>> = if self.cpu_power_supported() {
+        let mut cpu_power_refresh: Option<Task<Message>> = if self.cpu_power_supported() {
             let info = self.state.cpu_power.snapshot();
             if !info.available {
                 // Keep the latch open while hardware is missing so the
@@ -104,39 +104,6 @@ impl App {
             .lifecycle
             .pl_reset_retry_at_ms
             .load(Ordering::Acquire);
-        // AC→battery: reset PL1/PL2 to BIOS defaults. The pending flag is
-        // cleared by CpuPowerResetDone on success; failures schedule a retry
-        // instead of hammering the hardware every tick.
-        if self.cpu_power_supported()
-            && self
-                .state
-                .lifecycle
-                .pl_reset_pending
-                .load(Ordering::Acquire)
-            && self.pl_custom_applied.load(Ordering::Acquire)
-            && reset_retry_allowed(now_ms, reset_retry_at)
-        {
-            if self.state.cpu_power.bios_defaults().is_none() {
-                self.state
-                    .lifecycle
-                    .pl_reset_retry_at_ms
-                    .store(now_ms.saturating_add(PL_RESET_RETRY_MS), Ordering::Release);
-                tracing::warn!(
-                    "AC→battery reset pending but BIOS defaults unavailable; retrying in {}s",
-                    PL_RESET_RETRY_MS / 1000
-                );
-            } else {
-                tracing::info!("AC→battery: resetting PL1/PL2 to BIOS defaults");
-                self.state
-                    .lifecycle
-                    .pl_reset_retry_at_ms
-                    .store(now_ms.saturating_add(PL_RESET_RETRY_MS), Ordering::Release);
-                return Task::batch([
-                    self.handle_cpu_power_sync_reset(),
-                    tick_task(self.tick_interval_ms),
-                ]);
-            }
-        }
         let idle = now_ms.saturating_sub(
             self.state
                 .lifecycle
@@ -210,10 +177,12 @@ impl App {
                                     self.iconic_check_count
                                 );
                                 self.iconic_check_count = 0;
-                                return Task::batch([
-                                    Task::perform(async {}, |_| Message::MinimizeToTray),
-                                    tick_task(next_ms),
-                                ]);
+                                let task = Task::perform(async {}, |_| Message::MinimizeToTray);
+                                let tick = tick_task(next_ms);
+                                return match cpu_power_refresh.take() {
+                                    Some(refresh) => Task::batch([task, tick, refresh]),
+                                    None => Task::batch([task, tick]),
+                                };
                             }
                         } else {
                             self.iconic_check_count = 0;
@@ -230,7 +199,10 @@ impl App {
                     }
                     let task = Task::perform(async move { event }, Message::TrayEventReceived);
                     let tick = tick_task(next_ms);
-                    return Task::batch([task, tick]);
+                    return match cpu_power_refresh.take() {
+                        Some(refresh) => Task::batch([task, tick, refresh]),
+                        None => Task::batch([task, tick]),
+                    };
                 }
                 if self.pending_minimize_to_tray
                     && self.tray.check_icon_ready()
@@ -245,10 +217,51 @@ impl App {
             }
         }
 
+        // AC→battery: reset PL1/PL2 to BIOS defaults. Runs after the tray
+        // upkeep so a reset tick never skips tray initialization. The pending
+        // flag is cleared by CpuPowerResetDone on success; failures schedule
+        // a retry instead of hammering the hardware every tick.
+        if self.cpu_power_supported()
+            && self
+                .state
+                .lifecycle
+                .pl_reset_pending
+                .load(Ordering::Acquire)
+            && self.pl_custom_applied.load(Ordering::Acquire)
+            && reset_retry_allowed(now_ms, reset_retry_at)
+        {
+            if self.state.cpu_power.bios_defaults().is_none() {
+                self.state
+                    .lifecycle
+                    .pl_reset_retry_at_ms
+                    .store(now_ms.saturating_add(PL_RESET_RETRY_MS), Ordering::Release);
+                tracing::warn!(
+                    "AC→battery reset pending but BIOS defaults unavailable; retrying in {}s",
+                    PL_RESET_RETRY_MS / 1000
+                );
+            } else {
+                tracing::info!("AC→battery: resetting PL1/PL2 to BIOS defaults");
+                self.state
+                    .lifecycle
+                    .pl_reset_retry_at_ms
+                    .store(now_ms.saturating_add(PL_RESET_RETRY_MS), Ordering::Release);
+                let reset = self.handle_cpu_power_sync_reset();
+                let tick = tick_task(self.tick_interval_ms);
+                return match cpu_power_refresh.take() {
+                    Some(refresh) => Task::batch([reset, tick, refresh]),
+                    None => Task::batch([reset, tick]),
+                };
+            }
+        }
+
         // Detect sync thread death (MSR write failure) with grace period.
         // Restart it from the last desired params; if none are available the
         // death is permanent and we stop reporting it as syncing.
-        if self.state.cpu_power.is_sync_dead() {
+        //
+        // While PawnIO/modules are unreadable a restart would fail identically
+        // and latch auto-restart off for good, so leave the dead state alone
+        // and retry once the hardware becomes readable again.
+        if self.state.cpu_power.is_sync_dead() && self.state.cpu_power.snapshot().available {
             let restarted = self.state.cpu_power.try_restart_if_dead();
             if !restarted && self.state.cpu_power.desired_sync_params().is_none() {
                 self.state

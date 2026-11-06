@@ -234,18 +234,6 @@ struct LimitTarget<'a> {
     write_failed: &'static str,
 }
 
-/// Rejects non-finite, negative, or out-of-range limit values before encoding.
-///
-/// `NaN as u32` is 0, so without this gate a NaN would encode as a 0W
-/// enabled limit and hard-throttle the CPU. Upper bound is a Framework-safe
-/// cap (120W covers all current boards with headroom; 1024W would let a
-/// typo cook the VRM): beyond the 15-bit RAPL field the encoder silently
-/// clamps, which then surfaces as a confusing read-back mismatch. Zero
-/// stays allowed for a disabled limit, but an enabled 0W limit is rejected
-/// (it would hard-throttle to a hang). PL1 must not exceed PL2 (RAPL
-/// behavior is undefined otherwise). Kept pure and unit-tested; this is
-/// the last line of defense at the write boundary for UI, BIOS-restore,
-/// and sync paths.
 /// RAPL units are 1/2^n with n in 0..=15, so the plausible range is narrow.
 pub(super) fn plausible_rapl_unit(unit: f64) -> bool {
     unit.is_finite() && (1.0 / 32768.0..=1.0).contains(&unit)
@@ -270,6 +258,18 @@ pub fn platform_max_watts() -> f64 {
     max_watts_for_family(crate::cli::ec_wrapper::detect_platform())
 }
 
+/// Rejects non-finite, negative, or out-of-range limit values before encoding.
+///
+/// `NaN as u32` is 0, so without this gate a NaN would encode as a 0W
+/// enabled limit and hard-throttle the CPU. Upper bound is a Framework-safe
+/// cap (120W covers all current boards with headroom; 1024W would let a
+/// typo cook the VRM): beyond the 15-bit RAPL field the encoder silently
+/// clamps, which then surfaces as a confusing read-back mismatch. Zero
+/// stays allowed for a disabled limit, but an enabled 0W limit is rejected
+/// (it would hard-throttle to a hang). PL1 must not exceed PL2 (RAPL
+/// behavior is undefined otherwise). Kept pure and unit-tested; this is
+/// the last line of defense at the write boundary for UI, BIOS-restore,
+/// and sync paths.
 pub fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
     for (name, v) in [
         ("power_unit", params.power_unit),
