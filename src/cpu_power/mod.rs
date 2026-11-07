@@ -290,8 +290,8 @@ impl CpuPowerState {
     /// Starts the sync thread that continuously re-asserts PL1/PL2.
     ///
     /// Holds the `sync_thread` lock across the entire stop-old + join + start
-    /// sequence so a concurrent start (e.g. `CpuPowerSyncStart` racing
-    /// `CpuPowerApplied`, or a resume handler) cannot slip into the gap between
+    /// sequence so a concurrent start (e.g. `CpuPowerSyncStart` racing an
+    /// apply task, or a resume handler) cannot slip into the gap between
     /// taking the old handle and starting a new one and spawn two sync threads
     /// writing MSR/MMIO at once. The sync loop never takes this lock, so
     /// joining under it cannot deadlock.

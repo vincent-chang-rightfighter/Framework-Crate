@@ -254,11 +254,12 @@ impl App {
                 };
                 // Invalidate an older Start/Stop task: this explicit Apply is
                 // the newest sync-affecting intent.
-                self.sync_intent.fetch_add(1, Ordering::AcqRel);
+                let intent = self.sync_intent.fetch_add(1, Ordering::AcqRel) + 1;
+                self.pl_profile_busy = true;
                 self.pl_profile_retry_failures = 0;
                 self.pl_profile_retry_at_ms =
                     crate::util::monotonic_ms().saturating_add(PL_RESET_RETRY_MS);
-                Some(self.apply_profile_task(self.pl_profile_is_ac, params))
+                Some(self.apply_profile_task(self.pl_profile_is_ac, params, intent))
             }
             Message::CpuPowerProfileSourceChanged(ac) => {
                 self.pl_profile_is_ac = *ac;
@@ -269,7 +270,11 @@ impl App {
                 self.mark_dirty();
                 Some(Task::none())
             }
-            Message::CpuPowerProfileApplied(ac, result) => {
+            Message::CpuPowerProfileApplied(ac, intent, result) => {
+                if *intent != self.sync_intent.load(Ordering::Acquire) {
+                    // A newer Apply/Start/Stop/Reset already owns the state.
+                    return Some(Task::none());
+                }
                 self.pl_profile_busy = false;
                 match result {
                     Ok(()) => {
@@ -296,6 +301,9 @@ impl App {
                         );
                         self.cpu_power_error = None;
                     }
+                    Err(e) if e == PROFILE_SKIPPED_STALE_INTENT => {
+                        // Superseded by a newer action; leave its state alone.
+                    }
                     Err(e) => {
                         error!("Failed to apply {} power profile: {}", source_label(*ac), e);
                         self.cpu_power_error = Some(e.to_string());
@@ -310,22 +318,6 @@ impl App {
                             self.pl_profile_retry_at_ms =
                                 crate::util::monotonic_ms().saturating_add(PL_RESET_RETRY_MS);
                         }
-                    }
-                }
-                self.mark_dirty();
-                Some(Task::none())
-            }
-            Message::CpuPowerApplied(result) => {
-                match result {
-                    Ok(()) => {
-                        self.set_pl_custom_applied(true);
-
-                        self.cpu_power_error = None;
-                        return Some(refresh_cpu_power_task(self.state.cpu_power.clone(), || {}));
-                    }
-                    Err(e) => {
-                        error!("Failed to write PL1/PL2: {}", e);
-                        self.cpu_power_error = Some(e.to_string());
                     }
                 }
                 self.mark_dirty();
@@ -379,28 +371,8 @@ impl App {
                 self.pl_profile_retry_at_ms =
                     crate::util::monotonic_ms().saturating_add(PL_RESET_RETRY_MS);
                 // Invalidate an older Stop queued before this start.
-                self.sync_intent.fetch_add(1, Ordering::AcqRel);
-                Some(self.apply_profile_task(ac, params))
-            }
-            Message::CpuPowerSyncStarted(result) => {
-                match result {
-                    Ok(()) => {
-                        self.state
-                            .cpu_power
-                            .sync_enabled
-                            .store(true, Ordering::Release);
-                        // Ensure AC->battery reset triggers for sync users.
-                        self.set_pl_custom_applied(true);
-                        self.cpu_power_error = None;
-                        tracing::info!("CPU power sync started");
-                    }
-                    Err(e) => {
-                        error!("Failed to start CPU power sync: {}", e);
-                        self.cpu_power_error = Some(format!("Sync start failed: {}", e));
-                    }
-                }
-                self.mark_dirty();
-                Some(Task::none())
+                let intent = self.sync_intent.fetch_add(1, Ordering::AcqRel) + 1;
+                Some(self.apply_profile_task(ac, params, intent))
             }
             Message::CpuPowerSyncStop => {
                 if !self.cpu_power_supported() {
@@ -423,6 +395,7 @@ impl App {
             Message::CpuPowerSyncReset => {
                 // A queued Start/Stop from before this Reset must not run after it.
                 self.sync_intent.fetch_add(1, Ordering::AcqRel);
+                self.pl_profile_busy = false;
                 // A successful manual Reset also turns the persisted
                 // keep-alive policy off, so the app does not immediately
                 // re-apply the profile behind the user's back.
@@ -519,9 +492,26 @@ fn source_label(ac: bool) -> &'static str {
 /// Sentinel returned when the power source changes while a profile write is
 /// waiting on the hardware mutex; the write must not land on the new source.
 const PROFILE_SKIPPED_SOURCE_CHANGED: &str = "power source changed before the profile write";
+/// Sentinel for an apply superseded by a newer start/stop/reset.
+const PROFILE_SKIPPED_STALE_INTENT: &str = "profile apply superseded by a newer action";
 
 /// Automatic profile retries before waiting for a manual Apply.
 const MAX_PROFILE_AUTO_RETRIES: u32 = 3;
+
+/// True when the live source differs from the one whose profile is active.
+fn profile_switch_due(active: Option<bool>, current: Option<bool>, busy: bool) -> bool {
+    current.is_some() && active != current && !busy
+}
+
+fn auto_retry_allowed(failures: u32, now_ms: u64, retry_at_ms: u64) -> bool {
+    failures < MAX_PROFILE_AUTO_RETRIES && now_ms >= retry_at_ms
+}
+
+/// The MMIO mirror tracking the MSR value suggests it is reflecting a custom
+/// write rather than the firmware's own wall.
+fn mmio_matches_msr(info: &crate::cpu_power::CpuPowerInfo) -> bool {
+    (info.pl1_mmio - info.pl1_msr).abs() <= 0.05 && (info.pl2_mmio - info.pl2_msr).abs() <= 0.05
+}
 
 impl App {
     pub(crate) fn cpu_power_supported(&self) -> bool {
@@ -570,9 +560,7 @@ impl App {
         }
         // If a custom MSR write is active and the mirror tracks it exactly,
         // treat the value as the user's own limit, not a firmware baseline.
-        let mirror_matches_msr = (info.pl1_mmio - info.pl1_msr).abs() <= 0.05
-            && (info.pl2_mmio - info.pl2_msr).abs() <= 0.05;
-        if self.pl_custom_applied.load(Ordering::Acquire) && mirror_matches_msr {
+        if self.pl_custom_applied.load(Ordering::Acquire) && mmio_matches_msr(info) {
             tracing::debug!(
                 "Skipping {} MMIO wall capture while custom limits mirror the MSR",
                 source_label(ac)
@@ -678,15 +666,20 @@ impl App {
         &self,
         ac: bool,
         params: crate::cpu_power::PowerLimitParams,
+        intent: u64,
     ) -> Task<Message> {
         let cpu_power = self.state.cpu_power.clone();
         let config = Arc::clone(&self.state.lifecycle.config);
+        let sync_intent = Arc::clone(&self.sync_intent);
         Task::perform(
             async move {
                 let _guard = crate::util::cpu_power_mutex().lock().await;
                 let result = crate::util::spawn_blocking_with_timeout(
                     crate::util::PAWNIO_SYNC_TIMEOUT,
                     move || {
+                        if sync_intent.load(Ordering::Acquire) != intent {
+                            return Err(PROFILE_SKIPPED_STALE_INTENT.to_string());
+                        }
                         // The source can change while this task waits for the
                         // mutex; never write the old source's profile onto the
                         // new state. Leave sync untouched in that case.
@@ -719,7 +712,7 @@ impl App {
                 )
                 .await
                 .unwrap_or_else(Err);
-                Message::CpuPowerProfileApplied(ac, result)
+                Message::CpuPowerProfileApplied(ac, intent, result)
             },
             |msg| msg,
         )
@@ -732,17 +725,19 @@ impl App {
         if !self.cpu_power_supported()
             || !self.state.cpu_power.snapshot().available
             || !self.keep_limits_enabled()
-            || self.pl_profile_busy
         {
             return None;
         }
-        let ac = self.current_power_source()?;
-        if self.pl_active_source == Some(ac) {
+        let current = self.current_power_source();
+        if !profile_switch_due(self.pl_active_source, current, self.pl_profile_busy) {
             return None;
         }
-        if self.pl_profile_retry_failures >= MAX_PROFILE_AUTO_RETRIES
-            || now_ms < self.pl_profile_retry_at_ms
-        {
+        let ac = current?;
+        if !auto_retry_allowed(
+            self.pl_profile_retry_failures,
+            now_ms,
+            self.pl_profile_retry_at_ms,
+        ) {
             return None;
         }
         // Use the user profile when present, otherwise the one-time MMIO wall
@@ -779,7 +774,8 @@ impl App {
         self.cpu_power_error = None;
         self.pl_profile_busy = true;
         self.pl_profile_retry_at_ms = now_ms.saturating_add(PL_RESET_RETRY_MS);
-        Some(self.apply_profile_task(ac, params))
+        let intent = self.sync_intent.fetch_add(1, Ordering::AcqRel) + 1;
+        Some(self.apply_profile_task(ac, params, intent))
     }
 
     /// Updates the in-memory flag and persists it so an app restart on battery
@@ -1004,6 +1000,40 @@ mod tests {
         app.pl_fields_primed = true;
         let _ = app.handle_cpu_power_message(&Message::CpuPowerDataRefreshed);
         assert!(!app.pl_fields_primed);
+    }
+
+    #[test]
+    fn profile_switch_is_due_only_for_a_known_different_source() {
+        use super::profile_switch_due;
+        assert!(profile_switch_due(None, Some(true), false));
+        assert!(profile_switch_due(Some(true), Some(false), false));
+        assert!(!profile_switch_due(Some(true), Some(true), false));
+        assert!(!profile_switch_due(None, None, false));
+        assert!(!profile_switch_due(None, Some(true), true));
+    }
+
+    #[test]
+    fn auto_retry_stops_after_three_failures_and_respects_backoff() {
+        use super::auto_retry_allowed;
+        assert!(auto_retry_allowed(0, 1000, 1000));
+        assert!(!auto_retry_allowed(0, 999, 1000));
+        assert!(auto_retry_allowed(2, 2000, 1000));
+        assert!(!auto_retry_allowed(3, 2000, 1000));
+    }
+
+    #[test]
+    fn mirror_match_has_a_small_tolerance() {
+        use super::mmio_matches_msr;
+        let mut info = CpuPowerInfo {
+            pl1_msr: 30.0,
+            pl1_mmio: 30.01,
+            pl2_msr: 60.0,
+            pl2_mmio: 59.99,
+            ..Default::default()
+        };
+        assert!(mmio_matches_msr(&info));
+        info.pl2_mmio = 60.2;
+        assert!(!mmio_matches_msr(&info));
     }
 
     #[test]
