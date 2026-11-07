@@ -2,9 +2,9 @@
 //!
 //! Split from `limits.rs` (F10): the register snapshot, limit params, and
 //! write-boundary constants are used by both the read side (`read.rs`) and
-//! the write side (`limits.rs`, `sync.rs`, `bios.rs`), so they live here and
+//! the write side (`limits/`, `sync.rs`, `bios.rs`), so they live here and
 //! both sides import from `super::types::`. Encoding, validation, and the
-//! write paths stay in `limits.rs`.
+//! write paths stay in `limits/`.
 
 use super::ffi::IoctlFailure;
 

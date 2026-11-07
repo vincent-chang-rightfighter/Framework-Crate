@@ -1,14 +1,7 @@
-//! MSR/MMIO power limit encoding, decoding and the write paths.
+//! Register encoding/decoding and read-back verification.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::debug;
-
-use super::bios::BiosDefaults;
-use super::ffi::{PawnioHandle, exec_ioctl, open_handle};
-use super::modules::load_intel_msr_blob;
-use super::types::{
-    CpuPowerInfo, LIMIT_MAX_TIME_S, LIMIT_MAX_WATTS, LIMIT_MIN_ENABLED_WATTS, PowerLimitParams,
-};
+use super::super::bios::BiosDefaults;
+use super::super::types::{CpuPowerInfo, PowerLimitParams};
 
 /// Whether a live readback differs from the persisted BIOS snapshot.
 ///
@@ -39,7 +32,10 @@ pub fn pl_limits_differ_from_bios(info: &CpuPowerInfo, bios: &BiosDefaults) -> b
 }
 
 /// Decodes power limit from raw 32-bit half.
-pub(super) fn decode_power_limit(raw_val: u64, unit: f64) -> (f64, bool, bool, u32, u32) {
+pub(in crate::cpu_power) fn decode_power_limit(
+    raw_val: u64,
+    unit: f64,
+) -> (f64, bool, bool, u32, u32) {
     let raw_bits = (raw_val & 0x7FFF) as f64;
     let enabled = (raw_val >> 15) & 1 == 1;
     let clamped = (raw_val >> 16) & 1 == 1;
@@ -50,20 +46,20 @@ pub(super) fn decode_power_limit(raw_val: u64, unit: f64) -> (f64, bool, bool, u
 }
 
 /// Decodes time window (2^Y * (1+Z/4) * Time_Unit).
-pub(super) fn decode_time_window(y: u32, z: u32, time_unit: f64) -> f64 {
+pub(in crate::cpu_power) fn decode_time_window(y: u32, z: u32, time_unit: f64) -> f64 {
     (1u64 << y) as f64 * (1.0 + z as f64 / 4.0) * time_unit
 }
 
 /// Decodes MSR_PKG_POWER_INFO (0x614) time-window bounds in seconds.
 /// Bits 54:48 and 62:56 are the max and min window; zero means unspecified.
-pub(super) fn decode_time_window_bounds(raw: u64) -> (Option<f64>, Option<f64>) {
+pub(in crate::cpu_power) fn decode_time_window_bounds(raw: u64) -> (Option<f64>, Option<f64>) {
     let max = ((raw >> 48) & 0x7F) as f64;
     let min = ((raw >> 56) & 0x7F) as f64;
     ((max > 0.0).then_some(max), (min > 0.0).then_some(min))
 }
 
 /// Encodes time window into Y and Z fields.
-fn encode_time_window(time_s: f64, time_unit: f64) -> (u32, u32) {
+pub(super) fn encode_time_window(time_s: f64, time_unit: f64) -> (u32, u32) {
     if time_unit <= 0.0 || time_s <= 0.0 {
         return (0, 0);
     }
@@ -77,7 +73,7 @@ fn encode_time_window(time_s: f64, time_unit: f64) -> (u32, u32) {
 }
 
 /// Encodes power limit into 32-bit register half.
-fn encode_power_limit(
+pub(super) fn encode_power_limit(
     watts: f64,
     enabled: bool,
     clamped: bool,
@@ -105,7 +101,7 @@ fn encode_power_limit(
 /// because the register can only hold a whole number of `power_unit` steps. If
 /// the request were compared directly, every limit that is not an exact
 /// multiple of the unit would look like a locked register.
-fn encoded_watts(encoded: u32, power_unit: f64) -> f64 {
+pub(super) fn encoded_watts(encoded: u32, power_unit: f64) -> f64 {
     ((encoded & 0x7FFF) as f64) * power_unit
 }
 
@@ -113,13 +109,13 @@ fn encoded_watts(encoded: u32, power_unit: f64) -> f64 {
 ///
 /// Floors at 0.25W so that a very small `power_unit` cannot turn ordinary
 /// quantisation into a false lock detection.
-fn readback_tolerance(power_unit: f64) -> f64 {
+pub(super) fn readback_tolerance(power_unit: f64) -> f64 {
     power_unit.max(0.25)
 }
 
 /// Whether a register read-back reflects the limits that were just written.
 #[derive(Debug, PartialEq)]
-enum Readback {
+pub(super) enum Readback {
     Matches,
     /// The write did not land. A BIOS-locked register keeps its previous
     /// value, and the enabled bit is cleared when a limit is disabled.
@@ -136,7 +132,7 @@ enum Readback {
 /// This is the BIOS-lock detection: it is the only thing standing between a
 /// silently ignored write and a UI that reports success, so it is kept pure
 /// and tested directly rather than only exercised through a real handle.
-fn classify_readback(
+pub(super) fn classify_readback(
     rb_raw: u64,
     pl1_enc: u32,
     pl2_enc: u32,
@@ -163,9 +159,7 @@ fn classify_readback(
     }
 }
 
-static TIME_CLAMP_WARNED: AtomicBool = AtomicBool::new(false);
-
-fn readback_time_clamp_mismatch(
+pub(super) fn readback_time_clamp_mismatch(
     rb_raw: u64,
     pl1_enc: u32,
     pl2_enc: u32,
@@ -188,7 +182,7 @@ fn readback_time_clamp_mismatch(
 /// A time-window mismatch that is safe to treat as a failed write: the request
 /// is inside the firmware-declared maximum, so the firmware had no legitimate
 /// reason to clamp it. Without 0x614 bounds, stay advisory.
-fn readback_time_mismatch(
+pub(super) fn readback_time_mismatch(
     rb_raw: u64,
     pl1_enc: u32,
     pl2_enc: u32,
@@ -215,335 +209,15 @@ fn readback_time_mismatch(
             && (rb2 - exp2).abs() > tolerance(exp2))
 }
 
-/// A register that PL1/PL2 can be written to.
-///
-/// MSR 0x610 and MCHBAR+0x59A0 differ only in these values, so the encoding,
-/// the read-back verification and the lock detection live in one place
-/// instead of being maintained twice.
-struct LimitTarget<'a> {
-    handle: &'a PawnioHandle,
-    address: u64,
-    write_ioctl: &'static str,
-    read_ioctl: &'static str,
-    /// "MSR" or "MMIO". Prefixes the result messages so a failure names the
-    /// register that was targeted.
-    label: &'static str,
-    /// Why the write ioctl failed. The two modules fail differently: the MSR
-    /// blob is usually missing outright, while the MCHBAR blob may load fine
-    /// and still not implement the qword write.
-    write_failed: &'static str,
-}
-
-/// RAPL units are 1/2^n with n in 0..=15, so the plausible range is narrow.
-pub(super) fn plausible_rapl_unit(unit: f64) -> bool {
-    unit.is_finite() && (1.0 / 32768.0..=1.0).contains(&unit)
-}
-
-/// Per-model PL ceiling (hard safety cap). 120W is the absolute ceiling
-/// for Desktop; smaller chassis get lower caps so a typo can't cook the
-/// VRM for minutes. Unknown models fall back to a safe 65W.
-pub fn max_watts_for_family(family: crate::cli::ec_wrapper::PlatformFamily) -> f64 {
-    match family {
-        crate::cli::ec_wrapper::PlatformFamily::Laptop12 => 40.0,
-        crate::cli::ec_wrapper::PlatformFamily::Laptop13 => 70.0,
-        crate::cli::ec_wrapper::PlatformFamily::Laptop16 => 100.0,
-        crate::cli::ec_wrapper::PlatformFamily::Desktop => 120.0,
-        crate::cli::ec_wrapper::PlatformFamily::Unknown => 65.0,
-    }
-}
-
-pub fn platform_max_watts() -> f64 {
-    // Detect once per validation (infrequent: UI apply, sync start,
-    // BIOS load). No plumbing needed through every caller.
-    max_watts_for_family(crate::cli::ec_wrapper::detect_platform())
-}
-
-/// Rejects non-finite, negative, or out-of-range limit values before encoding.
-///
-/// `NaN as u32` is 0, so without this gate a NaN would encode as a 0W
-/// enabled limit and hard-throttle the CPU. Upper bound is a Framework-safe
-/// cap (120W covers all current boards with headroom; 1024W would let a
-/// typo cook the VRM): beyond the 15-bit RAPL field the encoder silently
-/// clamps, which then surfaces as a confusing read-back mismatch. Zero
-/// stays allowed for a disabled limit, but an enabled 0W limit is rejected
-/// (it would hard-throttle to a hang). PL1 must not exceed PL2 (RAPL
-/// behavior is undefined otherwise). Kept pure and unit-tested; this is
-/// the last line of defense at the write boundary for UI, BIOS-restore,
-/// and sync paths.
-pub fn validate_limit_params(params: &PowerLimitParams) -> Result<(), String> {
-    for (name, v) in [
-        ("power_unit", params.power_unit),
-        ("time_unit", params.time_unit),
-        ("PL1 watts", params.pl1_watts),
-        ("PL2 watts", params.pl2_watts),
-        ("PL1 time", params.pl1_time_s),
-        ("PL2 time", params.pl2_time_s),
-    ] {
-        if !v.is_finite() {
-            return Err(format!("invalid {name}: not finite ({v})"));
-        }
-        if v < 0.0 {
-            return Err(format!("invalid {name}: negative ({v})"));
-        }
-    }
-    for (name, v) in [
-        ("power_unit", params.power_unit),
-        ("time_unit", params.time_unit),
-    ] {
-        if !plausible_rapl_unit(v) {
-            return Err(format!("invalid {name}: implausible RAPL unit ({v})"));
-        }
-    }
-    validate_limit_values(params)
-}
-
-/// Range and order rules for PL watts/time, shared by the write path and the
-/// UI pre-check so the two verdicts cannot drift apart.
-///
-/// Units are intentionally excluded: they come from the live snapshot, and
-/// the UI must stay usable before the first successful read (unit checks
-/// stay in `validate_limit_params`, which always runs before encoding).
-pub fn validate_limit_values(params: &PowerLimitParams) -> Result<(), String> {
-    // Self-sufficient like the write path: the UI feeds snapshot-derived
-    // PL2 time/units that may be garbage before the first read, so every
-    // field this helper judges is finite/negative-checked here (idempotent
-    // under `validate_limit_params`, which already checked them above).
-    for (name, v) in [
-        ("PL1 watts", params.pl1_watts),
-        ("PL2 watts", params.pl2_watts),
-        ("PL1 time", params.pl1_time_s),
-        ("PL2 time", params.pl2_time_s),
-    ] {
-        if !v.is_finite() {
-            return Err(format!("invalid {name}: not finite ({v})"));
-        }
-        if v < 0.0 {
-            return Err(format!("invalid {name}: negative ({v})"));
-        }
-    }
-    for (name, v) in [
-        ("PL1 watts", params.pl1_watts),
-        ("PL2 watts", params.pl2_watts),
-    ] {
-        if v > LIMIT_MAX_WATTS {
-            return Err(format!("invalid {name}: exceeds {LIMIT_MAX_WATTS}W ({v})"));
-        }
-    }
-    // Per-model ceiling: a 13" typo at 120W would cook the VRM long before
-    // PROCHOT saves it. The absolute cap above is the Desktop ceiling.
-    {
-        let model_max = platform_max_watts();
-        for (name, v) in [
-            ("PL1 watts", params.pl1_watts),
-            ("PL2 watts", params.pl2_watts),
-        ] {
-            if v > model_max {
-                return Err(format!(
-                    "invalid {name}: exceeds this model ({v}W > {model_max}W)"
-                ));
-            }
-        }
-    }
-    for (name, v, enabled) in [
-        ("PL1 time", params.pl1_time_s, params.pl1_enabled),
-        ("PL2 time", params.pl2_time_s, params.pl2_enabled),
-    ] {
-        if v > LIMIT_MAX_TIME_S {
-            return Err(format!("invalid {name}: exceeds {LIMIT_MAX_TIME_S}s ({v})"));
-        }
-        if enabled && v <= 0.0 {
-            return Err(format!(
-                "invalid {name}: enabled limit requires a positive time window ({v})"
-            ));
-        }
-    }
-    // An enabled 0W (or near-zero) limit hard-throttles the CPU into an
-    // apparent hang; require a floor for enabled limits.
-    if params.pl1_enabled && params.pl1_watts < LIMIT_MIN_ENABLED_WATTS {
-        return Err(format!(
-            "invalid PL1 watts: enabled limit must be >= {LIMIT_MIN_ENABLED_WATTS}W ({}W)",
-            params.pl1_watts
-        ));
-    }
-    if params.pl2_enabled && params.pl2_watts < LIMIT_MIN_ENABLED_WATTS {
-        return Err(format!(
-            "invalid PL2 watts: enabled limit must be >= {LIMIT_MIN_ENABLED_WATTS}W ({}W)",
-            params.pl2_watts
-        ));
-    }
-    if params.pl1_enabled && params.pl2_enabled && params.pl1_watts > params.pl2_watts {
-        return Err(format!(
-            "invalid PL1/PL2: PL1 ({}W) must not exceed PL2 ({}W)",
-            params.pl1_watts, params.pl2_watts
-        ));
-    }
-    Ok(())
-}
-
-/// Encodes PL1/PL2, writes them to `target`, then verifies the write landed.
-fn write_power_limits(target: &LimitTarget<'_>, params: &PowerLimitParams) -> Result<(), String> {
-    validate_limit_params(params)?;
-    if params.power_unit <= 0.0 || params.time_unit <= 0.0 {
-        return Err("invalid RAPL units (power_unit or time_unit is zero)".to_string());
-    }
-    let (pl1_y, pl1_z) = encode_time_window(params.pl1_time_s, params.time_unit);
-    let (pl2_y, pl2_z) = encode_time_window(params.pl2_time_s, params.time_unit);
-
-    let pl1_enc = encode_power_limit(
-        params.pl1_watts,
-        params.pl1_enabled,
-        params.pl1_clamped,
-        params.power_unit,
-        pl1_y,
-        pl1_z,
-    );
-    let pl2_enc = encode_power_limit(
-        params.pl2_watts,
-        params.pl2_enabled,
-        params.pl2_clamped,
-        params.power_unit,
-        pl2_y,
-        pl2_z,
-    );
-
-    let new_val = ((pl2_enc as u64) << 32) | (pl1_enc as u64);
-
-    let mut inp = [0u64; 2];
-    inp[0] = target.address;
-    inp[1] = new_val;
-    let mut out2 = [0u64; 1];
-    exec_ioctl(target.handle, target.write_ioctl, &inp, &mut out2)
-        .map_err(|_| target.write_failed.to_string())?;
-
-    // Verify the write landed by re-reading the register. The CPU silently
-    // drops the write when the limit is BIOS-locked.
-    let mut rb_out = [0u64; 1];
-    exec_ioctl(
-        target.handle,
-        target.read_ioctl,
-        &[target.address],
-        &mut rb_out,
-    )
-    .map_err(|_| format!("{} write succeeded but read-back failed", target.label))?;
-
-    if let Readback::Mismatch {
-        pl1_watts,
-        pl1_enabled,
-        pl2_watts,
-        pl2_enabled,
-    } = classify_readback(rb_out[0], pl1_enc, pl2_enc, params)
-    {
-        debug!(
-            "{} read-back mismatch: wrote PL1={:.2}W(en={}) PL2={:.2}W(en={}), read PL1={:.2}W(en={}) PL2={:.2}W(en={})",
-            target.label,
-            encoded_watts(pl1_enc, params.power_unit),
-            params.pl1_enabled,
-            encoded_watts(pl2_enc, params.power_unit),
-            params.pl2_enabled,
-            pl1_watts,
-            pl1_enabled,
-            pl2_watts,
-            pl2_enabled
-        );
-        return Err(format!(
-            "{} write not reflected in read-back — register may be locked",
-            target.label
-        ));
-    }
-
-    if readback_time_mismatch(rb_out[0], pl1_enc, pl2_enc, params) {
-        return Err(format!(
-            "{} time window not reflected in read-back — firmware may be clamping it",
-            target.label
-        ));
-    }
-
-    if readback_time_clamp_mismatch(rb_out[0], pl1_enc, pl2_enc, params)
-        && !TIME_CLAMP_WARNED.swap(true, Ordering::Relaxed)
-    {
-        tracing::warn!(
-            "{} time/clamp fields differ from the request; firmware may clamp the time window",
-            target.label
-        );
-    }
-
-    debug!(
-        "{} PL1/PL2 written: PL1={:.1}W({:.1}s) PL2={:.1}W({:.1}s) raw=0x{:016X}",
-        target.label,
-        params.pl1_watts,
-        params.pl1_time_s,
-        params.pl2_watts,
-        params.pl2_time_s,
-        new_val
-    );
-    Ok(())
-}
-
-/// Writes MSR_PKG_POWER_LIMIT (0x610) via IntelMSR.
-pub(super) fn write_msr_pl1_pl2(
-    msr_handle: &PawnioHandle,
-    params: &PowerLimitParams,
-) -> Result<(), String> {
-    write_power_limits(
-        &LimitTarget {
-            handle: msr_handle,
-            address: 0x610, // MSR_PKG_POWER_LIMIT
-            write_ioctl: "ioctl_write_msr",
-            read_ioctl: "ioctl_read_msr",
-            label: "MSR",
-            write_failed: "ioctl_write_msr failed — is IntelMSR module loaded?",
-        },
-        params,
-    )
-}
-
-/// Writes MSR 0x610 (opens IntelMSR handle internally).
-pub fn write_msr_pl1_pl2_public(params: PowerLimitParams) -> Result<(), String> {
-    let msr_blob = load_intel_msr_blob()?;
-    let msr_handle = open_handle(&msr_blob)?;
-    write_msr_pl1_pl2(&msr_handle, &params)
-}
-
-/// Restores the MSR halves of the persisted BIOS snapshot.
-///
-/// The official IntelMCHBAR module exposes only read ioctls, so the MMIO
-/// mirror (MCHBAR+0x59A0) cannot be written without a custom module. Reset
-/// therefore restores MSR only; the UI states this explicitly.
-pub fn write_bios_defaults(bios: &BiosDefaults) -> Result<(), String> {
-    let (power_unit, time_unit) = super::read::read_rapl_units()?;
-    write_msr_pl1_pl2_public(PowerLimitParams {
-        pl1_watts: bios.pl1_watts,
-        pl1_enabled: bios.pl1_enabled,
-        pl1_clamped: bios.pl1_clamped,
-        pl1_time_s: bios.pl1_time_s,
-        pl2_watts: bios.pl2_watts,
-        pl2_enabled: bios.pl2_enabled,
-        pl2_clamped: bios.pl2_clamped,
-        pl2_time_s: bios.pl2_time_s,
-        max_time_s: None,
-        power_unit,
-        time_unit,
-    })
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::super::bios::BiosDefaults;
     use super::*;
 
     /// 0.125W per RAPL power unit step, the value the About panel reads back
     /// from the CPU. 0.9765625us per time unit step.
     const POWER_UNIT: f64 = 0.125;
     const TIME_UNIT: f64 = 0.0009765625;
-
-    #[test]
-    fn laptop12_core3_keeps_the_laptop12_watt_cap() {
-        use crate::cli::ec_wrapper::PlatformFamily;
-        assert_eq!(max_watts_for_family(PlatformFamily::Laptop12), 40.0);
-        assert_eq!(max_watts_for_family(PlatformFamily::Laptop13), 70.0);
-        assert_eq!(max_watts_for_family(PlatformFamily::Laptop16), 100.0);
-        assert_eq!(max_watts_for_family(PlatformFamily::Desktop), 120.0);
-        assert_eq!(max_watts_for_family(PlatformFamily::Unknown), 65.0);
-    }
 
     fn params(pl1_watts: f64, pl2_watts: f64) -> PowerLimitParams {
         PowerLimitParams {
@@ -558,103 +232,6 @@ mod tests {
             max_time_s: None,
             power_unit: POWER_UNIT,
             time_unit: TIME_UNIT,
-        }
-    }
-
-    #[test]
-    fn validate_limit_params_rejects_non_finite_and_negative() {
-        // Baseline 30/35W passes on every model (min per-model cap is 40W).
-        assert!(validate_limit_params(&params(30.0, 35.0)).is_ok());
-        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
-            let mut p = params(30.0, 35.0);
-            p.pl1_watts = bad;
-            assert!(validate_limit_params(&p).is_err(), "pl1={bad}");
-            let mut p = params(30.0, 35.0);
-            p.pl2_time_s = bad;
-            assert!(validate_limit_params(&p).is_err(), "pl2_time={bad}");
-        }
-        let mut p = params(30.0, 35.0);
-        p.power_unit = f64::NAN;
-        assert!(validate_limit_params(&p).is_err());
-    }
-
-    #[test]
-    fn validate_limit_params_rejects_over_ui_caps() {
-        let mut p = params(30.0, 35.0);
-        p.pl1_watts = LIMIT_MAX_WATTS + 1.0;
-        assert!(validate_limit_params(&p).is_err());
-        let mut p = params(30.0, 35.0);
-        p.pl2_watts = LIMIT_MAX_WATTS + 1.0;
-        assert!(validate_limit_params(&p).is_err());
-        let mut p = params(30.0, 35.0);
-        p.pl1_time_s = LIMIT_MAX_TIME_S + 1.0;
-        assert!(validate_limit_params(&p).is_err());
-        let mut p = params(30.0, 35.0);
-        p.pl2_time_s = LIMIT_MAX_TIME_S + 1.0;
-        assert!(validate_limit_params(&p).is_err());
-        // Zero stays allowed for a disabled limit.
-        let mut p = params(30.0, 35.0);
-        p.pl1_watts = 0.0;
-        p.pl1_enabled = false;
-        assert!(validate_limit_params(&p).is_ok());
-    }
-
-    #[test]
-    fn limit_values_ignores_units_but_params_does_not() {
-        // Same watts/time verdict with zeroed units: the UI must stay usable
-        // before the first successful RAPL read, while the write path still
-        // refuses to encode without plausible units.
-        let mut p = params(30.0, 35.0);
-        p.power_unit = 0.0;
-        p.time_unit = 0.0;
-        assert!(validate_limit_values(&p).is_ok());
-        assert!(validate_limit_params(&p).is_err());
-    }
-
-    #[test]
-    fn limit_values_matches_params_verdict_when_units_valid() {
-        // With sane units the two verdicts coincide, so tightening one side
-        // cannot silently reopen the other.
-        let watts = [
-            0.0,
-            -1.0,
-            1.0,
-            4.9,
-            5.0,
-            30.0,
-            119.0,
-            120.0,
-            121.0,
-            1000.0,
-            f64::NAN,
-            f64::INFINITY,
-        ];
-        let times = [0.0, -1.0, 28.0, 120.0, 121.0, f64::NAN];
-        for &pl1 in &watts {
-            for &pl2 in &watts {
-                for &t1 in &times {
-                    for enabled in [false, true] {
-                        let p = PowerLimitParams {
-                            pl1_watts: pl1,
-                            pl1_enabled: enabled,
-                            pl1_clamped: false,
-                            pl1_time_s: t1,
-                            pl2_watts: pl2,
-                            pl2_enabled: enabled,
-                            pl2_clamped: false,
-                            pl2_time_s: 28.0,
-                            max_time_s: None,
-                            power_unit: POWER_UNIT,
-                            time_unit: TIME_UNIT,
-                        };
-                        assert_eq!(
-                            validate_limit_values(&p).is_ok(),
-                            validate_limit_params(&p).is_ok(),
-                            "diverged for {p:?}"
-                        );
-                    }
-                }
-            }
         }
     }
 
@@ -731,16 +308,6 @@ mod tests {
         assert_eq!(decode_time_window_bounds(raw), (Some(28.0), Some(1.0)));
         assert_eq!(decode_time_window_bounds(0), (None, None));
         assert_eq!(decode_time_window_bounds(28u64 << 48), (Some(28.0), None));
-    }
-
-    #[test]
-    fn validate_limit_params_allows_time_above_reported_firmware_max() {
-        // Some firmware reports a smaller 0x614 max than the BIOS itself uses
-        // (18s reported while the factory PL1 window is 28s), so the field is
-        // not a hard write bound. It only gates strict read-back checks.
-        let mut p = params(30.0, 35.0);
-        p.max_time_s = Some(18.0);
-        assert!(validate_limit_params(&p).is_ok());
     }
 
     #[test]
@@ -1045,56 +612,5 @@ mod tests {
             },
             &bios
         ));
-    }
-}
-
-#[cfg(test)]
-mod unit_bounds_tests {
-    use super::*;
-
-    fn params() -> PowerLimitParams {
-        PowerLimitParams {
-            pl1_watts: 30.0,
-            pl1_enabled: true,
-            pl1_clamped: false,
-            pl1_time_s: 28.0,
-            pl2_watts: 35.0,
-            pl2_enabled: true,
-            pl2_clamped: false,
-            pl2_time_s: 28.0,
-            max_time_s: None,
-            power_unit: 0.125,
-            time_unit: 0.0009765625,
-        }
-    }
-
-    #[test]
-    fn enabled_limits_require_a_positive_time_window() {
-        let mut p = params();
-        p.pl1_time_s = 0.0;
-        assert!(validate_limit_params(&p).is_err());
-        let mut p = params();
-        p.pl2_time_s = 0.0;
-        assert!(validate_limit_params(&p).is_err());
-        let mut p = params();
-        p.pl1_time_s = 0.0;
-        p.pl1_enabled = false;
-        assert!(validate_limit_params(&p).is_ok());
-        let mut p = params();
-        p.pl2_time_s = 0.0;
-        p.pl2_enabled = false;
-        assert!(validate_limit_params(&p).is_ok());
-    }
-
-    #[test]
-    fn implausible_rapl_units_are_rejected() {
-        for bad in [0.0, 1e-9, 1.5, 2.0] {
-            let mut p = params();
-            p.power_unit = bad;
-            assert!(validate_limit_params(&p).is_err(), "power_unit={bad}");
-            let mut p = params();
-            p.time_unit = bad;
-            assert!(validate_limit_params(&p).is_err(), "time_unit={bad}");
-        }
     }
 }
