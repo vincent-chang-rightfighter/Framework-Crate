@@ -125,12 +125,19 @@ src/
     io.rs              — Load, versioned save, atomic replace, corrupt backup
     strict.rs          — Strict import/export, unknown-field rejection, machine check
   config_save_task.rs  — Debounced config save (100ms) and applies battery settings
-  background_task.rs   — EC polling loop, fan control, expansion/PD scans
+  background_task/     — EC polling loop, fan control, expansion/PD scans
+    mod.rs             — Spawn loop, refresh_all_data, shared constants
+    helpers.rs         — Idle, AC transition, PD history, thermal sampling helpers
+    fan_ctx.rs         — Per-round fan context and firmware handover
+    poll/              — Eight poll phases split by concern (EC/thermal/resume/scans/fan/CPU)
   cpu_power/           — CPU power (PL1/PL2) via PawnIO, split by concern
     mod.rs             — CpuPowerState and the public forwarding surface
     types.rs           — Shared currency types (info, params, limits) for read and write sides
     modules.rs         — PawnIO Modules download, hashing, extraction, install
-    limits.rs          — PL1/PL2 encoding, writes, reset to BIOS defaults
+    limits/            — PL1/PL2 register encoding, validation, and writes
+      decode.rs        — Register encode/decode and read-back verification
+      validate.rs      — RAPL unit and power/time range validation
+      write.rs         — MSR write path and BIOS-default restore
     ffi.rs             — PawnIOLib.dll binding and RAPL register access
     sync.rs            — Periodic PL1/PL2 re-assert (5 min keepalive)
     bios.rs            — Factory default capture and persistence
@@ -185,9 +192,9 @@ Measured on `target/release/framework-crate.exe` (Windows, `iced 0.14 + wgpu`, `
 
 | Metric | Value |
 |--------|-------|
-| Working Set | ~161 MB |
+| Working Set | ~158 MB |
 | Private (commit charge) | ~118 MB |
-| Binary Size | ~8.4 MiB |
+| Binary Size | ~9.3 MiB |
 
 Working Set is what Task Manager's Processes **Memory** column shows. To reproduce:
 
